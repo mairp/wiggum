@@ -43,7 +43,7 @@ RALPH = r"""
         -zNNNNNNNNNNz+;;*NNNNNNNNNNNNN+-:;===+z++*;~;;.
 """.strip("\n").split("\n")
 
-TITLE   = "The Autonomous Ralph Wiggun Loop"
+TITLE   = "The Autonomous Ralph Wiggum Loop"
 CAPTION = "ME FAIL SPEC?  THAT IS UNPOSSIBLE."   # Ralph-voice nod to the Burns caption
 
 # ── Springfield palette (truecolor) ─────────────────────────────────────────────

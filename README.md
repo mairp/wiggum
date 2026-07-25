@@ -9,9 +9,15 @@ you only arbitrate the phases the machines genuinely can't settle.
 
 The deterministic-loop approach — automating software development by running a
 coding agent in a repeating, self-checking loop — is the **"Ralph" technique**
-coined by [Geoffrey Huntley](https://ghuntley.com/). Wiggum is one concrete
-implementation: it adds an automated critic gate so nothing advances until the
-work is verified.
+coined by [Geoffrey Huntley](https://ghuntley.com/). Wiggum is **my own
+implementation and interpretation** of it: I arrived at this shape the hard way,
+by running the loop *painfully by hand* — driving a coding agent phase by phase
+and then sitting in the inner loop myself, eyeballing each phase's evidence and
+hand-approving the gate before letting the next phase start. Doing that approval
+step manually, over and over, is exactly the toil Wiggum removes: it adds an
+**automated critic gate** in the seat I used to occupy, so nothing advances until
+the work is verified — and I only step back in for the phases the machines
+genuinely can't settle.
 
 ## The cast
 
