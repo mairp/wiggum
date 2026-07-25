@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# wiggum — the small debug/inspection CLI for a Wiggum run.
+#
+#   wiggum status    [-w DIR] [-s SPEC]  one-screen state (run state, phases, files)
+#   wiggum watch     [-w DIR]            live status card (mini-TUI; Ctrl-C detaches)
+#   wiggum tail      [-w DIR]            tail -f the orchestrator run.log (raw log)
+#   wiggum events    [-w DIR] [-f] [--json]  the raw event stream ("RPC view"):
+#                                        every milestone + agent tool call/message
+#   wiggum verdicts  [-w DIR] [N]        dump critic reply(ies) (prompt+resp+parse)
+#   wiggum feedback   <N> [-w DIR]       show GATE<N>-FEEDBACK.md
+#   wiggum phases    [-w DIR] [-s SPEC]  list phases parsed from the spec + state
+#   wiggum stop      [-w DIR] [--now]    request a clean stop (MUTATES: writes
+#                                        stop.flag; --now also kills the in-flight
+#                                        agent pass). Rerun/resume picks up after.
+#   wiggum resume    [-w DIR] [overrides…]  relaunch the orchestrator from the
+#                                        saved config of the last run (MUTATES).
+#
+# All other subcommands are read-only. -w points at the project workdir (default:
+# $PWD); -s at its spec file (default: <workdir>/SPECS.md). See orchestrator.sh --help.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$SCRIPT_DIR/lib"          # Python components live here
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/wiggum-lib.sh"
+
+usage() {
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# parse: subcommand, optional -w DIR / -s SPEC, flags, and pass-through extras
+SUB="${1:-}"; shift || true
+LAUNCH_DIR="$PWD"
+WORKDIR="$PWD"
+SPECS=""
+FOLLOW="false"
+JSON_OUT="false"
+NOW="false"
+EXTRA=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -w|--workdir) WORKDIR="${2:?}"; shift 2 ;;
+    -s|--specs)   SPECS="${2:?}"; shift 2 ;;
+    -f|--follow)  FOLLOW="true"; shift ;;
+    --json)       JSON_OUT="true"; shift ;;
+    --now)        NOW="true"; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    *)            EXTRA+=("$1"); shift ;;
+  esac
+done
+POS="${EXTRA[0]:-}"
+
+# Resolve a relative -s against the launch dir (before we lose it), same rule as
+# orchestrator.sh, so `wiggum status -s ./ROADMAP.md` works from anywhere.
+if [[ -n "$SPECS" ]]; then
+  case "$SPECS" in /*) : ;; *) SPECS="$LAUNCH_DIR/$SPECS" ;; esac
+fi
+WORKDIR="$(cd "$WORKDIR" 2>/dev/null && pwd || echo "$WORKDIR")"
+STATE_DIR="$WORKDIR/.wiggum"
+# All gate files + PROGRESS.md live here (out of the project root).
+GATES_DIR="$STATE_DIR/gates"
+SPECS="${SPECS:-$WORKDIR/SPECS.md}"
+
+need_state() { [[ -d "$STATE_DIR" ]] || { echo "no .wiggum/ state dir in $WORKDIR" >&2; exit 1; }; }
+
+# True when an orchestrator currently holds the run lock on this workdir.
+lock_held() {
+  if command -v flock >/dev/null 2>&1; then
+    [[ -e "$STATE_DIR/lock" ]] || return 1
+    ! flock -n "$STATE_DIR/lock" -c true 2>/dev/null
+  else
+    [[ -d "$STATE_DIR/lock.d" ]]
+  fi
+}
+
+# TERM a process and all its descendants (used by `stop --now`).
+kill_tree() {
+  local p
+  for p in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$p"; done
+  kill -TERM "$1" 2>/dev/null || true
+}
+
+case "$SUB" in
+  status)
+    need_state
+    echo "wiggum status — $WORKDIR"
+    # run-state headline: RUNNING / STOPPED / HALTED / DONE
+    if lock_held; then
+      owner="$(head -c 200 "$STATE_DIR/lock" 2>/dev/null | head -1)"
+      echo "  state: RUNNING${owner:+ ($owner)}"
+    elif [[ -f "$STATE_DIR/events.jsonl" ]]; then
+      python3 - "$STATE_DIR/events.jsonl" <<'PYEOF'
+import json, sys
+last = None
+try:
+    for line in open(sys.argv[1]):
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if o.get("event") in ("run_stop", "run_end"):
+            last = o
+except OSError:
+    pass
+if last is None:
+    print("  state: not running (no clean end recorded — crashed or never finished a run)")
+elif last["event"] == "run_end":
+    print("  state: DONE — %s" % last.get("outcome", "?"))
+else:
+    r, ph = last.get("reason", "?"), last.get("phase", "?")
+    if r == "stop_flag":
+        print("  state: STOPPED at phase %s — resume with: wiggum resume" % ph)
+    elif r == "max_rejects":
+        print("  state: HALTED at phase %s — needs human (max-rejects exceeded)" % ph)
+    else:
+        print("  state: HALTED at phase %s — %s" % (ph, r))
+PYEOF
+    else
+      echo "  state: no run recorded yet"
+    fi
+    if [[ -f "$SPECS" ]]; then
+      echo
+      printf "  %-6s %-28s %-8s %-8s %-8s\n" "PHASE" "TITLE" "EVIDENCE" "APPROVED" "FEEDBACK"
+      printf "  %-6s %-28s %-8s %-8s %-8s\n" "-----" "----------------------------" "--------" "--------" "--------"
+      while read -r n; do
+        [[ -z "$n" ]] && continue
+        title="$(wiggum_spec_phase_title "$SPECS" "$n")"
+        ev="✗"; [[ -f "$GATES_DIR/GATE${n}-EVIDENCE.md" ]] && ev="✓"
+        ap="✗"; [[ -f "$GATES_DIR/GATE${n}-APPROVED" ]] && ap="✓"
+        fb="✗"; [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && fb="✓"
+        printf "  %-6s %-28.28s %-8s %-8s %-8s\n" "$n" "$title" "$ev" "$ap" "$fb"
+      done < <(wiggum_spec_phase_numbers "$SPECS")
+      cur="$(wiggum_spec_first_unapproved "$SPECS" "$WORKDIR")"
+      echo
+      echo "  current phase: ${cur:-<all approved>}"
+    else
+      echo "  (no SPECS.md found)"
+    fi
+    # last milestones from events (high-frequency agent_* noise filtered out)
+    if [[ -f "$STATE_DIR/events.jsonl" ]]; then
+      echo "  last events:"
+      tail -n 200 "$STATE_DIR/events.jsonl" 2>/dev/null | python3 -c '
+import sys, json
+keep = []
+for line in sys.stdin:
+    try: o=json.loads(line)
+    except Exception: continue
+    if o.get("event","").startswith(("agent_","iter_")): continue
+    keep.append(o)
+for o in keep[-5:]:
+    print("    %s  %s  %s" % (o.get("time","")[-8:] if o.get("time") else "",
+        o.get("event",""), " ".join("%s=%s"%(k,v) for k,v in o.items()
+        if k not in ("time","ts","event","task","backend","run_id"))))
+' 2>/dev/null || true
+    fi
+    ;;
+
+  tail)
+    need_state
+    LOG="$STATE_DIR/run.log"
+    [[ -f "$LOG" ]] || { echo "no run.log yet in $STATE_DIR" >&2; exit 1; }
+    exec tail -f "$LOG"
+    ;;
+
+  events)
+    need_state
+    EV="$STATE_DIR/events.jsonl"
+    [[ -e "$EV" ]] || { echo "no events.jsonl yet in $STATE_DIR" >&2; exit 1; }
+    args=( --events "$EV" )
+    [[ "$FOLLOW" == "true" ]] && args+=( --follow )
+    if [[ "$JSON_OUT" == "true" ]]; then
+      exec python3 "$LIB_DIR/present.py" "${args[@]}" --quiet
+    fi
+    exec python3 "$LIB_DIR/present.py" "${args[@]}" --mode plain
+    ;;
+
+  verdicts)
+    need_state
+    VD="$STATE_DIR/verdicts"
+    [[ -d "$VD" ]] || { echo "no verdicts recorded yet ($VD)" >&2; exit 1; }
+    if [[ -n "$POS" ]]; then
+      shopt -s nullglob
+      files=("$VD/phase${POS}."*.txt)
+      shopt -u nullglob
+      [[ ${#files[@]} -gt 0 ]] || { echo "no verdicts for phase $POS" >&2; exit 1; }
+    else
+      shopt -s nullglob
+      files=("$VD"/*.txt)
+      shopt -u nullglob
+    fi
+    for f in "${files[@]}"; do
+      echo "════════════════════════════════════════════════════════════════"
+      echo "# $f"
+      echo "════════════════════════════════════════════════════════════════"
+      cat "$f"
+      echo
+    done
+    ;;
+
+  feedback)
+    [[ -n "$POS" ]] || { echo "usage: wiggum feedback <N> [-w DIR]" >&2; exit 1; }
+    FB="$GATES_DIR/GATE${POS}-FEEDBACK.md"
+    [[ -f "$FB" ]] || { echo "no feedback for phase $POS ($FB)" >&2; exit 1; }
+    cat "$FB"
+    ;;
+
+  watch)
+    need_state
+    exec python3 "$LIB_DIR/present.py" --workdir "$WORKDIR" --mode card
+    ;;
+
+  phases)
+    [[ -f "$SPECS" ]] || { echo "no SPECS.md in $WORKDIR" >&2; exit 1; }
+    if ! cnt="$(wiggum_spec_validate "$SPECS" 2>/tmp/wiggum-spec-err)"; then
+      echo "SPEC INVALID:"; cat /tmp/wiggum-spec-err; rm -f /tmp/wiggum-spec-err; exit 3
+    fi
+    rm -f /tmp/wiggum-spec-err
+    echo "$SPECS — $cnt phase(s):"
+    while read -r n; do
+      [[ -z "$n" ]] && continue
+      title="$(wiggum_spec_phase_title "$SPECS" "$n")"
+      state="pending"
+      [[ -f "$GATES_DIR/GATE${n}-EVIDENCE.md" ]] && state="evidence-written"
+      [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && state="rejected(has-feedback)"
+      [[ -f "$GATES_DIR/GATE${n}-APPROVED" ]] && state="APPROVED"
+      printf "  Phase %-3s %-40.40s [%s]\n" "$n" "$title" "$state"
+    done < <(wiggum_spec_phase_numbers "$SPECS")
+    ;;
+
+  stop)
+    need_state
+    if ! lock_held; then
+      echo "wiggum stop: no run appears to be active on $WORKDIR (lock is free)." >&2
+      echo "             writing stop.flag anyway (a starting run will honor it)." >&2
+    fi
+    touch "$STATE_DIR/stop.flag"
+    echo "stop requested → $STATE_DIR/stop.flag"
+    if [[ "$NOW" == "true" ]]; then
+      PIDF="$STATE_DIR/proposer.pid"
+      if [[ -f "$PIDF" ]]; then
+        pid="$(cat "$PIDF" 2>/dev/null)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+          kill_tree "$pid"
+          echo "killed in-flight agent pass (pid $pid + descendants)"
+        else
+          echo "recorded pass (pid ${pid:-?}) is not running — nothing to kill"
+        fi
+      else
+        echo "no in-flight pass recorded ($PIDF missing) — flag-only stop"
+      fi
+      echo "the run will exit 6 (clean stop) momentarily; resume with: wiggum resume -w $WORKDIR"
+    else
+      echo "the run finishes its current pass, then exits 6 (clean stop)."
+      echo "resume later with: wiggum resume -w $WORKDIR   (or stop harder: wiggum stop --now)"
+    fi
+    ;;
+
+  resume)
+    need_state
+    CONF="$STATE_DIR/last-run.conf"
+    [[ -f "$CONF" ]] || { echo "wiggum resume: no $CONF — launch the run once via orchestrator.sh first." >&2; exit 1; }
+    if lock_held; then
+      echo "wiggum resume: a run is already ACTIVE on $WORKDIR (lock held) — nothing to resume." >&2
+      exit 1
+    fi
+    # shellcheck source=/dev/null
+    . "$CONF"
+    [[ -n "${ORCHESTRATOR:-}" && -f "$ORCHESTRATOR" ]] || ORCHESTRATOR="$SCRIPT_DIR/orchestrator.sh"
+    args=( -w "$WORKDIR" -s "$SPECS"
+           --proposer "$PROPOSER_BACKEND" --critic "$CRITIC_BACKEND"
+           --max-rejects "$MAX_REJECTS" --max-iter "$MAX_ITER" )
+    [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )
+    # anything extra passed to `wiggum resume` overrides the saved config
+    # (orchestrator parses flags last-wins).
+    args+=( "${EXTRA[@]}" )
+    echo "resuming: $ORCHESTRATOR ${args[*]}"
+    exec bash "$ORCHESTRATOR" "${args[@]}"
+    ;;
+
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    echo "wiggum: unknown subcommand '$SUB'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

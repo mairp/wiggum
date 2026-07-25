@@ -1,0 +1,48 @@
+# Wiggum OPTIONAL telemetry stack — self-contained Loki + Grafana with the
+# "Ralph Loops" dashboard pre-provisioned. Off by default; only relevant when you
+# run the orchestrator with --telemetry.
+#
+# This is a NEW, INDEPENDENT deployment. It binds ports that are free on this
+# machine (the host's own observability stack already uses :3000 Grafana /
+# :3100 Loki), so the defaults below deliberately avoid them. Every port is an
+# .env variable — a collision is a one-line change.
+#
+#   cd telemetry && docker compose up -d
+#   open http://localhost:${WIGGUM_GRAFANA_PORT:-3010}   (anonymous, Admin)
+#   ./orchestrator.sh --telemetry --loki-url http://localhost:${WIGGUM_LOKI_PORT:-3110} ...
+#   docker compose down            # stop; add -v to wipe volumes
+
+name: wiggum-telemetry
+
+services:
+  loki:
+    image: grafana/loki:3.1.1
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "${WIGGUM_LOKI_PORT:-3110}:3100"
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "${WIGGUM_GRAFANA_PORT:-3010}:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_USERS_DEFAULT_THEME: "dark"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+volumes:
+  loki-data:
+  grafana-data:

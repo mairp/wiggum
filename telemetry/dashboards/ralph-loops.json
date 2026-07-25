@@ -1,0 +1,811 @@
+{
+  "uid": "ralph-loops",
+  "title": "Ralph Loops (Claude Code)",
+  "tags": [
+    "ai",
+    "claude-code",
+    "ralph"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Autonomous Claude Code **Ralph loops** (`utilities/ralph_loop.sh --stream-json`). Each iteration is a fresh headless `claude` run; this dashboard tracks cost, tokens, tool use, iteration duration and gate outcomes per run. Use the **task** variable to focus one loop. Data is the persistent Loki event stream (`job=\"ralph\"`) over the time range."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Runs",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"run_start\", task=~\"$task\"} [$__range]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Iterations",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"iter_start\", task=~\"$task\"} [$__range]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Cost (range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cost_usd [$__range]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Output tokens",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap output_tokens [$__range]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Tool calls",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"tool_use\", task=~\"$task\"} [$__range]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Errored requests",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 3
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | is_error=\"true\" [$__range]))",
+          "queryType": "instant"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cost by model",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (model)(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cost_usd [$__interval]))",
+          "legendFormat": "{{model}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Tokens by type",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap input_tokens [$__interval]))",
+          "legendFormat": "input",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap output_tokens [$__interval]))",
+          "legendFormat": "output",
+          "queryType": "range"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cache_read_tokens [$__interval]))",
+          "legendFormat": "cacheRead",
+          "queryType": "range"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cache_creation_tokens [$__interval]))",
+          "legendFormat": "cacheCreation",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Iteration duration (p95 / p50)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 18,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "quantile_over_time(0.95, {job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap duration_ms [$__interval])",
+          "legendFormat": "p95",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "quantile_over_time(0.50, {job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap duration_ms [$__interval])",
+          "legendFormat": "p50",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Requests & tool calls (rate)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 40,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (model)(count_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} [$__interval]))",
+          "legendFormat": "req {{model}}",
+          "queryType": "range"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"tool_use\", task=~\"$task\"} [$__interval]))",
+          "legendFormat": "tool calls",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "bargauge",
+      "title": "Tool calls by tool (range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (tool)(count_over_time({job=\"ralph\", event=\"tool_use\", task=~\"$task\"} | logfmt [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "{{tool}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "bargauge",
+      "title": "Cost by task (range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (task)(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cost_usd [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "{{task}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "bargauge",
+      "title": "Gate outcomes (range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (result)(count_over_time({job=\"ralph\", event=\"gate\", task=~\"$task\"} | logfmt [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "logs",
+      "title": "Recent Ralph events (run/iter/api_request/tool_use/gate/run_end)",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{job=\"ralph\", task=~\"$task\"}",
+          "queryType": "range"
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "task",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "query": "label_values({job=\"ralph\"}, task)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  }
+}

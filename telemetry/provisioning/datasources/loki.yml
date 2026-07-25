@@ -1,0 +1,11 @@
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: loki                 # the "Ralph Loops" dashboard references this uid
+    type: loki
+    access: proxy
+    url: http://loki:3100     # in-compose service name + in-container port
+    isDefault: true
+    jsonData:
+      maxLines: 2000

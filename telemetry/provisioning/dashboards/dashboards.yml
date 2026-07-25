@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: wiggum
+    orgId: 1
+    folder: Wiggum
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

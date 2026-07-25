@@ -1,0 +1,32 @@
+# Planning doc — internal only, not pushed to GitHub (per instruction).
+PLAN.md
+
+# Local Claude Code settings (host-specific permission allowlist).
+.claude/settings.local.json
+
+# Orchestrator/loop runtime state.
+.wiggum/
+**/.wiggum/
+
+# Generated run artifacts from example/local runs (the contract files the
+# proposer/critic produce). These now live under .wiggum/gates/ (already ignored
+# above), so these root-level patterns are just belt-and-suspenders for anyone
+# resuming a run created under the old layout. The example SPEC is committed; its
+# outputs are not.
+GATE*-EVIDENCE.md
+GATE*-APPROVED
+GATE*-FEEDBACK.md
+PROGRESS.md
+
+# Secrets / env.
+.env
+*.env
+
+# Optional telemetry volumes (Loki/Grafana data live in named docker volumes,
+# but ignore any bind-mount dirs a user might add).
+telemetry/volumes/
+telemetry/data/
+
+# Python bytecode.
+__pycache__/
+*.pyc
