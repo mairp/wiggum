@@ -1,0 +1,38 @@
+# Wiggum — dev/test tooling only.
+#
+# IMPORTANT: this file exists for CONTRIBUTORS. Wiggum's runtime is bash + python3
+# stdlib and stays that way — running the loop needs neither uv nor an installed
+# venv, and the spec parser / critic import nothing outside the stdlib (so the
+# critic keeps its no-pip, injection-proof, clone-and-run guarantee).
+#
+# Use uv only to run the test suite:
+#     uv sync --group dev
+#     uv run pytest lib/
+#
+# There is deliberately no runtime dependency here — [project.dependencies] is
+# empty on purpose.
+[project]
+name = "wiggum"
+version = "0.1.0"
+description = "A self-driving, spec-driven Ralph loop with an agent pairing gate and telemetry."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+# Runtime uses only the Python standard library. Keep this empty.
+dependencies = []
+
+[dependency-groups]
+# Contributor tooling for `uv run pytest` — never imported by the runtime.
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+# Tests live alongside the code they cover, under lib/.
+testpaths = ["lib"]
+python_files = ["test_*.py"]
+
+# No build backend / packaging: Wiggum ships as scripts, not a wheel. uv treats
+# this as a non-packaged workspace so `uv sync` only resolves the dev group.
+[tool.uv]
+package = false

@@ -30,3 +30,7 @@ telemetry/data/
 # Python bytecode.
 __pycache__/
 *.pyc
+
+# uv / virtualenv (dev-test tooling only; the runtime needs no venv).
+.venv/
+.pytest_cache/

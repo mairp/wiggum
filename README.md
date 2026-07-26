@@ -369,10 +369,15 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | `evidence_writing` | agent tap | first Write/Edit/Bash of the pass that touches a `GATE<N>-EVIDENCE.md` |
 | `_reopen` | presenter | **synthetic**, not on disk: the `events.jsonl` symlink retargeted (a new run after stop+resume), so a following viewer prints a divider and keeps narrating |
 
-### `SPECS.md` phase format
+### Spec formats
 
-Each phase is a level-2 heading whose text starts with `Phase <N>`, containing an
-`### Acceptance criteria` block:
+Wiggum parses the spec through a single pluggable layer (`lib/wiggum_spec.py` —
+the one source of truth both the bash side and the critic call). Two formats ship;
+the format is **auto-detected**, or forced with `--spec-format` /
+`WIGGUM_SPEC_FORMAT`.
+
+**`native`** (the default) — each phase is a level-2 heading whose text starts with
+`Phase <N>`, containing an `### Acceptance criteria` block:
 
 ```markdown
 ## Phase 0 — <title>
@@ -382,6 +387,35 @@ Each phase is a level-2 heading whose text starts with `Phase <N>`, containing a
 - [ ] criterion one
 - [ ] criterion two
 ```
+
+**`speckit-tasks`** — a [GitHub Spec Kit](https://github.com/github/spec-kit)
+`tasks.md`. Each `## Phase N:` heading becomes a Wiggum phase, and every `- [ ]`
+task line under it becomes a required deliverable the critic gates on (the task's
+cited file paths are exactly what the grounding pass verifies):
+
+```markdown
+## Phase 2: User Story 1 - <title> (Priority: P1)
+### Implementation for User Story 1
+- [ ] T003 [US1] Implement greet(name) in src/greet.py
+- [ ] T004 [US1] Add a __main__ block to src/greet.py
+```
+
+When the `tasks.md` lives inside a Spec Kit project (a `.specify/` directory above
+it), the feature's `spec.md` / `plan.md` and the project `constitution.md` are
+injected into the proposer prompt as **read-only context** — they explain the
+*why/how*, but only the tasks are gated. A file named `tasks.md`, or any doc whose
+`## Phase N:` headings carry `- [ ]` task lines and no `### Acceptance criteria`, is
+detected as `speckit-tasks`; everything else is `native`. A runnable example lives
+at `examples/speckit-tasks.example.md`:
+
+```bash
+mkdir -p /tmp/wiggum-speckit && cp examples/speckit-tasks.example.md /tmp/wiggum-speckit/tasks.md
+wiggum run -w /tmp/wiggum-speckit -s /tmp/wiggum-speckit/tasks.md
+```
+
+> **Runtime stays bash + python3 stdlib** — no pip, clone-and-run. The
+> `pyproject.toml` / uv setup is only for contributors running the test suite
+> (`uv sync --group dev && uv run pytest lib/`).
 
 ## Configuration
 

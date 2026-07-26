@@ -23,6 +23,12 @@ real contract, the exit code is a convenience.
 """
 import sys, os, re, json, time, argparse, secrets, urllib.request, urllib.error
 
+# Spec parsing is owned by ONE module (lib/wiggum_spec.py) shared with the bash
+# side — critic.py no longer carries its own copy of the grammar. Import it from
+# the same directory this file lives in, regardless of the caller's CWD.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wiggum_spec  # noqa: E402
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config knobs (env-overridable; flags override env).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,30 +54,16 @@ def die(code, msg):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SPEC slicing — a phase is a level-2 heading whose text starts with "Phase <N>",
-#  section runs to the next "## " heading or EOF. Mirrors wiggum-lib.sh's awk.
+#  SPEC slicing — delegated to the shared parser (lib/wiggum_spec.py), the single
+#  source of truth for every spec format. `fmt` is the adapter chosen for this
+#  spec (native | speckit-tasks); it is resolved once in main() and threaded here.
 # ─────────────────────────────────────────────────────────────────────────────
-def slice_phase(specs_text, n):
-    lines = specs_text.splitlines()
-    head_re = re.compile(r'^##\s+Phase\s+(\d+)', re.IGNORECASE)
-    out, inphase = [], False
-    for ln in lines:
-        m2 = re.match(r'^##\s', ln)
-        if m2 and inphase:
-            break                       # next level-2 heading ends the slice
-        m = head_re.match(ln)
-        if m and int(m.group(1)) == n:
-            inphase = True
-            out.append(ln)
-            continue
-        if inphase:
-            out.append(ln)
-    return "\n".join(out).strip()
+def slice_phase(specs_text, n, fmt="native"):
+    return wiggum_spec.slice_phase(specs_text, n, fmt)
 
 
 def phase_title(section_text):
-    m = re.match(r'^##\s+Phase\s+\d+\s*[-—:]*\s*(.*)', section_text, re.IGNORECASE)
-    return (m.group(1).strip() if m else "").strip()
+    return wiggum_spec.phase_title(section_text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -661,6 +653,8 @@ def main():
     ap.add_argument("--timeout", type=int,
                     default=int(os.environ.get("WIGGUM_CRITIC_TIMEOUT", "300")))
     ap.add_argument("--grounding", default=os.environ.get("WIGGUM_CRITIC_GROUNDING", "true"))
+    ap.add_argument("--format", default=os.environ.get("WIGGUM_SPEC_FORMAT") or None,
+                    help="spec format: native|speckit-tasks (else auto-detect)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -683,7 +677,14 @@ def main():
         die(3, "specs not found: %s" % args.specs)
     with open(args.specs, encoding="utf-8", errors="replace") as fh:
         specs_text = fh.read()
-    section = slice_phase(specs_text, n)
+    # Resolve the spec format once (flag/env override → filename+content sniff →
+    # native) and slice this phase with that adapter. Same choice the bash side
+    # makes, so proposer and critic always agree on what phase N's spec is.
+    try:
+        fmt = wiggum_spec.detect_format(args.specs, specs_text, args.format)
+    except ValueError as e:
+        die(3, str(e))
+    section = slice_phase(specs_text, n, fmt)
     if not section:
         die(3, "phase %d not found in %s" % (n, args.specs))
     title = phase_title(section)

@@ -48,6 +48,10 @@ OPTIONS
                         <workdir>/SPECS.md). A relative path resolves against the
                         directory you launched from, not the workdir. Lets you
                         keep the spec (e.g. ROADMAP.md, plan.md) wherever it lives.
+  --spec-format FMT     Spec grammar: native | speckit-tasks. Default: auto-detect
+                        (a GitHub Spec Kit tasks.md is recognized by name/content;
+                        everything else is native "## Phase <N>" + acceptance
+                        criteria). Also settable via WIGGUM_SPEC_FORMAT.
   --proposer BACKEND    Proposer backend: claude | codex | bebop[:name]
                         (default: $WIGGUM_PROPOSER or claude).
   --critic BACKEND      Critic provider: claude | codex | bebop
@@ -84,6 +88,7 @@ fi
 
 WORKDIR="$PWD"
 SPECS=""
+SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect (native|speckit-tasks)
 START_PHASE=""
 DEBUG="false"
 PROPOSER_BACKEND="${WIGGUM_PROPOSER:-claude}"
@@ -105,6 +110,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -w|--workdir)   WORKDIR="${2:?}"; shift 2 ;;
     -s|--specs)     SPECS="${2:?}"; shift 2 ;;
+    --spec-format)  SPEC_FORMAT="${2:?}"; shift 2 ;;
     --proposer)     PROPOSER_BACKEND="${2:?}"; shift 2 ;;
     --critic)       CRITIC_BACKEND="${2:?}"; shift 2 ;;
     --max-rejects)  MAX_REJECTS="${2:?}"; shift 2 ;;
@@ -151,6 +157,15 @@ SPECS="${SPECS:-$WORKDIR/SPECS.md}"
 SPECS="$(cd "$(dirname "$SPECS")" && pwd)/$(basename "$SPECS")"
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 required on PATH" >&2; exit "$E_INTERNAL"; }
+
+# Resolve the spec format ONCE and export it, so every downstream consumer — the
+# wiggum_spec_* shims, the critic subprocess — agrees on the same adapter. An
+# explicit --spec-format/WIGGUM_SPEC_FORMAT wins; otherwise auto-detect and pin
+# the resolved value so a run never re-sniffs mid-flight.
+if [[ -z "$SPEC_FORMAT" ]]; then
+  SPEC_FORMAT="$(wiggum_spec_detect "$SPECS" 2>/dev/null || echo native)"
+fi
+export WIGGUM_SPEC_FORMAT="$SPEC_FORMAT"
 
 # ── state dir + per-run log/event stream ─────────────────────────────────────
 # Each run gets its OWN timestamped log + events file under runs/<run-id>/ so a
@@ -215,6 +230,7 @@ ln -sfn "runs/$WIGGUM_RUN_ID/events.jsonl" "$STATE_DIR/events.jsonl"
   echo "# consumed by: wiggum resume  (flags passed to resume override these)"
   printf 'WORKDIR=%q\n'          "$WORKDIR"
   printf 'SPECS=%q\n'            "$SPECS"
+  printf 'SPEC_FORMAT=%q\n'      "$SPEC_FORMAT"
   printf 'PROPOSER_BACKEND=%q\n' "$PROPOSER_BACKEND"
   printf 'CRITIC_BACKEND=%q\n'   "$CRITIC_BACKEND"
   printf 'MAX_REJECTS=%q\n'      "$MAX_REJECTS"
@@ -481,12 +497,39 @@ build_proposer_prompt() {
     echo ".wiggum/gates/GATE${n}-EVIDENCE.md.tmp first, then \`mv\` it onto"
     echo ".wiggum/gates/GATE${n}-EVIDENCE.md (mv within the same folder is atomic, so the"
     echo "gate never sees a half file)."
-    echo "The evidence must, for EACH acceptance criterion, state concretely how it is"
-    echo "met and cite the exact files/paths that prove it. Do NOT write the evidence"
-    echo "file until the work is actually complete — its mere existence ends this phase."
+    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
+      echo "The evidence must, for EACH task (- [ ] T…) below, state concretely how it is"
+      echo "completed and cite the exact files/paths it produced or changed. Do NOT write"
+      echo "the evidence file until every task is actually done — its mere existence ends"
+      echo "this phase."
+    else
+      echo "The evidence must, for EACH acceptance criterion, state concretely how it is"
+      echo "met and cite the exact files/paths that prove it. Do NOT write the evidence"
+      echo "file until the work is actually complete — its mere existence ends this phase."
+    fi
     echo
-    echo "## Acceptance criteria (the phase spec)"
+    # The criteria heading is adapter-specific: native calls them acceptance
+    # criteria; a Spec Kit tasks.md phase is a checklist of deliverable tasks.
+    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
+      echo "## Tasks to complete (each \`- [ ]\` is a required deliverable)"
+    else
+      echo "## Acceptance criteria (the phase spec)"
+    fi
     echo "$section"
+    # Spec Kit context: inject the feature's plan.md / constitution.md as read-only
+    # background (the "how"/"why") when the spec lives inside a .specify project.
+    # These are CONTEXT, never gates — the tasks above are the only thing gated.
+    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
+      local ctx_name ctx_path
+      while IFS=$'\t' read -r ctx_name ctx_path; do
+        [[ -n "$ctx_path" && -f "$ctx_path" ]] || continue
+        echo
+        echo "## Context: ${ctx_name} (read-only background, NOT a gate) — ${ctx_path}"
+        # Cap each context doc so a large plan.md can't dominate the prompt.
+        head -c 6000 "$ctx_path"
+        [[ "$(wc -c < "$ctx_path")" -gt 6000 ]] && echo && echo "… (context truncated) …"
+      done < <(wiggum_spec_context "$SPECS" 2>/dev/null)
+    fi
     if [[ "$attempt" -gt 1 && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
       echo
       echo "## A PRIOR ATTEMPT WAS REJECTED — this is attempt $attempt of $MAX_REJECTS"
@@ -594,6 +637,7 @@ run_phase() {
       --max-rejects "$MAX_REJECTS"
       --provider "$CRITIC_BACKEND"
       --timeout "$CRITIC_TIMEOUT"
+      --format "$SPEC_FORMAT"
     )
     [[ "$DEBUG" == "true" ]] && crit_args+=( --debug )
 
