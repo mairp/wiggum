@@ -186,6 +186,34 @@ def test_event_mode_json_stdin():
         assert "event=" not in line and "time=" not in line
 
 
+# ── CLI layer (argparse) ─────────────────────────────────────────────────────
+# Regression guard: the wiggum_emit call site shells out with `event ... --json-stdin`.
+# The direct-call tests above bypass argparse, so a missing/renamed --json-stdin flag
+# would slip through them while silently breaking every lifecycle event in production
+# (argparse exits 2, swallowed by `|| true` in wiggum-lib.sh). Drive main() end-to-end.
+def _run_cli(argv, stdin_text):
+    old_argv, old_in = sys.argv, sys.stdin
+    sys.argv = ["ralph_loki_ship.py"] + argv
+    sys.stdin = io.StringIO(stdin_text)
+    try:
+        ship.main()
+    finally:
+        sys.argv, sys.stdin = old_argv, old_in
+
+
+def test_cli_event_json_stdin_ships_to_loki():
+    payload = json.dumps({"event": "iter_start", "time": "now",
+                          "run_id": "cli-r1", "task": "demo", "iter": "3", "max_iter": "30"})
+    with CaptureServer() as srv:
+        _run_cli(["event", "--loki", srv.url, "--task", "demo", "--backend", "b",
+                  "--run-id", "cli-r1", "--event", "iter_start", "--json-stdin"],
+                 payload)
+        stream = srv.json_at("/loki/api/v1/push")["streams"][0]
+        assert stream["stream"]["event"] == "iter_start"
+        line = stream["values"][0][1]
+        assert "iter=3" in line and "max_iter=30" in line and "run_id=cli-r1" in line
+
+
 # ── best-effort contract (must never raise) ─────────────────────────────────
 def test_flush_swallows_connection_refused():
     # nothing listening on this port -> connection refused; must not raise

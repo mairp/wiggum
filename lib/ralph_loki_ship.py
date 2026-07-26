@@ -218,6 +218,7 @@ def main():
     ap.add_argument("--run-id", default="")
     ap.add_argument("--iter", default="")
     ap.add_argument("--event", default="")
+    ap.add_argument("--json-stdin", action="store_true")
     ap.add_argument("fields", nargs="*", help="event mode: KEY=VALUE ...")
     args = ap.parse_args()
 
@@ -242,7 +243,7 @@ def main():
                 extra.append("run_id=%s" % args.run_id)
             if args.iter:
                 extra.append("iter=%s" % args.iter)
-            run_event(loki, args.event, extra)
+            run_event(loki, args.event, extra, json_stdin=args.json_stdin)
     except BrokenPipeError:
         pass
     except Exception as e:  # noqa: BLE001 — telemetry must never kill the loop
