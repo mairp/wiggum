@@ -1,6 +1,20 @@
 # Wiggum
 
-**A self-driving, spec-driven Ralph loop with an automated approval gate.**
+**A self-driving, spec-driven Ralph loop with an agent pairing gate.**
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Bash](https://img.shields.io/badge/Bash-orchestrator-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white)
+![Dependencies](https://img.shields.io/badge/deps-stdlib_only-2ea44f?style=for-the-badge&logo=gnu&logoColor=white)
+![LLM](https://img.shields.io/badge/LLM-Claude_·_Codex_·_bebop-8A3FFC?style=for-the-badge&logo=anthropic&logoColor=white)
+![Ralph](https://img.shields.io/badge/Ralph-loop-F2A900?style=for-the-badge&logo=cycling&logoColor=white)
+![Git](https://img.shields.io/badge/Git-checkpoints-F05032?style=for-the-badge&logo=git&logoColor=white)
+<br>
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![Loki](https://img.shields.io/badge/Loki-logs-F5A800?style=for-the-badge&logo=grafana&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-dashboards-F46800?style=for-the-badge&logo=grafana&logoColor=white)
+![Events](https://img.shields.io/badge/Events-JSONL_stream-000000?style=for-the-badge&logo=json&logoColor=white)
+![Telemetry](https://img.shields.io/badge/Telemetry-optional-6E7681?style=for-the-badge&logo=prometheus&logoColor=white)
+
 You hand it a `SPECS.md` — an ordered set of phases, each with acceptance
 criteria — and it drives a coding agent phase by phase, but *nothing advances
 until a critic approves it*. The human who used to eyeball each phase and click
@@ -20,6 +34,12 @@ the work is verified — and I only step back in for the phases the machines
 genuinely can't settle.
 
 ## The cast
+
+<p align="center">
+  <img src="./assets/the-cast-nes-springfield.png" width="480"
+       alt="NES-style Springfield scene: Maggie in a pram (the silent orchestrator), Lisa on saxophone (the sharp critic), and Ralph (the proposer that does the work), with the nuclear plant's cooling towers behind them"
+       style="image-rendering: pixelated;">
+</p>
 
 This is the one place the naming is explained. Everywhere else — code, files,
 flags, env vars — uses the literal role names, so you never have to decode a joke
@@ -52,12 +72,73 @@ directory. Each run points at your project:
 So the same installed Wiggum drives any project:
 
 ```bash
-/opt/wiggum/orchestrator.sh -w ~/projects/foo -s ~/projects/foo/ROADMAP.md
+wiggum -w ~/projects/foo -s ~/projects/foo/ROADMAP.md
 ```
+
+(`wiggum` is the single front-door command — see **Install it permanently**
+just below.)
 
 The Bash entry points (`orchestrator.sh`, `proposer.sh`, `wiggum`) sit at the top
 level; all Python components live under **`lib/`** (`lib/critic.py`,
 `lib/present.py`, `lib/ralph_loki_ship.py`).
+
+### Install it permanently (one `wiggum` command)
+
+Typing `/root/wiggum/orchestrator.sh …` every run gets old fast. Set it up once in
+your shell rc so a **single `wiggum` command** is the front door for *everything* —
+`wiggum -w …` **starts** the loop (on `orchestrator.sh`'s behalf) and
+`wiggum status`, `wiggum watch`, `wiggum stop`, … run the inspection CLI. No code
+change; it's just a small dispatcher function that routes by the first word.
+
+Add this to `~/.bashrc` (or `~/.zshrc`):
+
+```bash
+# ── Wiggum ─────────────────────────────────────────────────────────────
+export WIGGUM_HOME="/root/wiggum"          # wherever you cloned it — set once
+
+wiggum() {
+  # inspection verbs go to the CLI; anything else starts a run.
+  case "$1" in
+    status|phases|tail|events|verdicts|feedback|watch|stop|resume|-h|--help|"")
+      "$WIGGUM_HOME/wiggum" "$@" ;;         # the read-only inspection CLI
+    run|start)                              # explicit "start a run" verb
+      shift; "$WIGGUM_HOME/orchestrator.sh" "$@" ;;
+    *)                                      # e.g. `wiggum -w DIR …`  → launch
+      "$WIGGUM_HOME/orchestrator.sh" "$@" ;;
+  esac
+}
+# ───────────────────────────────────────────────────────────────────────
+```
+
+Reload once (`source ~/.bashrc`) and the one command drives every example below,
+from any directory:
+
+```bash
+wiggum -w ~/projects/foo -s ~/projects/foo/ROADMAP.md   # START a loop
+wiggum run -w ~/projects/foo                            # …same thing, explicit verb
+wiggum status -w ~/projects/foo                         # inspect it
+wiggum watch  -w ~/projects/foo                         # live status card
+wiggum stop   -w ~/projects/foo                         # clean halt
+```
+
+Because the launch path is anything that isn't an inspection verb, `wiggum` with a
+`-w/-s/--flag` first argument goes straight to the orchestrator, while the reserved
+verbs above always reach the CLI. Use the explicit **`wiggum run …`** form whenever
+you want to be unambiguous (or in scripts).
+
+> **Why a function and not a `symlink`/PATH shim?** The scripts locate their own
+> `lib/` and `wiggum-lib.sh` via `dirname "${BASH_SOURCE[0]}"`, which does **not**
+> dereference symlinks — a `ln -s … /usr/local/bin/wiggum` would resolve its home
+> to `/usr/local/bin` and fail to find `wiggum-lib.sh`. The function calls the real
+> absolute paths under `$WIGGUM_HOME`, so `SCRIPT_DIR` stays correct. (Prefer PATH?
+> `export PATH="$WIGGUM_HOME:$PATH"` also keeps the real directory — but then
+> `wiggum` alone only reaches the inspection CLI, and you'd still call
+> `orchestrator.sh` by name to start a run. The function is what unifies both.)
+
+The rest of this README uses the unified **`wiggum`** command — `wiggum -w …` (or
+`wiggum run …`) to start, `wiggum <verb> …` to inspect — as if you've added the
+function above. Without it, substitute `"$WIGGUM_HOME"/orchestrator.sh` to start and
+`"$WIGGUM_HOME"/wiggum` for the CLI verbs.
 
 ## How it works
 
@@ -79,6 +160,56 @@ orchestrator.sh   (derives the current phase N from disk; reads SPECS.md)
            and leave everything on disk for a human.
 ```
 
+The same loop as a UML sequence — the three roles (orchestrator = *Maggie*,
+proposer = *Ralph*, critic = *Lisa*) and the approve/reject branch, all mediated
+by the `.wiggum/gates/` files rather than direct calls:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Human
+    participant O as orchestrator.sh<br/>(Maggie)
+    participant P as proposer.sh<br/>(Ralph · coding-agent CLI)
+    participant C as lib/critic.py<br/>(Lisa · LLM gate)
+    participant FS as .wiggum/gates/<br/>(on-disk contract)
+
+    Human->>O: run -w WORKDIR -s SPECS.md
+    O->>FS: derive phase N from GATE* markers
+    Note over O: no stored counter — phase is derived
+
+    loop until all phases APPROVED (or halt)
+        O->>P: run headless loop for phase N
+        activate P
+        loop until evidence exists
+            P->>P: read PROGRESS.md, do the work
+            P->>FS: write GATE<N>-EVIDENCE.md (atomic)
+        end
+        P-->>O: loop exits (test -f passes)
+        deactivate P
+
+        O->>C: judge phase N (criteria + evidence)
+        activate C
+        C->>FS: read-only grounding pass over cited files
+        C->>C: LLM verdict, nonce-bound
+        alt APPROVED
+            C->>FS: write GATE<N>-APPROVED (empty marker)
+            C-->>O: VERDICT nonce: APPROVED
+            O->>O: git checkpoint · N := N+1
+        else REJECTED (attempt < MAX_REJECTS)
+            C->>FS: write GATE<N>-FEEDBACK.md (the gaps)
+            C-->>O: VERDICT nonce: REJECTED
+            O->>FS: archive stale evidence
+            Note over O,P: re-run SAME phase with feedback
+        else MAX_REJECTS exceeded
+            C-->>O: still REJECTED
+            O->>Human: halt (exit 2) — arbitrate
+        end
+        deactivate C
+    end
+
+    O->>Human: all phases approved (exit 0)
+```
+
 There is **no file-watcher**. Detection is deterministic: the proposer loop's
 gate is a plain `test -f .wiggum/gates/GATE<N>-EVIDENCE.md`, and because that loop has already
 exited when control returns, the orchestrator hands the critic the exact path —
@@ -86,13 +217,21 @@ no race, no half-written file.
 
 ## Quick start
 
-Clone, set your key, run:
+Clone, set your key, alias, run:
 
 ```bash
 cp .env.example .env          # then edit: set ANTHROPIC_API_KEY
+
+# one-time setup (see "Install it permanently" above): paste the wiggum()
+# function into ~/.bashrc, pointing WIGGUM_HOME at this clone, then reload:
+source ~/.bashrc
+
 mkdir -p /tmp/wiggum-demo && cp SPECS.example.md /tmp/wiggum-demo/SPECS.md
-./orchestrator.sh -w /tmp/wiggum-demo
+wiggum -w /tmp/wiggum-demo
 ```
+
+(Not set up yet? The one-off equivalent is `"$WIGGUM_HOME"/orchestrator.sh -w
+/tmp/wiggum-demo` — or `./orchestrator.sh -w /tmp/wiggum-demo` from inside the clone.)
 
 `main` defaults both roles to **`claude`** (Claude Code CLI for the proposer,
 the Claude Messages API for the critic), so a clone plus an Anthropic key runs
@@ -105,7 +244,7 @@ Drive the local `image_generator` spec with the most detailed live view, shippin
 telemetry to the host's Grafana:
 
 ```bash
-WIGGUM_LIVE_DETAIL=full /root/wiggum/orchestrator.sh \
+WIGGUM_LIVE_DETAIL=full wiggum \
     -w /root/image_generator \
     -s /root/image_generator/SPECS.md \
     --telemetry --loki-url http://localhost:3100
@@ -151,7 +290,7 @@ with **zero containers**. Two views over the same event stream:
   thinking/narration line (`💬`) on top of the tool calls — the most detailed view:
 
   ```bash
-  WIGGUM_LIVE_DETAIL=full ./orchestrator.sh -w ~/projects/foo --live
+  WIGGUM_LIVE_DETAIL=full wiggum -w ~/projects/foo --live
   ```
 
   (`milestones` is the sparsest — only coarse loop milestones, no per-tool lines.)
@@ -307,8 +446,8 @@ Off by default; the loop is fully legible with zero containers. When you want th
 Grafana dashboard too, `--telemetry` ships the same event stream to Loki:
 
 ```bash
-cd telemetry && docker compose up -d      # Grafana :3010, Loki :3110 (both free here)
-./orchestrator.sh --telemetry --loki-url http://localhost:3110 -w ./myproject
+(cd "$WIGGUM_HOME/telemetry" && docker compose up -d)   # Grafana :3010, Loki :3110 (both free here)
+wiggum --telemetry --loki-url http://localhost:3110 -w ./myproject
 # open http://localhost:3010 → the "Ralph Loops" dashboard
 ```
 
