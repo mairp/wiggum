@@ -31,6 +31,5 @@ telemetry/data/
 __pycache__/
 *.pyc
 
-# uv / virtualenv (dev-test tooling only; the runtime needs no venv).
-.venv/
+# pytest cache (test tooling only; the runtime needs no venv/pip).
 .pytest_cache/

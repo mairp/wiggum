@@ -413,9 +413,9 @@ mkdir -p /tmp/wiggum-speckit && cp examples/speckit-tasks.example.md /tmp/wiggum
 wiggum run -w /tmp/wiggum-speckit -s /tmp/wiggum-speckit/tasks.md
 ```
 
-> **Runtime stays bash + python3 stdlib** — no pip, clone-and-run. The
-> `pyproject.toml` / uv setup is only for contributors running the test suite
-> (`uv sync --group dev && uv run pytest lib/`).
+> **Runtime is bash + python3 stdlib** — no pip, no dependency manager,
+> clone-and-run. Contributors run the test suite with the stdlib runner:
+> `python3 -m pytest lib/`.
 
 ## Configuration
 

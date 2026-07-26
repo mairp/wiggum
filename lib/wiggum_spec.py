@@ -33,7 +33,7 @@ output byte-compatible with the awk they replace, so their call sites are drop-i
 
 Deliberately stdlib-only: Spec Kit documents are plain markdown, so no runtime
 dependency is needed and the critic keeps its no-pip, injection-proof,
-clone-and-run guarantee. (uv/pyproject.toml exist only for dev/test tooling.)
+clone-and-run guarantee. Tests run with the stdlib runner: `python3 -m pytest lib/`.
 
 Exit codes (CLI):  0 ok · 3 invalid spec / bad usage.
 """
