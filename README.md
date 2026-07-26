@@ -1,6 +1,6 @@
 # Wiggum
 
-**A self-driving, spec-driven Ralph loop with an agent pairing gate.**
+**A self-driving, spec-driven Ralph loop with an agent pairing gate and telemetry.**
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Bash](https://img.shields.io/badge/Bash-orchestrator-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white)
