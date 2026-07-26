@@ -191,3 +191,80 @@ the `--quiet` and `--mode plain` piped paths hit it).
 - `agent_stream.py` only announces the FIRST evidence-writing tool call per
   pass (`evidence_announced` latch) — intentional, revisit if multi-evidence
   phases ever exist.
+
+---
+
+# ENHANCEMENT — OpenTelemetry sink (dual-ship with Loki)
+
+Status 2026-07-26. Adds OpenTelemetry as a second, independent telemetry backend
+alongside Loki. Approved plan:
+`/root/.claude/plans/migrate-the-loki-to-concurrent-brook.md`.
+
+## Goal
+
+Move telemetry onto an open standard (OTLP) without dropping any field the existing
+Grafana dashboard reads, and without breaking the zero-pip "clone-and-run" property.
+Loki keeps working; OTEL runs beside it (dual-ship) so the cutover is reversible.
+
+## What landed
+
+### `lib/ralph_otel_ship.py` — NEW file
+Stdlib-only sibling of `ralph_loki_ship.py`. Hand-builds **OTLP/HTTP+JSON** (no OTEL
+SDK, no protobuf) and POSTs with `urllib`. Same `add()`/`flush()` seam, same `stream`
+/ `event` CLI modes, same best-effort "never raise" contract. Two signals from one
+event stream:
+- **logs** (`/v1/logs`) — one record per event; `service.name/task/backend` as
+  resource attrs, `event/model` + typed fields as log attrs, body = the SAME logfmt
+  line the Loki shipper emits (imports `logfmt` from `ralph_loki_ship`).
+- **metrics** (`/v1/metrics`) — `ralph.cost_usd` (sum), `ralph.tokens{type}` (sums),
+  `ralph.iter.duration_ms` (histogram), `ralph.tool_use{tool}`, `ralph.gate{result}`,
+  `ralph.errors` (delta temporality; collector makes them cumulative).
+
+### `lib/agent_stream.py` — modified
+New optional `--otel URL`. Where it did `loki.add/flush` it now fans out to an
+optional `Otel` sink too — either, both, or neither. Guards stay broad.
+
+### Shell wiring — additive
+- `orchestrator.sh`: `--otel` / `--otel-url` flags, `WIGGUM_OTEL_ENABLED` /
+  `WIGGUM_OTEL_URL` env, exports `WIGGUM_OTEL_SHIP`, threads `--otel-url` to the
+  proposer, persists to `last-run.conf`.
+- `proposer.sh`: `--otel-url` flag + per-sink enables (`LOKI_ENABLED`/`OTEL_ENABLED`);
+  `-j` with no url flag still defaults to Loki (back-compat). Tap gets `--otel`; the
+  legacy direct-ship path `tee`s to both shippers when both sinks are on.
+- `wiggum-lib.sh` `wiggum_emit`: parallel OTEL block gated on `WIGGUM_OTEL_ENABLED`.
+- `wiggum` resume: threads `--otel`/`--otel-url`.
+
+### `telemetry/` — bundled collector
+`docker-compose.yml` gains `otel-collector`
+(`otel/opentelemetry-collector-contrib:0.109.0`) and `prometheus`
+(`prom/prometheus:v2.54.1`); Loki + Grafana unchanged. New
+`telemetry/otel/collector-config.yaml` forwards logs → the SAME Loki (with Loki-hint
+processors that promote `job/task/backend/event/model` to stream labels and keep the
+body **raw logfmt**, so the existing dashboard's LogQL is unaffected) and exposes
+metrics → Prometheus. New `telemetry/prometheus/prometheus.yml` +
+`provisioning/datasources/prometheus.yml`.
+
+## Tests (the point of the exercise)
+
+The telemetry surface had ZERO coverage before this. Added, all dual-run
+(`python3 lib/test_*.py` or `pytest`), stdlib only, with the repo's first HTTP test
+double (`lib/_test_http.py`, a threaded `http.server` capture):
+- `lib/test_ralph_loki_ship.py` — characterizes the CURRENT Loki output (golden ref).
+- `lib/test_ralph_otel_ship.py` — OTLP logs + metrics payload shape, batching,
+  routing, best-effort swallowing.
+- `lib/test_telemetry_parity.py` — feeds identical input through both shippers and
+  asserts `loki_fields ⊆ otel_fields` (no silent loss).
+Full suite: **33 passed**. End-to-end verified against a live bundled stack — the
+dashboard's `sum_over_time(... | unwrap cost_usd)` returns the pushed value and
+Prometheus shows `ralph_cost_usd_total` et al.
+
+## Known risks / open questions
+
+- Collector Loki exporter is marked "Deprecated component" in 0.109.0 — works today;
+  if a future collector drops it, switch to `otlphttp` → Loki's native OTLP endpoint
+  (`/otlp/v1/logs`) and adjust label promotion.
+- Metrics use DELTA temporality (each short-lived shipper reports its own slice); the
+  collector converts to cumulative. Correct for Prometheus, but a different backend
+  expecting cumulative-from-source would need `cumulativetodelta` off.
+- `.env` defaults OTLP to :4318/:4317; the author's host already had those bound, so
+  the bundled ports are `.env` variables (verify free with `ss -ltn`).

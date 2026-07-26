@@ -270,6 +270,7 @@ for o in keep[-5:]:
            --proposer "$PROPOSER_BACKEND" --critic "$CRITIC_BACKEND"
            --max-rejects "$MAX_REJECTS" --max-iter "$MAX_ITER" )
     [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )
+    [[ "${OTEL:-false}" == "true" ]] && args+=( --otel --otel-url "$OTEL_URL" )
     # anything extra passed to `wiggum resume` overrides the saved config
     # (orchestrator parses flags last-wins).
     args+=( "${EXTRA[@]}" )

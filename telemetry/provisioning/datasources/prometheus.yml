@@ -1,0 +1,11 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus            # an OTEL metrics dashboard can reference this uid
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false           # Loki stays default so the existing dashboard is unchanged
+    jsonData:
+      httpMethod: POST

@@ -11,6 +11,7 @@
 <br>
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![Loki](https://img.shields.io/badge/Loki-logs-F5A800?style=for-the-badge&logo=grafana&logoColor=white)
+![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-OTLP-425CC7?style=for-the-badge&logo=opentelemetry&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-dashboards-F46800?style=for-the-badge&logo=grafana&logoColor=white)
 ![Events](https://img.shields.io/badge/Events-JSONL_stream-000000?style=for-the-badge&logo=json&logoColor=white)
 ![Telemetry](https://img.shields.io/badge/Telemetry-optional-6E7681?style=for-the-badge&logo=prometheus&logoColor=white)
@@ -80,7 +81,7 @@ just below.)
 
 The Bash entry points (`orchestrator.sh`, `proposer.sh`, `wiggum`) sit at the top
 level; all Python components live under **`lib/`** (`lib/critic.py`,
-`lib/present.py`, `lib/ralph_loki_ship.py`).
+`lib/present.py`, `lib/ralph_loki_ship.py`, `lib/ralph_otel_ship.py`).
 
 ### Install it permanently (one `wiggum` command)
 
@@ -453,6 +454,25 @@ wiggum --telemetry --loki-url http://localhost:3110 -w ./myproject
 
 This is an independent deployment on its own ports (the defaults deliberately
 avoid the common :3000/:3100). Every port is an `.env` variable.
+
+### OpenTelemetry (OTLP)
+
+`--otel` ships the *same* event stream over **OTLP/HTTP+JSON** to the bundled OTEL
+Collector, which forwards logs to the same Loki (so the "Ralph Loops" dashboard is
+unchanged) and turns cost/tokens/duration into first-class **Prometheus** metrics
+(`ralph_cost_usd_total`, `ralph_tokens_total`, `ralph_iter_duration_ms`, …). Like
+`--telemetry`, it's stdlib-only — no OTEL SDK, no pip:
+
+```bash
+(cd "$WIGGUM_HOME/telemetry" && docker compose up -d)   # + otel-collector :4318, Prometheus :9091
+wiggum --otel --otel-url http://localhost:4318 -w ./myproject
+```
+
+`--telemetry` and `--otel` are **independent**: run either alone, or **both at once
+to dual-ship** (Loki push *and* OTLP in parallel) — handy while migrating. The shipper
+`lib/ralph_otel_ship.py` mirrors the Loki shipper's `add()`/`flush()` seam and is
+covered by unit, characterization, and old-vs-new **parity** tests
+(`python3 lib/test_ralph_otel_ship.py`, `lib/test_telemetry_parity.py`).
 
 ## Branches
 
