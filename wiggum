@@ -57,7 +57,8 @@ if [[ -n "$SPECS" ]]; then
 fi
 WORKDIR="$(cd "$WORKDIR" 2>/dev/null && pwd || echo "$WORKDIR")"
 STATE_DIR="$WORKDIR/.wiggum"
-# All gate files + PROGRESS.md live here (out of the project root).
+# All gate files live here (out of the project root); PROGRESS.md lives one level
+# up, directly under $STATE_DIR (.wiggum/).
 GATES_DIR="$STATE_DIR/gates"
 SPECS="${SPECS:-$WORKDIR/SPECS.md}"
 

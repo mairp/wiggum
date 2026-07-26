@@ -3,8 +3,8 @@
 #
 # A trimmed descendant of /root/utilities/ralph_loop.sh. It runs a FRESH headless
 # pass of a coding-agent CLI per iteration until the phase's evidence file appears,
-# then exits. Durable state lives on disk (gate files + .wiggum/gates/PROGRESS.md),
-# not in context.
+# then exits. Durable state lives on disk (gate files in .wiggum/gates/ +
+# .wiggum/PROGRESS.md), not in context.
 #
 # The one job here that the design leans on: the loop's gate is a plain
 # `test -f <evidence>` and the loop exits the instant that file exists. Because the

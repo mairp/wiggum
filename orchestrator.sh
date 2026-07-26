@@ -42,8 +42,8 @@ and can be anywhere. Point -w at the project and -s at its spec (any file name).
 
 OPTIONS
   -w, --workdir DIR     Run/work directory (default: $PWD). Proposer runs here;
-                        all generated state lives under .wiggum/ (gate files +
-                        PROGRESS.md in .wiggum/gates/), keeping the root clean.
+                        all generated state lives under .wiggum/ (PROGRESS.md in
+                        .wiggum/, gate files in .wiggum/gates/), keeping root clean.
   -s, --specs FILE      Spec file — ANY name, ANY location (default:
                         <workdir>/SPECS.md). A relative path resolves against the
                         directory you launched from, not the workdir. Lets you
@@ -125,8 +125,8 @@ done
 # ── resolve workdir + specs ──────────────────────────────────────────────────
 # Wiggum is the installed utility; the workdir + spec live in the user's project,
 # which can be anywhere. Two independent paths:
-#   * -w/--workdir  where the proposer operates; all .wiggum state (incl. the
-#                   gate files + PROGRESS.md in .wiggum/gates/) lives here.
+#   * -w/--workdir  where the proposer operates; all .wiggum state (PROGRESS.md in
+#                   .wiggum/ + the gate files in .wiggum/gates/) lives here.
 #   * -s/--specs    the spec file (any name, any location). A RELATIVE -s is
 #                   resolved against the LAUNCH dir (where the user typed the
 #                   command), NOT the workdir — captured here before we cd.
@@ -158,24 +158,26 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 required on PATH" >&2; exi
 # run.log / events.jsonl always point at the newest run, so `wiggum tail`/`watch`
 # and the presenter keep working without knowing the run-id.
 STATE_DIR="$WORKDIR/.wiggum"
-# All wiggum-generated phase files (GATE<N>-EVIDENCE/APPROVED/FEEDBACK + PROGRESS.md)
-# live in ONE folder here, out of the project root, so the workdir holds only the
-# user's real artifacts + the spec.
+# Wiggum-generated phase files (GATE<N>-EVIDENCE/APPROVED/FEEDBACK) live in the
+# gates/ folder here; PROGRESS.md lives directly under .wiggum/. Both are out of the
+# project root, so the workdir holds only the user's real artifacts + the spec.
 GATES_DIR="$STATE_DIR/gates"
 WIGGUM_RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 RUN_DIR="$STATE_DIR/runs/$WIGGUM_RUN_ID"
 mkdir -p "$RUN_DIR" "$STATE_DIR/verdicts" "$STATE_DIR/attempts" "$STATE_DIR/debug" "$GATES_DIR"
 
-# ── one-time migration: relocate stray root-level control files ───────────────
-# Earlier layouts wrote GATE*/PROGRESS.md at the workdir root. Move any that are
-# still there into $GATES_DIR so a run started under the old layout resumes cleanly
-# (the APPROVED markers must be found in their new home). Idempotent: a fresh run
-# finds nothing to move.
+# ── one-time migration: relocate stray control files to their current homes ──
+# Two older layouts existed: (1) GATE*/PROGRESS.md at the workdir root, and (2)
+# PROGRESS.md under $GATES_DIR (.wiggum/gates/). Gate files live in $GATES_DIR;
+# PROGRESS.md now lives at $STATE_DIR/PROGRESS.md (.wiggum/). Move any stragglers
+# so a run started under an old layout resumes cleanly (APPROVED markers must be
+# found in their new home; PROGRESS.md keeps the proposer's durable notes).
+# Idempotent: a fresh run finds nothing to move.
 migrate_root_gate_files() {
   local moved=0 f base
   shopt -s nullglob
   for f in "$WORKDIR"/GATE*-EVIDENCE.md "$WORKDIR"/GATE*-APPROVED \
-           "$WORKDIR"/GATE*-FEEDBACK.md "$WORKDIR"/PROGRESS.md; do
+           "$WORKDIR"/GATE*-FEEDBACK.md; do
     [[ -e "$f" ]] || continue
     base="$(basename "$f")"
     if [[ -e "$GATES_DIR/$base" ]]; then
@@ -185,8 +187,19 @@ migrate_root_gate_files() {
     fi
     moved=$((moved + 1))
   done
+  # PROGRESS.md: relocate from either older home (gates dir first — the more recent
+  # layout wins — then the workdir root) to $STATE_DIR/PROGRESS.md.
+  for f in "$GATES_DIR"/PROGRESS.md "$WORKDIR"/PROGRESS.md; do
+    [[ -e "$f" ]] || continue
+    if [[ -e "$STATE_DIR/PROGRESS.md" ]]; then
+      rm -f "$f"           # new location wins; drop the stale copy
+    else
+      mv "$f" "$STATE_DIR/PROGRESS.md"
+    fi
+    moved=$((moved + 1))
+  done
   shopt -u nullglob
-  (( moved > 0 )) && { log "----- migrated $moved root-level gate file(s) -> $GATES_DIR -----"; wiggum_emit gates_migrated count "$moved" dir "$GATES_DIR"; }
+  (( moved > 0 )) && { log "----- migrated $moved stray control file(s) into .wiggum/ -----"; wiggum_emit gates_migrated count "$moved" dir "$STATE_DIR"; }
 }
 
 LOG="$RUN_DIR/run.log"
@@ -452,9 +465,10 @@ build_proposer_prompt() {
     echo
     echo "## Working directory"
     echo "You are operating in: $WORKDIR"
-    echo "Maintain your progress notes in .wiggum/gates/PROGRESS.md (done / verified /"
+    echo "Maintain your progress notes in .wiggum/PROGRESS.md (done / verified /"
     echo "blocked / next). Read it FIRST each pass; never redo verified work. Keep the"
-    echo "workdir ROOT clean — all your bookkeeping goes under .wiggum/gates/, not here."
+    echo "workdir ROOT clean — all your bookkeeping goes under .wiggum/, not here"
+    echo "(gate evidence/feedback files live in .wiggum/gates/)."
     echo
     echo "## Your task: Phase $n${title:+ — $title}"
     echo "Implement everything the phase requires so that EVERY acceptance criterion"
