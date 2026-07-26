@@ -64,8 +64,9 @@ Install Wiggum once (clone it wherever you keep tools); it is *not* the working
 directory. Each run points at your project:
 
 - **`-w/--workdir DIR`** — where the proposer works. All generated state lives
-  under `.wiggum/` — the gate files and `PROGRESS.md` in `.wiggum/gates/` — so
-  the workdir root holds only your real artifacts. Default: `$PWD`.
+  under `.wiggum/` — `PROGRESS.md` in `.wiggum/` and the gate files in
+  `.wiggum/gates/` — so the workdir root holds only your real artifacts.
+  Default: `$PWD`.
 - **`-s/--specs FILE`** — the spec, **any name, any location** (`SPECS.md`,
   `ROADMAP.md`, `plan.md`, …). A relative path resolves against the directory you
   launched from, not the workdir. Default: `<workdir>/SPECS.md`.
@@ -96,6 +97,7 @@ Add this to `~/.bashrc` (or `~/.zshrc`):
 ```bash
 # ── Wiggum ─────────────────────────────────────────────────────────────
 export WIGGUM_HOME="/root/wiggum"          # wherever you cloned it — set once
+export WIGGUM_LIVE_DETAIL=full             # richest live view — narrates assistant text + every tool call
 
 wiggum() {
   # inspection verbs go to the CLI; anything else starts a run.
@@ -330,7 +332,7 @@ clean — only your real project artifacts sit there.
 | File | Written by | Meaning |
 |---|---|---|
 | `SPECS.md` | you | Ordered phases + acceptance criteria (the input). |
-| `.wiggum/gates/PROGRESS.md` | proposer | Durable state; read first each iteration. |
+| `.wiggum/PROGRESS.md` | proposer | Durable state; read first each iteration. |
 | `.wiggum/gates/GATE<N>-EVIDENCE.md` | proposer | Evidence phase N's criteria are met. Written atomically. |
 | `.wiggum/gates/GATE<N>-APPROVED` | **critic** | Empty marker; unblocks phase N+1. |
 | `.wiggum/gates/GATE<N>-FEEDBACK.md` | **critic** | Present after a REJECT; the gaps to fix. |
@@ -443,8 +445,22 @@ guarded, all cheap:
 
 ## Optional telemetry
 
-Off by default; the loop is fully legible with zero containers. When you want the
-Grafana dashboard too, `--telemetry` ships the same event stream to Loki:
+Off by default; the loop is fully legible with zero containers. When you want a
+dashboard too, wiggum has **two independent telemetry backends** — enable either or
+**both at once** (dual-ship):
+
+| Backend | Flag | URL flag (its own — never crossed) | Default | Ships to |
+|---|---|---|---|---|
+| **Loki** | `--telemetry` | `--loki-url` | `:3100` | Loki push API directly |
+| **OpenTelemetry** | `--otel` | `--otel-url` | `:4318` | the OTLP **Collector** (which then feeds Loki + Prometheus) |
+
+The two are wired separately: `--loki-url` **only** configures the Loki sink and
+`--otel-url` **only** configures the OTEL sink. They do not share a URL — pointing
+`--otel-url` at your Loki push port (or `--loki-url` at the Collector) will not work.
+
+### Loki
+
+`--telemetry` ships the event stream straight to Loki's push API:
 
 ```bash
 (cd "$WIGGUM_HOME/telemetry" && docker compose up -d)   # Grafana :3010, Loki :3110 (both free here)
@@ -468,10 +484,23 @@ unchanged) and turns cost/tokens/duration into first-class **Prometheus** metric
 wiggum --otel --otel-url http://localhost:4318 -w ./myproject
 ```
 
+The OTEL sink is driven **only** by `--otel` / `--otel-url` (env `WIGGUM_OTEL_URL`) —
+never by `--loki-url`. Note `--otel-url` points at the **Collector** on `:4318`, not
+at Loki: the Collector is what fans OTLP out to Loki (logs) and Prometheus (metrics).
+So a `--loki-url` change never affects OTEL, and vice versa.
+
 `--telemetry` and `--otel` are **independent**: run either alone, or **both at once
-to dual-ship** (Loki push *and* OTLP in parallel) — handy while migrating. The shipper
-`lib/ralph_otel_ship.py` mirrors the Loki shipper's `add()`/`flush()` seam and is
-covered by unit, characterization, and old-vs-new **parity** tests
+to dual-ship** (Loki push *and* OTLP in parallel) — handy while migrating. To send
+telemetry over OTEL only, pass `--otel` without `--telemetry`:
+
+```bash
+wiggum --otel --otel-url http://localhost:4318 -w ./myproject          # OTEL only
+wiggum --telemetry --loki-url http://localhost:3110 \
+       --otel      --otel-url http://localhost:4318 -w ./myproject      # both (dual-ship)
+```
+
+The shipper `lib/ralph_otel_ship.py` mirrors the Loki shipper's `add()`/`flush()`
+seam and is covered by unit, characterization, and old-vs-new **parity** tests
 (`python3 lib/test_ralph_otel_ship.py`, `lib/test_telemetry_parity.py`).
 
 ## Branches
