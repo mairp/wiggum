@@ -4,22 +4,25 @@
 #   wiggum run       [-w DIR] [-s SPEC] […]  START a run (→ orchestrator.sh).
 #                                        `wiggum -w DIR …` (leading flag) also starts.
 #                                        Pass --help after `run` for all launch flags.
-#   wiggum status    [-w DIR] [-s SPEC]  one-screen state (run state, phases, files)
+#   wiggum status    [-w DIR] [--feature S] [--all]  one-screen state (run state,
+#                                        phases, files). --all lists every feature.
 #   wiggum watch     [-w DIR]            live status card (mini-TUI; Ctrl-C detaches)
-#   wiggum tail      [-w DIR]            tail -f the orchestrator run.log (raw log)
-#   wiggum events    [-w DIR] [-f] [--json]  the raw event stream ("RPC view"):
+#   wiggum tail      [-w DIR] [--feature S]  tail -f the orchestrator run.log
+#   wiggum events    [-w DIR] [--feature S] [-f] [--json]  the raw event stream:
 #                                        every milestone + agent tool call/message
-#   wiggum verdicts  [-w DIR] [N]        dump critic reply(ies) (prompt+resp+parse)
-#   wiggum feedback   <N> [-w DIR]       show GATE<N>-FEEDBACK.md
-#   wiggum phases    [-w DIR] [-s SPEC]  list phases parsed from the spec + state
+#   wiggum verdicts  [-w DIR] [--feature S] [N]  dump critic reply(ies)
+#   wiggum feedback   <N> [-w DIR] [--feature S]  show GATE<N>-FEEDBACK.md
+#   wiggum phases    [-w DIR] [-s SPEC] [--feature S]  list phases + per-phase state
 #   wiggum stop      [-w DIR] [--now]    request a clean stop (MUTATES: writes
 #                                        stop.flag; --now also kills the in-flight
 #                                        agent pass). Rerun/resume picks up after.
-#   wiggum resume    [-w DIR] [overrides…]  relaunch the orchestrator from the
-#                                        saved config of the last run (MUTATES).
+#   wiggum resume    [-w DIR] [--feature S] [overrides…]  relaunch the orchestrator
+#                                        from the saved config of the last run.
 #
 # All other subcommands are read-only. -w points at the project workdir (default:
-# $PWD); -s at its spec file (default: <workdir>/SPECS.md). See orchestrator.sh --help.
+# $PWD); -s at its spec file (default: <workdir>/SPECS.md). --feature SLUG selects a
+# feature namespace under .wiggum/features/ (default: the last run's feature). See
+# orchestrator.sh --help for launch flags.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +31,7 @@ LIB_DIR="$SCRIPT_DIR/lib"          # Python components live here
 . "$SCRIPT_DIR/wiggum-lib.sh"
 
 usage() {
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ── Single front door ──────────────────────────────────────────────────────
@@ -50,6 +53,9 @@ shift || true
 LAUNCH_DIR="$PWD"
 WORKDIR="$PWD"
 SPECS=""
+SPECS_EXPLICIT=""
+FEATURE=""
+ALL="false"
 FOLLOW="false"
 JSON_OUT="false"
 NOW="false"
@@ -57,7 +63,9 @@ EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -w|--workdir) WORKDIR="${2:?}"; shift 2 ;;
-    -s|--specs)   SPECS="${2:?}"; shift 2 ;;
+    -s|--specs)   SPECS="${2:?}"; SPECS_EXPLICIT="true"; shift 2 ;;
+    --feature)    FEATURE="${2:?}"; shift 2 ;;
+    --all)        ALL="true"; shift ;;
     -f|--follow)  FOLLOW="true"; shift ;;
     --json)       JSON_OUT="true"; shift ;;
     --now)        NOW="true"; shift ;;
@@ -74,12 +82,45 @@ if [[ -n "$SPECS" ]]; then
 fi
 WORKDIR="$(cd "$WORKDIR" 2>/dev/null && pwd || echo "$WORKDIR")"
 STATE_DIR="$WORKDIR/.wiggum"
-# All gate files live here (out of the project root); PROGRESS.md lives one level
-# up, directly under $STATE_DIR (.wiggum/).
-GATES_DIR="$STATE_DIR/gates"
 SPECS="${SPECS:-$WORKDIR/SPECS.md}"
 
-need_state() { [[ -d "$STATE_DIR" ]] || { echo "no .wiggum/ state dir in $WORKDIR" >&2; exit 1; }; }
+# ── resolve the active feature namespace (Phase 3) ───────────────────────────
+# Durable state is per-feature under .wiggum/features/<slug>/. Selection order:
+#   1. --feature SLUG               (explicit; sanitized).
+#   2. FEATURE= in root last-run.conf  (the feature the last run used — the default
+#      so bare `wiggum status`/`resume` mean "the feature I last ran").
+#   3. "default"                    (native/back-compat).
+sanitize_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//'; }
+SLUG=""
+if [[ -n "$FEATURE" ]]; then
+  SLUG="$(sanitize_slug "$FEATURE")"
+elif [[ -f "$STATE_DIR/last-run.conf" ]]; then
+  SLUG="$(grep -m1 '^FEATURE=' "$STATE_DIR/last-run.conf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+fi
+[[ -n "$SLUG" ]] || SLUG="default"
+FEATURE_DIR="$STATE_DIR/features/$SLUG"
+# All gate files live in the feature's gates/ (out of the project root); PROGRESS.md
+# lives directly under the feature dir.
+GATES_DIR="$FEATURE_DIR/gates"
+
+# Resolve the spec for read-only subcommands: an explicit -s wins; else the feature's
+# saved SPECS= (a speckit feature has no SPECS.md); else the native SPECS.md default.
+if [[ -z "${SPECS_EXPLICIT:-}" && ! -f "$SPECS" && -f "$FEATURE_DIR/last-run.conf" ]]; then
+  _fs="$(grep -m1 '^SPECS=' "$FEATURE_DIR/last-run.conf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+  [[ -n "$_fs" && -f "$_fs" ]] && SPECS="$_fs"
+fi
+
+need_state() {
+  [[ -d "$STATE_DIR" ]] || { echo "no .wiggum/ state dir in $WORKDIR" >&2; exit 1; }
+  [[ "$ALL" == "true" || -d "$FEATURE_DIR" ]] || {
+    echo "no feature '$SLUG' in $WORKDIR (.wiggum/features/$SLUG missing)." >&2
+    if [[ -d "$STATE_DIR/features" ]]; then
+      echo "known features:" >&2
+      for d in "$STATE_DIR/features"/*/; do [[ -d "$d" ]] && echo "  - $(basename "$d")" >&2; done
+    fi
+    exit 1
+  }
+}
 
 # True when an orchestrator currently holds the run lock on this workdir.
 lock_held() {
@@ -98,16 +139,79 @@ kill_tree() {
   kill -TERM "$1" 2>/dev/null || true
 }
 
+# Resolve the events.jsonl / run.log for the ACTIVE feature. The .wiggum/ root
+# symlinks track the LAST run (any feature); when a specific --feature is asked for,
+# read that feature's own newest run instead so status/tail/events are feature-true.
+feature_events() {
+  if [[ -n "$FEATURE" ]]; then
+    ls -1t "$FEATURE_DIR"/runs/*/events.jsonl 2>/dev/null | head -1
+  else
+    echo "$STATE_DIR/events.jsonl"
+  fi
+}
+feature_runlog() {
+  if [[ -n "$FEATURE" ]]; then
+    ls -1t "$FEATURE_DIR"/runs/*/run.log 2>/dev/null | head -1
+  else
+    echo "$STATE_DIR/run.log"
+  fi
+}
+
+# `wiggum status --all`: one row per feature with approved/total phase counts.
+status_all() {
+  need_state
+  echo "wiggum status --all — $WORKDIR"
+  if [[ ! -d "$STATE_DIR/features" ]]; then echo "  (no features yet)"; return; fi
+  printf "  %-32s %-10s %s\n" "FEATURE" "PHASES" "STATE"
+  printf "  %-32s %-10s %s\n" "--------------------------------" "----------" "-----"
+  for d in "$STATE_DIR/features"/*/; do
+    [[ -d "$d" ]] || continue
+    local slug ev approved total state
+    slug="$(basename "$d")"
+    # Count APPROVED gates and total phases (total needs the spec — from that
+    # feature's last-run.conf if present, else just show approved count).
+    approved="$(ls "$d/gates"/GATE*-APPROVED 2>/dev/null | wc -l | tr -d ' ')"
+    total="?"
+    if [[ -f "$d/last-run.conf" ]]; then
+      local fspecs
+      fspecs="$(grep -m1 '^SPECS=' "$d/last-run.conf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+      [[ -f "$fspecs" ]] && total="$(WIGGUM_SPEC_FORMAT='' wiggum_spec_validate "$fspecs" 2>/dev/null || echo '?')"
+    fi
+    # state headline from that feature's newest events.jsonl
+    ev="$(ls -1t "$d"/runs/*/events.jsonl 2>/dev/null | head -1)"
+    state="—"
+    if [[ -n "$ev" && -f "$ev" ]]; then
+      state="$(python3 - "$ev" <<'PYEOF'
+import json,sys
+last=None
+try:
+  for line in open(sys.argv[1]):
+    try:o=json.loads(line)
+    except ValueError:continue
+    if o.get("event") in ("run_stop","run_end"):last=o
+except OSError:pass
+if last is None:print("running/crashed")
+elif last["event"]=="run_end":print("DONE:%s"%last.get("outcome","?"))
+else:print("HALTED:%s@%s"%(last.get("reason","?"),last.get("phase","?")))
+PYEOF
+)"
+    fi
+    printf "  %-32s %-10s %s\n" "$slug" "${approved}/${total}" "$state"
+  done
+}
+
 case "$SUB" in
   status)
+    if [[ "$ALL" == "true" ]]; then status_all; exit 0; fi
     need_state
-    echo "wiggum status — $WORKDIR"
+    echo "wiggum status — $WORKDIR  (feature: $SLUG)"
     # run-state headline: RUNNING / STOPPED / HALTED / DONE
+    STATUS_EV="$(feature_events)"
     if lock_held; then
       owner="$(head -c 200 "$STATE_DIR/lock" 2>/dev/null | head -1)"
       echo "  state: RUNNING${owner:+ ($owner)}"
-    elif [[ -f "$STATE_DIR/events.jsonl" ]]; then
-      python3 - "$STATE_DIR/events.jsonl" <<'PYEOF'
+    elif [[ -n "$STATUS_EV" && -f "$STATUS_EV" ]]; then
+      python3 - "$STATUS_EV" <<'PYEOF'
 import json, sys
 last = None
 try:
@@ -148,16 +252,16 @@ PYEOF
         fb="✗"; [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && fb="✓"
         printf "  %-6s %-28.28s %-8s %-8s %-8s\n" "$n" "$title" "$ev" "$ap" "$fb"
       done < <(wiggum_spec_phase_numbers "$SPECS")
-      cur="$(wiggum_spec_first_unapproved "$SPECS" "$WORKDIR")"
+      cur="$(wiggum_spec_first_unapproved "$SPECS" "$WORKDIR" "$GATES_DIR")"
       echo
       echo "  current phase: ${cur:-<all approved>}"
     else
       echo "  (no SPECS.md found)"
     fi
     # last milestones from events (high-frequency agent_* noise filtered out)
-    if [[ -f "$STATE_DIR/events.jsonl" ]]; then
+    if [[ -n "$STATUS_EV" && -f "$STATUS_EV" ]]; then
       echo "  last events:"
-      tail -n 200 "$STATE_DIR/events.jsonl" 2>/dev/null | python3 -c '
+      tail -n 200 "$STATUS_EV" 2>/dev/null | python3 -c '
 import sys, json
 keep = []
 for line in sys.stdin:
@@ -175,14 +279,15 @@ for o in keep[-5:]:
 
   tail)
     need_state
-    LOG="$STATE_DIR/run.log"
-    [[ -f "$LOG" ]] || { echo "no run.log yet in $STATE_DIR" >&2; exit 1; }
+    LOG="$(feature_runlog)"
+    [[ -n "$LOG" && -f "$LOG" ]] || { echo "no run.log yet for feature '$SLUG' in $STATE_DIR" >&2; exit 1; }
     exec tail -f "$LOG"
     ;;
 
   events)
     need_state
-    EV="$STATE_DIR/events.jsonl"
+    EV="$(feature_events)"
+    [[ -n "$EV" ]] || EV="$STATE_DIR/events.jsonl"
     [[ -e "$EV" ]] || { echo "no events.jsonl yet in $STATE_DIR" >&2; exit 1; }
     args=( --events "$EV" )
     [[ "$FOLLOW" == "true" ]] && args+=( --follow )
@@ -194,7 +299,7 @@ for o in keep[-5:]:
 
   verdicts)
     need_state
-    VD="$STATE_DIR/verdicts"
+    VD="$FEATURE_DIR/verdicts"
     [[ -d "$VD" ]] || { echo "no verdicts recorded yet ($VD)" >&2; exit 1; }
     if [[ -n "$POS" ]]; then
       shopt -s nullglob
@@ -275,8 +380,15 @@ for o in keep[-5:]:
 
   resume)
     need_state
-    CONF="$STATE_DIR/last-run.conf"
-    [[ -f "$CONF" ]] || { echo "wiggum resume: no $CONF — launch the run once via orchestrator.sh first." >&2; exit 1; }
+    # Bare `wiggum resume` → the root last-run.conf (the feature the last run used).
+    # `wiggum resume --feature X` → X's own saved config, preserving its SPEC_FORMAT.
+    if [[ -n "$FEATURE" ]]; then
+      CONF="$FEATURE_DIR/last-run.conf"
+      [[ -f "$CONF" ]] || { echo "wiggum resume: no last-run config for feature '$SLUG' ($CONF)." >&2; exit 1; }
+    else
+      CONF="$STATE_DIR/last-run.conf"
+      [[ -f "$CONF" ]] || { echo "wiggum resume: no $CONF — launch the run once via orchestrator.sh first." >&2; exit 1; }
+    fi
     if lock_held; then
       echo "wiggum resume: a run is already ACTIVE on $WORKDIR (lock held) — nothing to resume." >&2
       exit 1
@@ -287,6 +399,8 @@ for o in keep[-5:]:
     args=( -w "$WORKDIR" -s "$SPECS"
            --proposer "$PROPOSER_BACKEND" --critic "$CRITIC_BACKEND"
            --max-rejects "$MAX_REJECTS" --max-iter "$MAX_ITER" )
+    # Preserve the feature namespace across resume (older confs won't have it).
+    [[ -n "${FEATURE:-}" ]] && args+=( --feature "$FEATURE" )
     # Preserve the spec format across resume (older confs won't have it — auto-detect).
     [[ -n "${SPEC_FORMAT:-}" ]] && args+=( --spec-format "$SPEC_FORMAT" )
     [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )

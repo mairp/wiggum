@@ -52,6 +52,10 @@ OPTIONS
                         (a GitHub Spec Kit tasks.md is recognized by name/content;
                         everything else is native "## Phase <N>" + acceptance
                         criteria). Also settable via WIGGUM_SPEC_FORMAT.
+  --feature SLUG        Feature namespace for durable state (.wiggum/features/SLUG/).
+                        Default: the feature dir's basename when the spec lives in a
+                        .specify project, else "default". Also disambiguates when a
+                        workdir has multiple specs/*/task.md. Also via WIGGUM_FEATURE.
   --proposer BACKEND    Proposer backend: claude | codex | bebop[:name]
                         (default: $WIGGUM_PROPOSER or claude).
   --critic BACKEND      Critic provider: claude | codex | bebop
@@ -89,6 +93,7 @@ fi
 WORKDIR="$PWD"
 SPECS=""
 SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect (native|speckit-tasks)
+FEATURE="${WIGGUM_FEATURE:-}"           # explicit feature slug (Spec Kit multi-feature)
 START_PHASE=""
 DEBUG="false"
 PROPOSER_BACKEND="${WIGGUM_PROPOSER:-claude}"
@@ -111,6 +116,7 @@ while [[ $# -gt 0 ]]; do
     -w|--workdir)   WORKDIR="${2:?}"; shift 2 ;;
     -s|--specs)     SPECS="${2:?}"; shift 2 ;;
     --spec-format)  SPEC_FORMAT="${2:?}"; shift 2 ;;
+    --feature)      FEATURE="${2:?}"; shift 2 ;;
     --proposer)     PROPOSER_BACKEND="${2:?}"; shift 2 ;;
     --critic)       CRITIC_BACKEND="${2:?}"; shift 2 ;;
     --max-rejects)  MAX_REJECTS="${2:?}"; shift 2 ;;
@@ -149,8 +155,82 @@ fi
 
 cd "$WORKDIR" || exit "$E_INTERNAL"
 WORKDIR="$PWD"
-# Default spec is <workdir>/SPECS.md when -s was not given.
-SPECS="${SPECS:-$WORKDIR/SPECS.md}"
+
+# ── spec resolution (Phase 0): find the spec when -s was NOT given ──────────────
+# An explicit -s always wins (resolved above). Otherwise walk an ordered discovery
+# so a GitHub Spec Kit project starts with zero flags, without ever silently picking
+# between ambiguous candidates:
+#   1. <workdir>/SPECS.md            — unchanged precedence; native users unaffected.
+#   2. .specify/feature.json         — its feature_directory → <dir>/tasks.md.
+#   3. glob specs/*/tasks.md         — exactly one → use it; --feature selects among
+#                                      many; 2+ and no --feature → E_SPEC (loud).
+#   4. none of the above             — error listing every location tried.
+resolve_spec() {
+  # 1. native SPECS.md at the workdir root wins (no behavior change).
+  if [[ -f "$WORKDIR/SPECS.md" ]]; then
+    printf '%s\n' "$WORKDIR/SPECS.md"; return 0
+  fi
+  # 2. .specify/feature.json names the active feature dir. Parse as JSON (stdlib),
+  #    never grep/sed — it is JSON and exists in the wild.
+  local fj="$WORKDIR/.specify/feature.json"
+  if [[ -f "$fj" ]]; then
+    local fdir
+    fdir="$(python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print(d.get("feature_directory","") or "")
+except Exception:
+    pass' "$fj" 2>/dev/null)"
+    if [[ -n "$fdir" ]]; then
+      case "$fdir" in /*) : ;; *) fdir="$WORKDIR/$fdir" ;; esac
+      if [[ -f "$fdir/tasks.md" ]]; then
+        printf '%s\n' "$fdir/tasks.md"; return 0
+      fi
+    fi
+  fi
+  # 3. glob specs/*/tasks.md.
+  local -a cands=()
+  local t
+  shopt -s nullglob
+  for t in "$WORKDIR"/specs/*/tasks.md; do cands+=("$t"); done
+  shopt -u nullglob
+  if [[ -n "$FEATURE" ]]; then
+    # --feature selects the matching candidate directly (basename of its dir).
+    for t in "${cands[@]}"; do
+      [[ "$(basename "$(dirname "$t")")" == "$FEATURE" ]] && { printf '%s\n' "$t"; return 0; }
+    done
+    echo "spec not found: no specs/$FEATURE/tasks.md under $WORKDIR (--feature $FEATURE)" >&2
+    return 1
+  fi
+  if [[ "${#cands[@]}" -eq 1 ]]; then
+    printf '%s\n' "${cands[0]}"; return 0
+  fi
+  if [[ "${#cands[@]}" -gt 1 ]]; then
+    {
+      echo "multiple feature specs found under $WORKDIR — disambiguate (nothing auto-selected):"
+      for t in "${cands[@]}"; do
+        echo "    $t"
+        echo "      → wiggum run -w $WORKDIR -s $t"
+        echo "      → wiggum run -w $WORKDIR --feature $(basename "$(dirname "$t")")"
+      done
+    } >&2
+    return 2
+  fi
+  # 4. nothing matched — report every location tried.
+  {
+    echo "spec not found: no spec resolved for $WORKDIR (pass -s FILE — any name/location)."
+    echo "  tried:"
+    echo "    - $WORKDIR/SPECS.md              (native default)"
+    echo "    - $WORKDIR/.specify/feature.json (Spec Kit feature pointer)"
+    echo "    - $WORKDIR/specs/*/tasks.md      (Spec Kit feature glob)"
+  } >&2
+  return 1
+}
+
+if [[ -z "$SPECS" ]]; then
+  SPECS="$(resolve_spec)"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then exit "$E_SPEC"; fi
+fi
 [[ -f "$SPECS" ]] || { echo "spec not found: $SPECS (pass -s FILE — any name/location)" >&2; exit "$E_SPEC"; }
 # Canonicalize to an absolute path so critic.py/proposer.sh (which run in the
 # workdir) always receive an unambiguous spec path.
@@ -167,80 +247,145 @@ if [[ -z "$SPEC_FORMAT" ]]; then
 fi
 export WIGGUM_SPEC_FORMAT="$SPEC_FORMAT"
 
-# ── state dir + per-run log/event stream ─────────────────────────────────────
-# Each run gets its OWN timestamped log + events file under runs/<run-id>/ so a
-# rerun never overwrites or interleaves with a prior run. Stable symlinks
-# run.log / events.jsonl always point at the newest run, so `wiggum tail`/`watch`
-# and the presenter keep working without knowing the run-id.
+# ── feature-scoped state dir + per-run log/event stream ──────────────────────
+# Durable state is namespaced per FEATURE so multiple Spec Kit features can build
+# into ONE repo without their gates/evidence/verdicts colliding. Layout:
+#   .wiggum/
+#     lock, stop.flag          ← STAY at root (one run per repo — concurrency is
+#                                per-workdir, not per-feature).
+#     last-run.conf            ← root copy = the "active feature" pointer for bare
+#                                `wiggum resume`; a per-feature copy lives below.
+#     run.log, events.jsonl    ← symlinks retargeted into the active feature's run.
+#     features/<slug>/
+#       gates/ (+ gates/proofs/) attempts/ verdicts/ debug/ runs/  PROGRESS.md
+# <slug> = the feature-dir basename inside a .specify project; "default" otherwise
+# (also the back-compat identity of every pre-v2 .wiggum/gates/ on disk).
 STATE_DIR="$WORKDIR/.wiggum"
+# Resolve the feature slug: explicit --feature/WIGGUM_FEATURE wins (sanitized);
+# else derive from the spec's location under a .specify project.
+if [[ -n "$FEATURE" ]]; then
+  SLUG="$(printf '%s' "$FEATURE" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//')"
+  [[ -n "$SLUG" ]] || SLUG="default"
+else
+  SLUG="$(wiggum_spec_feature_slug "$SPECS" 2>/dev/null || echo default)"
+  [[ -n "$SLUG" ]] || SLUG="default"
+fi
+FEATURE_DIR="$STATE_DIR/features/$SLUG"
 # Wiggum-generated phase files (GATE<N>-EVIDENCE/APPROVED/FEEDBACK) live in the
-# gates/ folder here; PROGRESS.md lives directly under .wiggum/. Both are out of the
-# project root, so the workdir holds only the user's real artifacts + the spec.
-GATES_DIR="$STATE_DIR/gates"
+# feature's gates/ folder; PROGRESS.md lives directly under the feature dir. All
+# out of the project root, so the workdir holds only the user's real artifacts.
+GATES_DIR="$FEATURE_DIR/gates"
 WIGGUM_RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
-RUN_DIR="$STATE_DIR/runs/$WIGGUM_RUN_ID"
-mkdir -p "$RUN_DIR" "$STATE_DIR/verdicts" "$STATE_DIR/attempts" "$STATE_DIR/debug" "$GATES_DIR"
+RUN_DIR="$FEATURE_DIR/runs/$WIGGUM_RUN_ID"
+mkdir -p "$RUN_DIR" "$FEATURE_DIR/verdicts" "$FEATURE_DIR/attempts" \
+         "$FEATURE_DIR/debug" "$GATES_DIR/proofs"
+# Workdir-relative paths for the proposer prompt + critic threading (Phase 2). The
+# proposer is TOLD these literal paths, so they must track the feature dir.
+STATE_REL=".wiggum/features/$SLUG"
+GATES_REL="$STATE_REL/gates"
 
 # ── one-time migration: relocate stray control files to their current homes ──
-# Two older layouts existed: (1) GATE*/PROGRESS.md at the workdir root, and (2)
-# PROGRESS.md under $GATES_DIR (.wiggum/gates/). Gate files live in $GATES_DIR;
-# PROGRESS.md now lives at $STATE_DIR/PROGRESS.md (.wiggum/). Move any stragglers
-# so a run started under an old layout resumes cleanly (APPROVED markers must be
-# found in their new home; PROGRESS.md keeps the proposer's durable notes).
-# Idempotent: a fresh run finds nothing to move.
+# Three older layouts existed, each migrated once into the CURRENT feature-scoped
+# layout so a run started under an old tree resumes cleanly (APPROVED markers must
+# be found in their new home). All target features/default/ — pre-v2 state is, by
+# definition, the "default" feature's state (a workdir predating Spec Kit awareness
+# never had more than one feature). Idempotent: a fresh run finds nothing to move.
+#   (1) GATE*/PROGRESS.md at the WORKDIR ROOT               (pre-v1).
+#   (2) PROGRESS.md under a flat .wiggum/gates/             (interim).
+#   (3) flat .wiggum/{gates,attempts,verdicts,debug,runs,PROGRESS.md}  (pre-v2 —
+#       the whole durable tree at the .wiggum root, no features/ layer).
+DEFAULT_FEATURE_DIR="$STATE_DIR/features/default"
+DEFAULT_GATES_DIR="$DEFAULT_FEATURE_DIR/gates"
 migrate_root_gate_files() {
-  local moved=0 f base
+  local moved=0 f base d target
   shopt -s nullglob
+
+  # (3) Pre-v2 flat durable tree → features/default/. A flat .wiggum/gates that is
+  # NOT the features/ layer is unambiguously pre-v2 (GATES_DIR is now
+  # features/<slug>/gates). Move each whole subtree once; merge if the target
+  # already holds newer state (target wins).
+  if [[ -d "$STATE_DIR/gates" || -f "$STATE_DIR/PROGRESS.md" ]]; then
+    mkdir -p "$DEFAULT_FEATURE_DIR"
+    for d in gates attempts verdicts debug runs; do
+      [[ -e "$STATE_DIR/$d" ]] || continue
+      target="$DEFAULT_FEATURE_DIR/$d"
+      if [[ ! -e "$target" ]]; then
+        mv "$STATE_DIR/$d" "$target"
+      else
+        # target exists: move any entries that aren't already there, drop the rest.
+        for f in "$STATE_DIR/$d"/*; do
+          [[ -e "$f" ]] || continue
+          base="$(basename "$f")"
+          if [[ -e "$target/$base" ]]; then rm -rf "$f"; else mv "$f" "$target/$base"; fi
+        done
+        rmdir "$STATE_DIR/$d" 2>/dev/null || true
+      fi
+      moved=$((moved + 1))
+    done
+    if [[ -f "$STATE_DIR/PROGRESS.md" ]]; then
+      if [[ -e "$DEFAULT_FEATURE_DIR/PROGRESS.md" ]]; then rm -f "$STATE_DIR/PROGRESS.md"
+      else mv "$STATE_DIR/PROGRESS.md" "$DEFAULT_FEATURE_DIR/PROGRESS.md"; fi
+      moved=$((moved + 1))
+    fi
+  fi
+
+  # (1) Root-level GATE files → features/default/gates.
   for f in "$WORKDIR"/GATE*-EVIDENCE.md "$WORKDIR"/GATE*-APPROVED \
            "$WORKDIR"/GATE*-FEEDBACK.md; do
     [[ -e "$f" ]] || continue
+    mkdir -p "$DEFAULT_GATES_DIR"
     base="$(basename "$f")"
-    if [[ -e "$GATES_DIR/$base" ]]; then
-      rm -f "$f"            # new location wins; drop the stale root copy
-    else
-      mv "$f" "$GATES_DIR/$base"
-    fi
+    if [[ -e "$DEFAULT_GATES_DIR/$base" ]]; then rm -f "$f"
+    else mv "$f" "$DEFAULT_GATES_DIR/$base"; fi
     moved=$((moved + 1))
   done
-  # PROGRESS.md: relocate from either older home (gates dir first — the more recent
-  # layout wins — then the workdir root) to $STATE_DIR/PROGRESS.md.
-  for f in "$GATES_DIR"/PROGRESS.md "$WORKDIR"/PROGRESS.md; do
+  # (2) PROGRESS.md under the flat gates dir, or (1)'s root PROGRESS.md → default.
+  for f in "$DEFAULT_GATES_DIR"/PROGRESS.md "$WORKDIR"/PROGRESS.md; do
     [[ -e "$f" ]] || continue
-    if [[ -e "$STATE_DIR/PROGRESS.md" ]]; then
-      rm -f "$f"           # new location wins; drop the stale copy
-    else
-      mv "$f" "$STATE_DIR/PROGRESS.md"
-    fi
+    mkdir -p "$DEFAULT_FEATURE_DIR"
+    if [[ -e "$DEFAULT_FEATURE_DIR/PROGRESS.md" ]]; then rm -f "$f"
+    else mv "$f" "$DEFAULT_FEATURE_DIR/PROGRESS.md"; fi
     moved=$((moved + 1))
   done
   shopt -u nullglob
-  (( moved > 0 )) && { log "----- migrated $moved stray control file(s) into .wiggum/ -----"; wiggum_emit gates_migrated count "$moved" dir "$STATE_DIR"; }
+  (( moved > 0 )) && { log "----- migrated $moved stray control item(s) into features/default/ -----"; wiggum_emit gates_migrated count "$moved" dir "$DEFAULT_FEATURE_DIR"; }
 }
 
 LOG="$RUN_DIR/run.log"
 WIGGUM_EVENTS="$RUN_DIR/events.jsonl"
 : > "$LOG"; : > "$WIGGUM_EVENTS"
-ln -sfn "runs/$WIGGUM_RUN_ID/run.log"      "$STATE_DIR/run.log"
-ln -sfn "runs/$WIGGUM_RUN_ID/events.jsonl" "$STATE_DIR/events.jsonl"
+# Root symlinks point INTO the active feature's newest run, so `wiggum tail`/`watch`/
+# `events` and present.py keep working with no --feature. Targets are relative to
+# .wiggum/ (where the symlink lives), hence the features/<slug>/ prefix.
+ln -sfn "features/$SLUG/runs/$WIGGUM_RUN_ID/run.log"      "$STATE_DIR/run.log"
+ln -sfn "features/$SLUG/runs/$WIGGUM_RUN_ID/events.jsonl" "$STATE_DIR/events.jsonl"
 
 # Persist the RESOLVED config so a stopped/halted run can be brought back with
 # plain `wiggum resume` — no retyping flags. Sourceable KEY=VALUE (%q-escaped).
-{
-  echo "# wiggum last-run config — resolved values ($(date -Is), run $WIGGUM_RUN_ID)"
-  echo "# consumed by: wiggum resume  (flags passed to resume override these)"
-  printf 'WORKDIR=%q\n'          "$WORKDIR"
-  printf 'SPECS=%q\n'            "$SPECS"
-  printf 'SPEC_FORMAT=%q\n'      "$SPEC_FORMAT"
-  printf 'PROPOSER_BACKEND=%q\n' "$PROPOSER_BACKEND"
-  printf 'CRITIC_BACKEND=%q\n'   "$CRITIC_BACKEND"
-  printf 'MAX_REJECTS=%q\n'      "$MAX_REJECTS"
-  printf 'MAX_ITER=%q\n'         "$MAX_ITER"
-  printf 'TELEMETRY=%q\n'        "$TELEMETRY"
-  printf 'LOKI_URL=%q\n'         "$LOKI_URL"
-  printf 'OTEL=%q\n'             "$OTEL"
-  printf 'OTEL_URL=%q\n'         "$OTEL_URL"
-  printf 'ORCHESTRATOR=%q\n'     "$SCRIPT_DIR/orchestrator.sh"
-} > "$STATE_DIR/last-run.conf" 2>/dev/null || true
+# Written to BOTH the feature dir (so `wiggum resume --feature X` finds X's config)
+# and the .wiggum/ root (the "active feature" pointer bare `wiggum resume` uses).
+write_last_run_conf() {
+  local dest="$1"
+  {
+    echo "# wiggum last-run config — resolved values ($(date -Is), run $WIGGUM_RUN_ID)"
+    echo "# consumed by: wiggum resume  (flags passed to resume override these)"
+    printf 'WORKDIR=%q\n'          "$WORKDIR"
+    printf 'SPECS=%q\n'            "$SPECS"
+    printf 'SPEC_FORMAT=%q\n'      "$SPEC_FORMAT"
+    printf 'FEATURE=%q\n'          "$SLUG"
+    printf 'PROPOSER_BACKEND=%q\n' "$PROPOSER_BACKEND"
+    printf 'CRITIC_BACKEND=%q\n'   "$CRITIC_BACKEND"
+    printf 'MAX_REJECTS=%q\n'      "$MAX_REJECTS"
+    printf 'MAX_ITER=%q\n'         "$MAX_ITER"
+    printf 'TELEMETRY=%q\n'        "$TELEMETRY"
+    printf 'LOKI_URL=%q\n'         "$LOKI_URL"
+    printf 'OTEL=%q\n'             "$OTEL"
+    printf 'OTEL_URL=%q\n'         "$OTEL_URL"
+    printf 'ORCHESTRATOR=%q\n'     "$SCRIPT_DIR/orchestrator.sh"
+  } > "$dest" 2>/dev/null || true
+}
+write_last_run_conf "$FEATURE_DIR/last-run.conf"
+write_last_run_conf "$STATE_DIR/last-run.conf"
 
 STOP_FLAG="$STATE_DIR/stop.flag"
 LOCK="$STATE_DIR/lock"
@@ -365,7 +510,7 @@ over_budget() {
 
 # ── derive the resume phase (first phase lacking GATE<N>-APPROVED) ───────────
 derive_phase() {
-  wiggum_spec_first_unapproved "$SPECS" "$WORKDIR"
+  wiggum_spec_first_unapproved "$SPECS" "$WORKDIR" "$GATES_DIR"
 }
 
 # Relocate any old root-level control files BEFORE deriving the resume phase, so
@@ -384,6 +529,7 @@ log ""
 log "wiggum orchestrator start $(date -Is)"
 log "  workdir  : $WORKDIR"
 log "  specs    : $SPECS  ($PHASE_COUNT phases: ${PHASES[*]})"
+log "  feature  : $SLUG   (state: $STATE_REL/)"
 log "  proposer : $PROPOSER_BACKEND"
 log "  critic   : $CRITIC_BACKEND"
 log "  max-rej  : $MAX_REJECTS   max-iter/phase: $MAX_ITER"
@@ -406,7 +552,7 @@ if [[ "$LIVE" == "true" ]]; then
 fi
 start_presenter
 
-wiggum_emit run_start workdir "$WORKDIR" phases "$PHASE_COUNT" \
+wiggum_emit run_start workdir "$WORKDIR" phases "$PHASE_COUNT" feature "$SLUG" \
   proposer "$PROPOSER_BACKEND" critic "$CRITIC_BACKEND" resume "${CUR_PHASE:-done}"
 
 # Already fully done?
@@ -459,12 +605,12 @@ feedback_gist() {
 # evidence) and every attempt is auditable.
 archive_attempt() {
   local n="$1" attempt="$2"
-  local dir="$STATE_DIR/attempts/phase${n}/attempt${attempt}"
+  local dir="$FEATURE_DIR/attempts/phase${n}/attempt${attempt}"
   mkdir -p "$dir"
   [[ -f "$GATES_DIR/GATE${n}-EVIDENCE.md" ]] && mv "$GATES_DIR/GATE${n}-EVIDENCE.md" "$dir/GATE${n}-EVIDENCE.md"
   [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && cp "$GATES_DIR/GATE${n}-FEEDBACK.md" "$dir/GATE${n}-FEEDBACK.md"
   # newest verdict transcript for this phase/attempt, if any
-  local vt; vt="$(ls -t "$STATE_DIR/verdicts/phase${n}.attempt${attempt}."*.txt 2>/dev/null | head -1)"
+  local vt; vt="$(ls -t "$FEATURE_DIR/verdicts/phase${n}.attempt${attempt}."*.txt 2>/dev/null | head -1)"
   [[ -n "$vt" && -f "$vt" ]] && cp "$vt" "$dir/verdict.txt"
   wiggum_emit attempt_archived phase "$n" attempt "$attempt" dir "$dir"
 }
@@ -481,10 +627,10 @@ build_proposer_prompt() {
     echo
     echo "## Working directory"
     echo "You are operating in: $WORKDIR"
-    echo "Maintain your progress notes in .wiggum/PROGRESS.md (done / verified /"
+    echo "Maintain your progress notes in ${STATE_REL}/PROGRESS.md (done / verified /"
     echo "blocked / next). Read it FIRST each pass; never redo verified work. Keep the"
-    echo "workdir ROOT clean — all your bookkeeping goes under .wiggum/, not here"
-    echo "(gate evidence/feedback files live in .wiggum/gates/)."
+    echo "workdir ROOT clean — all your bookkeeping goes under ${STATE_REL}/, not here"
+    echo "(gate evidence/feedback files live in ${GATES_REL}/)."
     echo
     echo "## Your task: Phase $n${title:+ — $title}"
     echo "Implement everything the phase requires so that EVERY acceptance criterion"
@@ -492,10 +638,10 @@ build_proposer_prompt() {
     echo "evidence against these criteria and will reject unsupported claims."
     echo
     echo "## When (and only when) the phase is truly done"
-    echo "Write your evidence to .wiggum/gates/GATE${n}-EVIDENCE.md (path relative to the"
-    echo "workdir; the .wiggum/gates/ folder already exists). Write it ATOMICALLY: write"
-    echo ".wiggum/gates/GATE${n}-EVIDENCE.md.tmp first, then \`mv\` it onto"
-    echo ".wiggum/gates/GATE${n}-EVIDENCE.md (mv within the same folder is atomic, so the"
+    echo "Write your evidence to ${GATES_REL}/GATE${n}-EVIDENCE.md (path relative to the"
+    echo "workdir; the ${GATES_REL}/ folder already exists). Write it ATOMICALLY: write"
+    echo "${GATES_REL}/GATE${n}-EVIDENCE.md.tmp first, then \`mv\` it onto"
+    echo "${GATES_REL}/GATE${n}-EVIDENCE.md (mv within the same folder is atomic, so the"
     echo "gate never sees a half file)."
     if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
       echo "The evidence must, for EACH task (- [ ] T…) below, state concretely how it is"
@@ -516,35 +662,34 @@ build_proposer_prompt() {
       echo "## Acceptance criteria (the phase spec)"
     fi
     echo "$section"
-    # Spec Kit context: inject the feature's plan.md / constitution.md as read-only
-    # background (the "how"/"why") when the spec lives inside a .specify project.
+    # Spec Kit context: inject the feature's full design-doc set (spec/plan/research/
+    # data-model/quickstart/contracts*/checklists*/constitution) as read-only
+    # background when the spec lives inside a .specify project. Budget-allocated,
+    # line-clean + fence-safe truncation is done once in wiggum_spec.render_context.
     # These are CONTEXT, never gates — the tasks above are the only thing gated.
     if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
-      local ctx_name ctx_path
-      while IFS=$'\t' read -r ctx_name ctx_path; do
-        [[ -n "$ctx_path" && -f "$ctx_path" ]] || continue
+      local ctx_block
+      ctx_block="$(wiggum_spec_render_context "$SPECS" 2>/dev/null)"
+      if [[ -n "$ctx_block" ]]; then
         echo
-        echo "## Context: ${ctx_name} (read-only background, NOT a gate) — ${ctx_path}"
-        # Cap each context doc so a large plan.md can't dominate the prompt.
-        head -c 6000 "$ctx_path"
-        [[ "$(wc -c < "$ctx_path")" -gt 6000 ]] && echo && echo "… (context truncated) …"
-      done < <(wiggum_spec_context "$SPECS" 2>/dev/null)
+        printf '%s\n' "$ctx_block"
+      fi
     fi
     if [[ "$attempt" -gt 1 && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
       echo
       echo "## A PRIOR ATTEMPT WAS REJECTED — this is attempt $attempt of $MAX_REJECTS"
       echo "The critic rejected your last evidence. Read the feedback below and address"
-      echo "EVERY point before re-writing .wiggum/gates/GATE${n}-EVIDENCE.md. Do not merely"
+      echo "EVERY point before re-writing ${GATES_REL}/GATE${n}-EVIDENCE.md. Do not merely"
       echo "reassert; fix the actual gaps."
       echo
-      echo "### Critic feedback (.wiggum/gates/GATE${n}-FEEDBACK.md)"
+      echo "### Critic feedback (${GATES_REL}/GATE${n}-FEEDBACK.md)"
       cat "$GATES_DIR/GATE${n}-FEEDBACK.md"
       # Anti-fixation digest: one line per EARLIER attempt's rejection reason so the
       # proposer doesn't re-try a fix that was already rejected (the loop that HALTed
       # image_generator twice — it kept promoting copies each attempt). Cheap (~200
       # bytes/attempt); the full latest feedback above still carries the detail.
       local have_digest=""
-      for d in "$STATE_DIR/attempts/phase${n}"/attempt*; do
+      for d in "$FEATURE_DIR/attempts/phase${n}"/attempt*; do
         [[ -f "$d/GATE${n}-FEEDBACK.md" ]] || continue
         local gist
         gist="$(feedback_gist "$d/GATE${n}-FEEDBACK.md")"
@@ -583,7 +728,7 @@ run_phase() {
       exit "$E_BUDGET"
     fi
 
-    local prompt_file="$STATE_DIR/proposer-prompt.phase${n}.txt"
+    local prompt_file="$FEATURE_DIR/proposer-prompt.phase${n}.txt"
     build_proposer_prompt "$n" "$attempt" "$prompt_file"
 
     log "----- proposer: phase $n attempt $attempt/$MAX_REJECTS ($PROPOSER_BACKEND) -----"
@@ -638,6 +783,7 @@ run_phase() {
       --provider "$CRITIC_BACKEND"
       --timeout "$CRITIC_TIMEOUT"
       --format "$SPEC_FORMAT"
+      --feature "$SLUG"
     )
     [[ "$DEBUG" == "true" ]] && crit_args+=( --debug )
 
@@ -648,7 +794,7 @@ run_phase() {
       log "===== PHASE $n APPROVED (attempt $attempt) ====="
       # On APPROVED, archive any leftover feedback so it can't leak forward.
       if [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
-        local adir="$STATE_DIR/attempts/phase${n}/approved"
+        local adir="$FEATURE_DIR/attempts/phase${n}/approved"
         mkdir -p "$adir"
         mv "$GATES_DIR/GATE${n}-FEEDBACK.md" "$adir/GATE${n}-FEEDBACK.md"
       fi
@@ -673,11 +819,11 @@ run_phase() {
       log "# HALT — phase $n exceeded MAX_REJECTS ($MAX_REJECTS). Human needed."
       log "#   latest evidence : $GATES_DIR/GATE${n}-EVIDENCE.md"
       log "#   latest feedback : $GATES_DIR/GATE${n}-FEEDBACK.md"
-      log "#   attempt history : $STATE_DIR/attempts/phase${n}/"
+      log "#   attempt history : $FEATURE_DIR/attempts/phase${n}/"
       # Rejection trail: one line per attempt so a human sees at a glance whether the
       # loop was progressing or spinning on the same point.
       log "#   rejection trail:"
-      for d in "$STATE_DIR/attempts/phase${n}"/attempt*; do
+      for d in "$FEATURE_DIR/attempts/phase${n}"/attempt*; do
         [[ -f "$d/GATE${n}-FEEDBACK.md" ]] || continue
         log "#     $(basename "$d"): $(feedback_gist "$d/GATE${n}-FEEDBACK.md" | cut -c1-100)"
       done

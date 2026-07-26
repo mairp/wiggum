@@ -162,6 +162,140 @@ def test_context_empty_outside_specify(tmp_path):
     assert wiggum_spec.speckit_context(str(f)) == {}
 
 
+def _make_feature(root, extras=None):
+    """Build a .specify project with a feature dir; return the tasks.md path."""
+    (root / ".specify" / "memory").mkdir(parents=True)
+    (root / ".specify" / "memory" / "constitution.md").write_text("# Constitution\n")
+    feature = root / "specs" / "001-demo"
+    (feature / "contracts").mkdir(parents=True)
+    (feature / "checklists").mkdir(parents=True)
+    (feature / "spec.md").write_text("# Spec\n")
+    (feature / "plan.md").write_text("# Plan\n")
+    (feature / "research.md").write_text("# Research\n")
+    (feature / "data-model.md").write_text("# Data model\n")
+    (feature / "quickstart.md").write_text("# Quickstart\n")
+    (feature / "contracts" / "grounding-rules.md").write_text("# Grounding\n")
+    (feature / "contracts" / "document-structure.md").write_text("# DocStruct\n")
+    (feature / "checklists" / "requirements.md").write_text("# Reqs\n")
+    for name, body in (extras or {}).items():
+        (feature / name).write_text(body)
+    tasks = feature / "tasks.md"
+    tasks.write_text("## Phase 1: S\n- [ ] T001 do\n")
+    return tasks
+
+
+# ── Phase 4: the full Spec Kit context set ───────────────────────────────────
+def test_context_full_set(tmp_path):
+    tasks = _make_feature(tmp_path)
+    ctx = wiggum_spec.speckit_context(str(tasks))
+    # All nine artifacts present, including BOTH contracts and the checklist.
+    assert set(ctx) == {
+        "constitution", "spec", "plan",
+        "contract:grounding-rules", "contract:document-structure",
+        "data-model", "research", "quickstart",
+        "checklist:requirements",
+    }
+
+
+def test_context_order_by_gating_value(tmp_path):
+    tasks = _make_feature(tmp_path)
+    keys = list(wiggum_spec.speckit_context(str(tasks)).keys())
+    # constitution → spec → plan → contracts → data-model → research → quickstart
+    # → checklists. Truncation is from the tail, so this order is load-bearing.
+    assert keys[0] == "constitution"
+    assert keys[1] == "spec"
+    assert keys[2] == "plan"
+    assert keys[-1].startswith("checklist:")
+    assert keys.index("data-model") > max(keys.index("contract:grounding-rules"),
+                                          keys.index("contract:document-structure"))
+
+
+def test_context_absent_omitted(tmp_path):
+    # A feature dir with only spec.md + plan.md returns exactly what v1 returned.
+    (tmp_path / ".specify" / "memory").mkdir(parents=True)
+    feature = tmp_path / "specs" / "001-demo"
+    feature.mkdir(parents=True)
+    (feature / "spec.md").write_text("# Spec\n")
+    (feature / "plan.md").write_text("# Plan\n")
+    tasks = feature / "tasks.md"
+    tasks.write_text("## Phase 1: S\n- [ ] T001 do\n")
+    ctx = wiggum_spec.speckit_context(str(tasks))
+    assert set(ctx) == {"spec", "plan"}
+    assert all(os.path.isfile(p) for p in ctx.values())
+
+
+# ── Phase 1: feature_slug ────────────────────────────────────────────────────
+def test_feature_slug_under_specify(tmp_path):
+    tasks = _make_feature(tmp_path)
+    assert wiggum_spec.feature_slug(str(tasks)) == "001-demo"
+
+
+def test_feature_slug_default_for_native(tmp_path):
+    f = tmp_path / "SPECS.md"
+    f.write_text("## Phase 0 — x\n### Acceptance criteria\n- [ ] a\n")
+    assert wiggum_spec.feature_slug(str(f)) == "default"
+
+
+def test_feature_slug_default_at_specify_root(tmp_path):
+    # A spec sitting AT the .specify project root (not in a feature dir) → default.
+    (tmp_path / ".specify").mkdir()
+    f = tmp_path / "SPECS.md"
+    f.write_text("## Phase 0 — x\n### Acceptance criteria\n- [ ] a\n")
+    assert wiggum_spec.feature_slug(str(f)) == "default"
+
+
+def test_feature_slug_sanitized(tmp_path):
+    (tmp_path / ".specify").mkdir()
+    feature = tmp_path / "specs" / "feat with spaces/x@y"
+    feature.mkdir(parents=True)
+    tasks = feature / "tasks.md"
+    tasks.write_text("## Phase 1: S\n- [ ] T001 do\n")
+    slug = wiggum_spec.feature_slug(str(tasks))
+    # only [A-Za-z0-9._-] survive; no spaces or @.
+    import re as _re
+    assert _re.fullmatch(r'[A-Za-z0-9._-]+', slug), slug
+
+
+# ── Phase 5: render_context budget + safe truncation ─────────────────────────
+def test_render_context_empty_for_native(tmp_path):
+    f = tmp_path / "SPECS.md"
+    f.write_text("## Phase 0 — x\n### Acceptance criteria\n- [ ] a\n")
+    assert wiggum_spec.render_context(str(f)) == ""
+
+
+def test_render_context_line_clean_and_fence_safe(tmp_path):
+    # A plan.md with an OPEN code fence in its front half; truncating mid-fence must
+    # still leave the fence balanced and never split a line.
+    big_plan = "# Plan\n" + "\n".join("line %d body text" % i for i in range(200))
+    big_plan += "\n```\nfenced code that opens near the cut\n" + "x\n" * 500
+    tasks = _make_feature(tmp_path, extras={"plan.md": big_plan})
+    out = wiggum_spec.render_context(str(tasks), budget=6000)
+    assert out.count("```") % 2 == 0, "unbalanced code fence after truncation"
+    # No rendered body line is a hard-split of a source word: every truncation marker
+    # sits on its own line.
+    assert "… (context truncated at line boundary) …" in out
+
+
+def test_render_context_budget_respected_and_floors(tmp_path):
+    # An oversized plan.md must NOT starve contracts/: with per-doc floors, contracts
+    # still appear even when plan.md alone exceeds the whole budget.
+    huge = "# Plan\n" + ("plan filler line\n" * 5000)
+    tasks = _make_feature(tmp_path, extras={"plan.md": huge})
+    out = wiggum_spec.render_context(str(tasks), budget=8000)
+    assert len(out) <= 8000 + 2000  # budget + per-block header overhead slack
+    assert "contract:grounding-rules" in out, "contracts starved by a large plan.md"
+
+
+def test_allocate_budget_floor_drops_slivers():
+    # A doc that would get less than the floor (and is itself bigger than the floor)
+    # is dropped to 0, not given an unreadable sliver.
+    sizes = [100000, 100000, 100000]
+    allocs = wiggum_spec._allocate_budget(sizes, 2000, 1200)
+    assert allocs[0] >= 1200
+    assert sum(allocs) <= 2000
+    assert all(a == 0 or a >= 1200 for a in allocs)
+
+
 # ── bash ↔ python parity (the "one grammar, two callers" guarantee) ──────────
 def _cli(*args):
     return subprocess.run([sys.executable, os.path.join(HERE, "wiggum_spec.py"), *args],
@@ -198,3 +332,25 @@ def test_bash_shim_slice_matches_python():
 def test_bash_shim_detect():
     shim = _shim("wiggum_spec_detect", SPECKIT_SPEC)
     assert shim.stdout.strip() == "speckit-tasks"
+
+
+def test_bash_shim_feature_slug(tmp_path):
+    tasks = _make_feature(tmp_path)
+    shim = _shim("wiggum_spec_feature_slug", str(tasks))
+    assert shim.stdout.strip() == "001-demo"
+
+
+def test_first_unapproved_explicit_gates_dir(tmp_path):
+    # first-unapproved must honor an explicit --gates-dir (feature-scoped state) and
+    # NOT derive <workdir>/.wiggum/gates.
+    spec = tmp_path / "SPECS.md"
+    spec.write_text("## Phase 0 — x\n### Acceptance criteria\n- [ ] a\n"
+                    "## Phase 1 — y\n### Acceptance criteria\n- [ ] b\n")
+    gates = tmp_path / ".wiggum" / "features" / "default" / "gates"
+    gates.mkdir(parents=True)
+    (gates / "GATE0-APPROVED").write_text("")
+    cli = _cli("first-unapproved", "--specs", str(spec), "--gates-dir", str(gates))
+    assert cli.stdout.strip() == "1"
+    # bash shim with the 3rd arg passes it through.
+    shim = _shim("wiggum_spec_first_unapproved", str(spec), str(tmp_path), str(gates))
+    assert shim.stdout.strip() == "1"
