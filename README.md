@@ -74,7 +74,7 @@ directory. Each run points at your project:
 So the same installed Wiggum drives any project:
 
 ```bash
-wiggum -w ~/projects/foo -s ~/projects/foo/ROADMAP.md
+wiggum run -w ~/projects/foo -s ~/projects/foo/ROADMAP.md
 ```
 
 (`wiggum` is the single front-door command — see **Install it permanently**
@@ -86,11 +86,12 @@ level; all Python components live under **`lib/`** (`lib/critic.py`,
 
 ### Install it permanently (one `wiggum` command)
 
-Typing `/root/wiggum/orchestrator.sh …` every run gets old fast. Set it up once in
-your shell rc so a **single `wiggum` command** is the front door for *everything* —
-`wiggum -w …` **starts** the loop (on `orchestrator.sh`'s behalf) and
-`wiggum status`, `wiggum watch`, `wiggum stop`, … run the inspection CLI. No code
-change; it's just a small dispatcher function that routes by the first word.
+Typing `/root/wiggum/orchestrator.sh …` every run gets old fast. The **`wiggum`
+script is already the single front door for *everything*** — it owns the routing
+itself: `wiggum run …` (or a leading `-w/-s/--flag`) **starts** the loop by
+`exec`ing `orchestrator.sh`, while `wiggum status`, `wiggum watch`, `wiggum stop`,
+… run the inspection CLI. So all your shell rc needs is a **thin pointer** at the
+script — no dispatch logic to copy, nothing to keep in sync.
 
 Add this to `~/.bashrc` (or `~/.zshrc`):
 
@@ -99,17 +100,8 @@ Add this to `~/.bashrc` (or `~/.zshrc`):
 export WIGGUM_HOME="/root/wiggum"          # wherever you cloned it — set once
 export WIGGUM_LIVE_DETAIL=full             # richest live view — narrates assistant text + every tool call
 
-wiggum() {
-  # inspection verbs go to the CLI; anything else starts a run.
-  case "$1" in
-    status|phases|tail|events|verdicts|feedback|watch|stop|resume|-h|--help|"")
-      "$WIGGUM_HOME/wiggum" "$@" ;;         # the read-only inspection CLI
-    run|start)                              # explicit "start a run" verb
-      shift; "$WIGGUM_HOME/orchestrator.sh" "$@" ;;
-    *)                                      # e.g. `wiggum -w DIR …`  → launch
-      "$WIGGUM_HOME/orchestrator.sh" "$@" ;;
-  esac
-}
+# `wiggum` owns its own run-vs-inspect routing, so this is just a pointer.
+wiggum() { "$WIGGUM_HOME/wiggum" "$@"; }
 # ───────────────────────────────────────────────────────────────────────
 ```
 
@@ -117,31 +109,33 @@ Reload once (`source ~/.bashrc`) and the one command drives every example below,
 from any directory:
 
 ```bash
-wiggum -w ~/projects/foo -s ~/projects/foo/ROADMAP.md   # START a loop
-wiggum run -w ~/projects/foo                            # …same thing, explicit verb
-wiggum status -w ~/projects/foo                         # inspect it
-wiggum watch  -w ~/projects/foo                         # live status card
-wiggum stop   -w ~/projects/foo                         # clean halt
+wiggum run -w ~/projects/foo -s ~/projects/foo/ROADMAP.md   # START a loop
+wiggum -w ~/projects/foo -s ~/projects/foo/ROADMAP.md       # …same thing, leading flag
+wiggum status -w ~/projects/foo                             # inspect it
+wiggum watch  -w ~/projects/foo                             # live status card
+wiggum stop   -w ~/projects/foo                             # clean halt
 ```
 
-Because the launch path is anything that isn't an inspection verb, `wiggum` with a
-`-w/-s/--flag` first argument goes straight to the orchestrator, while the reserved
-verbs above always reach the CLI. Use the explicit **`wiggum run …`** form whenever
-you want to be unambiguous (or in scripts).
+The routing lives in the script (see the "single front door" block at the top of
+`wiggum`): `run`/`start` or a leading `-w/-s/--flag` go straight to the
+orchestrator; the reserved inspection verbs and `-h/--help` stay in the CLI. Use
+the explicit **`wiggum run …`** form whenever you want to be unambiguous (or in
+scripts).
 
 > **Why a function and not a `symlink`/PATH shim?** The scripts locate their own
 > `lib/` and `wiggum-lib.sh` via `dirname "${BASH_SOURCE[0]}"`, which does **not**
 > dereference symlinks — a `ln -s … /usr/local/bin/wiggum` would resolve its home
 > to `/usr/local/bin` and fail to find `wiggum-lib.sh`. The function calls the real
-> absolute paths under `$WIGGUM_HOME`, so `SCRIPT_DIR` stays correct. (Prefer PATH?
-> `export PATH="$WIGGUM_HOME:$PATH"` also keeps the real directory — but then
-> `wiggum` alone only reaches the inspection CLI, and you'd still call
-> `orchestrator.sh` by name to start a run. The function is what unifies both.)
+> absolute path under `$WIGGUM_HOME`, so `SCRIPT_DIR` stays correct. (Prefer PATH?
+> `export PATH="$WIGGUM_HOME:$PATH"` also works, and because the script owns its own
+> run-vs-inspect routing, bare `wiggum run …` starts a loop that way too — no
+> function needed. The function is just the tidiest way to pin `$WIGGUM_HOME`.)
 
-The rest of this README uses the unified **`wiggum`** command — `wiggum -w …` (or
-`wiggum run …`) to start, `wiggum <verb> …` to inspect — as if you've added the
-function above. Without it, substitute `"$WIGGUM_HOME"/orchestrator.sh` to start and
-`"$WIGGUM_HOME"/wiggum` for the CLI verbs.
+The rest of this README uses the unified **`wiggum`** command — `wiggum run …` (or
+a leading `wiggum -w …`) to start, `wiggum <verb> …` to inspect. Because the
+script owns the routing, you don't even need the function: call
+`"$WIGGUM_HOME"/wiggum …` directly and both `wiggum run …` and the inspection
+verbs work the same way.
 
 ## How it works
 
@@ -225,16 +219,17 @@ Clone, set your key, alias, run:
 ```bash
 cp .env.example .env          # then edit: set ANTHROPIC_API_KEY
 
-# one-time setup (see "Install it permanently" above): paste the wiggum()
-# function into ~/.bashrc, pointing WIGGUM_HOME at this clone, then reload:
+# one-time setup (see "Install it permanently" above): add the thin wiggum()
+# pointer to ~/.bashrc, pointing WIGGUM_HOME at this clone, then reload:
 source ~/.bashrc
 
 mkdir -p /tmp/wiggum-demo && cp SPECS.example.md /tmp/wiggum-demo/SPECS.md
-wiggum -w /tmp/wiggum-demo
+wiggum run -w /tmp/wiggum-demo
 ```
 
-(Not set up yet? The one-off equivalent is `"$WIGGUM_HOME"/orchestrator.sh -w
-/tmp/wiggum-demo` — or `./orchestrator.sh -w /tmp/wiggum-demo` from inside the clone.)
+(Not set up yet? The one-off equivalent calls the script directly:
+`"$WIGGUM_HOME"/wiggum run -w /tmp/wiggum-demo` — or `./wiggum run -w
+/tmp/wiggum-demo` from inside the clone.)
 
 `main` defaults both roles to **`claude`** (Claude Code CLI for the proposer,
 the Claude Messages API for the critic), so a clone plus an Anthropic key runs
@@ -247,7 +242,7 @@ Drive the local `image_generator` spec with the most detailed live view, shippin
 telemetry to the host's Grafana:
 
 ```bash
-WIGGUM_LIVE_DETAIL=full wiggum \
+WIGGUM_LIVE_DETAIL=full wiggum run \
     -w /root/image_generator \
     -s /root/image_generator/SPECS.md \
     --telemetry --loki-url http://localhost:3100
@@ -293,7 +288,7 @@ with **zero containers**. Two views over the same event stream:
   thinking/narration line (`💬`) on top of the tool calls — the most detailed view:
 
   ```bash
-  WIGGUM_LIVE_DETAIL=full wiggum -w ~/projects/foo --live
+  WIGGUM_LIVE_DETAIL=full wiggum run -w ~/projects/foo --live
   ```
 
   (`milestones` is the sparsest — only coarse loop milestones, no per-tool lines.)

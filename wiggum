@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# wiggum — the small debug/inspection CLI for a Wiggum run.
+# wiggum — the single front door for a Wiggum run: start it, then inspect it.
 #
+#   wiggum run       [-w DIR] [-s SPEC] […]  START a run (→ orchestrator.sh).
+#                                        `wiggum -w DIR …` (leading flag) also starts.
+#                                        Pass --help after `run` for all launch flags.
 #   wiggum status    [-w DIR] [-s SPEC]  one-screen state (run state, phases, files)
 #   wiggum watch     [-w DIR]            live status card (mini-TUI; Ctrl-C detaches)
 #   wiggum tail      [-w DIR]            tail -f the orchestrator run.log (raw log)
@@ -25,11 +28,25 @@ LIB_DIR="$SCRIPT_DIR/lib"          # Python components live here
 . "$SCRIPT_DIR/wiggum-lib.sh"
 
 usage() {
-  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
 }
 
+# ── Single front door ──────────────────────────────────────────────────────
+# Starting a run and inspecting it are the SAME command. This script is the one
+# source of truth for that routing (a shell rc should only point at it, never
+# re-implement the dispatch):
+#   • `wiggum run …` / `wiggum start …`      → start a run (orchestrator.sh)
+#   • `wiggum -w DIR -s SPEC …`  (leading flag) → start a run (orchestrator.sh)
+#   • `wiggum <verb> …` (status/watch/…) and `-h`/`--help` → inspect, below.
+SUB="${1:-}"
+case "$SUB" in
+  run|start)          shift; exec bash "$SCRIPT_DIR/orchestrator.sh" "$@" ;;
+  -h|--help|help|"")  ;;                                   # → inspection usage
+  -*)                 exec bash "$SCRIPT_DIR/orchestrator.sh" "$@" ;;  # bare flag → launch
+esac
+
 # parse: subcommand, optional -w DIR / -s SPEC, flags, and pass-through extras
-SUB="${1:-}"; shift || true
+shift || true
 LAUNCH_DIR="$PWD"
 WORKDIR="$PWD"
 SPECS=""
