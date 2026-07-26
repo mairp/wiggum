@@ -19,9 +19,11 @@ disk or a dead Loki must never break the loop):
                          "artifact being delivered" moment.
   2. Echoes a compact HUMAN summary to stdout (this lands in run.log via the
      orchestrator's emit_out, keeping the log readable instead of raw JSON).
-  3. Optionally ships tool_use / api_request to Loki (--loki URL), reusing the
-     Loki/logfmt code from ralph_loki_ship.py — telemetry is an add-on, the
-     local event capture above happens regardless.
+  3. Optionally ships tool_use / api_request to Loki (--loki URL) and/or an OTLP
+     collector (--otel URL), reusing the Loki/logfmt code from ralph_loki_ship.py
+     and the Otel class from ralph_otel_ship.py. The two sinks are independent
+     (dual-ship): either, both, or neither. Telemetry is an add-on; the local event
+     capture above happens regardless.
 
 Non-JSON input lines pass through to stdout untouched, so a backend that ignores
 --output-format stream-json degrades gracefully to the old behavior.
@@ -109,6 +111,7 @@ def main():
     ap.add_argument("--backend", default=os.environ.get("WIGGUM_BACKEND_LABEL", ""))
     ap.add_argument("--iter", default="")
     ap.add_argument("--loki", default="", help="Loki base URL; empty = no shipping")
+    ap.add_argument("--otel", default="", help="OTLP/HTTP base URL; empty = no shipping")
     args = ap.parse_args()
 
     sink = EventSink(args.events, args.run_id, args.task, args.backend)
@@ -127,6 +130,24 @@ def main():
         except Exception as e:  # noqa: BLE001 — telemetry is optional
             sys.stderr.write("agent_stream: Loki disabled (%s)\n" % e)
             loki = None
+
+    # OTEL is an independent, parallel sink (dual-ship). It reuses the same logfmt
+    # for its log-record body, so a --otel-only run still needs logfmt available.
+    otel = None
+    if args.otel:
+        try:
+            import ralph_otel_ship as otship
+            resource = {"service.name": "ralph"}
+            if args.task:
+                resource["task"] = args.task
+            if args.backend:
+                resource["backend"] = args.backend
+            otel = otship.Otel(args.otel, resource)
+            if logfmt is None:
+                logfmt = otship.logfmt
+        except Exception as e:  # noqa: BLE001 — telemetry is optional
+            sys.stderr.write("agent_stream: OTEL disabled (%s)\n" % e)
+            otel = None
 
     # A TERM (wiggum stop --now) must not lose the pipe's tail: finish cleanly.
     stop = {"flag": False}
@@ -181,13 +202,17 @@ def main():
                             evidence_announced = True
                             sink.emit("evidence_writing", tool=name,
                                       target=target, **common)
-                        if loki:
+                        if loki or otel:
                             f = dict(common)
                             f["tool"] = name
                             if model_seen:
                                 f["model"] = model_seen
-                            loki.add("tool_use", logfmt(f),
-                                     labels={"model": model_seen} if model_seen else None)
+                            line = logfmt(f)
+                            mlabel = {"model": model_seen} if model_seen else None
+                            if loki:
+                                loki.add("tool_use", line, labels=mlabel)
+                            if otel:
+                                otel.add("tool_use", line, attrs=mlabel, fields=f)
 
             elif t == "result":
                 u = o.get("usage", {}) or {}
@@ -209,21 +234,27 @@ def main():
                     o.get("subtype", "?"), cost or 0.0,
                     o.get("num_turns", "?"), u.get("output_tokens", "?"),
                     o.get("duration_ms", "?")))
-                if loki:
-                    loki.add("api_request", logfmt(fields),
-                             labels={"model": model} if model else None)
-                    loki.flush()
+                if loki or otel:
+                    line = logfmt(fields)
+                    mlabel = {"model": model} if model else None
+                    if loki:
+                        loki.add("api_request", line, labels=mlabel)
+                        loki.flush()
+                    if otel:
+                        otel.add("api_request", line, attrs=mlabel, fields=fields)
+                        otel.flush()
 
             # other types (user/tool_result, stream_event partials) stay quiet
             sys.stdout.flush()
     except BrokenPipeError:
         pass
     finally:
-        if loki:
-            try:
-                loki.flush()
-            except Exception:  # noqa: BLE001
-                pass
+        for sink_obj in (loki, otel):
+            if sink_obj:
+                try:
+                    sink_obj.flush()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 if __name__ == "__main__":

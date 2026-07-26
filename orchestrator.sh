@@ -57,6 +57,9 @@ OPTIONS
   --start-phase N       Override the derived resume phase.
   --telemetry           Ship the event stream to Loki (off by default).
   --loki-url URL        Loki base URL (with --telemetry; default :3100).
+  --otel                Ship the event stream to an OTLP collector (off by default).
+                        Independent of --telemetry; use both to dual-ship.
+  --otel-url URL        OTLP/HTTP base URL (with --otel; default :4318).
   --live                Render a clean, scrolling timeline inline in THIS terminal
                         (like a coding agent working). Raw proposer/critic output
                         goes to the run.log only. No second terminal / `wiggum watch`
@@ -89,6 +92,8 @@ MAX_REJECTS="${WIGGUM_MAX_REJECTS:-3}"
 MAX_ITER="${WIGGUM_MAX_ITER:-30}"
 TELEMETRY="${WIGGUM_TELEMETRY_ENABLED:-false}"
 LOKI_URL="${WIGGUM_LOKI_URL:-http://localhost:3100}"
+OTEL="${WIGGUM_OTEL_ENABLED:-false}"
+OTEL_URL="${WIGGUM_OTEL_URL:-http://localhost:4318}"
 # LIVE: inline scrolling timeline in this terminal. Default auto = on iff TTY.
 LIVE="${WIGGUM_LIVE:-auto}"
 PROPOSER_TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
@@ -107,6 +112,8 @@ while [[ $# -gt 0 ]]; do
     --start-phase)  START_PHASE="${2:?}"; shift 2 ;;
     --telemetry)    TELEMETRY="true"; shift ;;
     --loki-url)     LOKI_URL="${2:?}"; shift 2 ;;
+    --otel)         OTEL="true"; shift ;;
+    --otel-url)     OTEL_URL="${2:?}"; shift 2 ;;
     --live)         LIVE="true"; shift ;;
     --no-live)      LIVE="false"; shift ;;
     --debug)        DEBUG="true"; shift ;;
@@ -201,6 +208,8 @@ ln -sfn "runs/$WIGGUM_RUN_ID/events.jsonl" "$STATE_DIR/events.jsonl"
   printf 'MAX_ITER=%q\n'         "$MAX_ITER"
   printf 'TELEMETRY=%q\n'        "$TELEMETRY"
   printf 'LOKI_URL=%q\n'         "$LOKI_URL"
+  printf 'OTEL=%q\n'             "$OTEL"
+  printf 'OTEL_URL=%q\n'         "$OTEL_URL"
   printf 'ORCHESTRATOR=%q\n'     "$SCRIPT_DIR/orchestrator.sh"
 } > "$STATE_DIR/last-run.conf" 2>/dev/null || true
 
@@ -211,8 +220,12 @@ WIGGUM_BACKEND_LABEL="prop:${PROPOSER_BACKEND}/crit:${CRITIC_BACKEND}"
 WIGGUM_SHIP="$LIB_DIR/ralph_loki_ship.py"
 WIGGUM_TELEMETRY="$TELEMETRY"
 WIGGUM_LOKI_URL="$LOKI_URL"
+WIGGUM_OTEL_SHIP="$LIB_DIR/ralph_otel_ship.py"
+WIGGUM_OTEL_ENABLED="$OTEL"
+WIGGUM_OTEL_URL="$OTEL_URL"
 export WIGGUM_EVENTS WIGGUM_RUN_ID WIGGUM_TASK WIGGUM_BACKEND_LABEL WIGGUM_SHIP \
-       WIGGUM_TELEMETRY WIGGUM_LOKI_URL WIGGUM_MAX_REJECTS="$MAX_REJECTS"
+       WIGGUM_TELEMETRY WIGGUM_LOKI_URL WIGGUM_OTEL_SHIP WIGGUM_OTEL_ENABLED \
+       WIGGUM_OTEL_URL WIGGUM_MAX_REJECTS="$MAX_REJECTS"
 
 # In live mode the scrolling presenter owns the terminal, so log() writes to the
 # run.log only (no duplicated banners); otherwise it tees to the terminal too.
@@ -346,7 +359,7 @@ log "  proposer : $PROPOSER_BACKEND"
 log "  critic   : $CRITIC_BACKEND"
 log "  max-rej  : $MAX_REJECTS   max-iter/phase: $MAX_ITER"
 log "  timeouts : proposer ${PROPOSER_TIMEOUT}s  critic ${CRITIC_TIMEOUT}s   wall: ${MAX_WALL_MIN}min"
-log "  git      : $GIT_COMMITS   telemetry: $TELEMETRY$( [[ "$TELEMETRY" == "true" ]] && echo " -> $LOKI_URL" )"
+log "  git      : $GIT_COMMITS   telemetry: $TELEMETRY$( [[ "$TELEMETRY" == "true" ]] && echo " -> $LOKI_URL" )$( [[ "$OTEL" == "true" ]] && echo "   otel: -> $OTEL_URL" )"
 log "  resume   : phase ${CUR_PHASE:-<all approved>}$( [[ -n "$START_PHASE" ]] && echo " (--start-phase)" )"
 log "  run_id   : $WIGGUM_RUN_ID"
 log "  stop with: touch $STOP_FLAG"
@@ -528,6 +541,8 @@ run_phase() {
       --timeout "$PROPOSER_TIMEOUT"
     )
     [[ "$TELEMETRY" == "true" ]] && prop_args+=( --stream-json --loki-url "$LOKI_URL" )
+    # OTEL is independent of --telemetry; --stream-json is idempotent if both add it.
+    [[ "$OTEL" == "true" ]] && prop_args+=( --stream-json --otel-url "$OTEL_URL" )
     [[ "$DEBUG" == "true" ]] && prop_args+=( --debug )
 
     bash "$SCRIPT_DIR/proposer.sh" "${prop_args[@]}" 2>&1 | emit_out

@@ -1,0 +1,69 @@
+# Wiggum OTEL Collector — bridges the OTLP shipper (lib/ralph_otel_ship.py) to the
+# existing bundled backends so the current Grafana dashboard keeps working unchanged:
+#
+#   OTLP/HTTP :4318  ──▶  logs    ──▶  Loki  (existing "Ralph Loops" dashboard reads this)
+#                     └▶  metrics ──▶  Prometheus scrape endpoint :8889
+#
+# This is the "Collector → Loki (+ Prometheus)" topology: dual-ship keeps Loki as the
+# log store, and metrics become first-class Prometheus series (ralph_cost_usd, etc.).
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 5s
+
+  # Loki-exporter "hints": promote exactly the low-cardinality stream labels the
+  # existing "Ralph Loops" dashboard queries on (job/task/backend/event/model) and
+  # emit the log body RAW (our logfmt line) so `| logfmt | unwrap cost_usd` keeps
+  # working unchanged. Without these hints the exporter would label by service_name
+  # and JSON-wrap the body, breaking every dashboard panel.
+  resource/loki:
+    attributes:
+      - key: loki.resource.labels
+        value: task, backend
+        action: insert
+      - key: loki.format
+        value: raw
+        action: insert
+  attributes/loki:
+    actions:
+      - key: loki.attribute.labels
+        value: event, model
+        action: insert
+
+exporters:
+  # Logs → the bundled Loki (same instance the legacy shipper pushes to). Stream
+  # labels come from the hints above; the body stays the raw logfmt line, so the
+  # existing dashboard's LogQL is unaffected.
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+
+  # Metrics → a Prometheus scrape endpoint the prometheus service pulls from.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true          # surface task/backend resource attrs as metric labels
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [resource/loki, attributes/loki, batch]
+      exporters: [loki, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]

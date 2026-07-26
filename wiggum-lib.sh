@@ -61,6 +61,14 @@ wiggum_emit() {
       --backend "${WIGGUM_BACKEND_LABEL:-wiggum}" --run-id "${WIGGUM_RUN_ID:-}" \
       --event "$ev" --json-stdin >/dev/null 2>&1 || true
   fi
+  # Parallel, independent OTEL sink (dual-ship). Best-effort; gated separately so
+  # either backend can run alone or together. Reuses the same events.jsonl line.
+  if [[ "${WIGGUM_OTEL_ENABLED:-false}" == "true" && -n "${WIGGUM_OTEL_SHIP:-}" && -n "${WIGGUM_OTEL_URL:-}" ]]; then
+    printf '%s\n' "$line" | python3 "$WIGGUM_OTEL_SHIP" event \
+      --otel "$WIGGUM_OTEL_URL" --task "${WIGGUM_TASK:-wiggum}" \
+      --backend "${WIGGUM_BACKEND_LABEL:-wiggum}" --run-id "${WIGGUM_RUN_ID:-}" \
+      --event "$ev" --json-stdin >/dev/null 2>&1 || true
+  fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,11 @@
+# Wiggum bundled Prometheus — scrapes the OTEL Collector's Prometheus exporter so
+# ralph.* metrics (cost, tokens, duration histogram, tool_use/gate/errors counters)
+# become queryable series. Only relevant when running with --otel.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

@@ -45,15 +45,16 @@ OPTIONS
   -n, --max-iter N        Max passes before giving up (default: 30).
   -s, --sleep SECONDS     Sleep between passes (default: 2).
   --timeout SECONDS       Hard timeout on a single agent pass (default: 1800).
-  -j, --stream-json       Also ship tool_use/api_request telemetry to Loki.
+  -j, --stream-json       Also ship tool_use/api_request telemetry (Loki and/or OTEL).
   --loki-url URL          Loki base (with -j).
+  --otel-url URL          OTLP/HTTP base (with -j). Ships to OTEL alongside Loki.
   --debug                 Dump the assembled prompt + raw agent output to .wiggum/debug/.
   -h, --help              Show this help.
 
 Local agent-stream capture (tool calls, messages, cost -> events.jsonl) is ON by
 default for claude/bebop backends so the live view can narrate the agent working;
 set WIGGUM_AGENT_STREAM=false to restore the raw output path. -j only controls
-the Loki add-on.
+the telemetry add-on (Loki when --loki-url is set, OTEL when --otel-url is set).
 
 EXIT
   0  evidence file appeared      4  max-iter reached without evidence
@@ -69,6 +70,11 @@ SLEEP_SECS=2
 TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
 STREAM_JSON="false"
 LOKI_URL="${WIGGUM_LOKI_URL:-http://localhost:3100}"
+OTEL_URL="${WIGGUM_OTEL_URL:-http://localhost:4318}"
+# Per-sink enables: a sink ships only when its --*-url flag is explicitly passed.
+# (Backward compat: `-j` with no url flag still defaults to Loki — set below.)
+LOKI_ENABLED="false"
+OTEL_ENABLED="false"
 DEBUG="false"
 # Local observability tap: parse the agent's stream-json into fine-grained wiggum
 # events (agent_tool/agent_text/agent_result) regardless of telemetry. Opt out
@@ -86,12 +92,19 @@ while [[ $# -gt 0 ]]; do
     -s|--sleep)       SLEEP_SECS="${2:?}"; shift 2 ;;
     --timeout)        TIMEOUT="${2:?}"; shift 2 ;;
     -j|--stream-json) STREAM_JSON="true"; shift ;;
-    --loki-url)       LOKI_URL="${2:?}"; shift 2 ;;
+    --loki-url)       LOKI_URL="${2:?}"; LOKI_ENABLED="true"; shift 2 ;;
+    --otel-url)       OTEL_URL="${2:?}"; OTEL_ENABLED="true"; shift 2 ;;
     --debug)          DEBUG="true"; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                echo "proposer.sh: unknown arg: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+# Backward compat: `-j` alone (no explicit --loki-url/--otel-url) means Loki, the
+# original single-sink behavior. If either url flag was passed, only those sinks ship.
+if [[ "$STREAM_JSON" == "true" && "$LOKI_ENABLED" == "false" && "$OTEL_ENABLED" == "false" ]]; then
+  LOKI_ENABLED="true"
+fi
 
 [[ -n "$WORKDIR" && -d "$WORKDIR" ]] || { echo "proposer.sh: --workdir DIR required (got '$WORKDIR')" >&2; exit 1; }
 [[ -n "$EVIDENCE" ]] || { echo "proposer.sh: --evidence FILE required" >&2; exit 1; }
@@ -122,6 +135,7 @@ fi
 
 # Shipper (only needed for -j) + the local stream tap.
 SHIP="$LIB_DIR/ralph_loki_ship.py"
+OTEL_SHIP="$LIB_DIR/ralph_otel_ship.py"
 TAP="$LIB_DIR/agent_stream.py"
 if [[ "$STREAM_JSON" == "true" ]]; then
   [[ -f "$SHIP" ]] || { echo "proposer.sh: --stream-json needs $SHIP" >&2; exit 1; }
@@ -201,15 +215,30 @@ run_iteration() {
   if [[ "$AGENT_STREAM" == "true" && "$BACKEND" != codex ]]; then
     local -a tap_args=( --events "$WIGGUM_EVENTS" --run-id "$RUN_ID"
                         --task "$TASK_NAME" --backend "$BACKEND_LABEL" --iter "$iter" )
-    [[ "$STREAM_JSON" == "true" ]] && tap_args+=( --loki "$LOKI_URL" )
+    # Dual-ship: the tap fans out to whichever sinks are enabled (either/both/neither).
+    [[ "$LOKI_ENABLED" == "true" ]] && tap_args+=( --loki "$LOKI_URL" )
+    [[ "$OTEL_ENABLED" == "true" ]] && tap_args+=( --otel "$OTEL_URL" )
     run_agent "$prompt" "${shared[@]}" 2>&1 | python3 "$TAP" "${tap_args[@]}"
     return 0
   fi
   if [[ "$STREAM_JSON" == "true" && "$BACKEND" != codex ]]; then
-    # Tap disabled but telemetry on: legacy Loki-shipper path.
-    run_agent "$prompt" "${shared[@]}" 2>&1 | python3 "$SHIP" stream \
-      --loki "$LOKI_URL" --task "$TASK_NAME" --backend "$BACKEND_LABEL" \
-      --run-id "$RUN_ID" --iter "$iter"
+    # Tap disabled but telemetry on: legacy direct-shipper path. Run each enabled
+    # shipper; tee when both are on so a single agent stream feeds both.
+    if [[ "$LOKI_ENABLED" == "true" && "$OTEL_ENABLED" == "true" ]]; then
+      run_agent "$prompt" "${shared[@]}" 2>&1 \
+        | tee >(python3 "$OTEL_SHIP" stream --otel "$OTEL_URL" --task "$TASK_NAME" \
+                  --backend "$BACKEND_LABEL" --run-id "$RUN_ID" --iter "$iter" >/dev/null) \
+        | python3 "$SHIP" stream --loki "$LOKI_URL" --task "$TASK_NAME" \
+            --backend "$BACKEND_LABEL" --run-id "$RUN_ID" --iter "$iter"
+    elif [[ "$OTEL_ENABLED" == "true" ]]; then
+      run_agent "$prompt" "${shared[@]}" 2>&1 | python3 "$OTEL_SHIP" stream \
+        --otel "$OTEL_URL" --task "$TASK_NAME" --backend "$BACKEND_LABEL" \
+        --run-id "$RUN_ID" --iter "$iter"
+    else
+      run_agent "$prompt" "${shared[@]}" 2>&1 | python3 "$SHIP" stream \
+        --loki "$LOKI_URL" --task "$TASK_NAME" --backend "$BACKEND_LABEL" \
+        --run-id "$RUN_ID" --iter "$iter"
+    fi
     return 0
   fi
   run_agent "$prompt" "${shared[@]}"
