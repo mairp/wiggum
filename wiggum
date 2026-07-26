@@ -287,6 +287,8 @@ for o in keep[-5:]:
     args=( -w "$WORKDIR" -s "$SPECS"
            --proposer "$PROPOSER_BACKEND" --critic "$CRITIC_BACKEND"
            --max-rejects "$MAX_REJECTS" --max-iter "$MAX_ITER" )
+    # Preserve the spec format across resume (older confs won't have it — auto-detect).
+    [[ -n "${SPEC_FORMAT:-}" ]] && args+=( --spec-format "$SPEC_FORMAT" )
     [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )
     [[ "${OTEL:-false}" == "true" ]] && args+=( --otel --otel-url "$OTEL_URL" )
     # anything extra passed to `wiggum resume` overrides the saved config
