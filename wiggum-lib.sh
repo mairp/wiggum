@@ -126,12 +126,24 @@ wiggum_spec_validate() {
   _wiggum_spec_py validate --specs "$specs"
 }
 
-# Print the first phase number lacking a GATE<N>-APPROVED marker in the given dir.
-# This is the resume point (crash-safe derivation). Prints nothing if all approved.
-# Markers live under <workdir>/.wiggum/gates/. Resume-truth for both the
-# orchestrator and the `wiggum` CLI.
+# Print the first phase number lacking a GATE<N>-APPROVED marker. This is the
+# resume point (crash-safe derivation); prints nothing if all approved. Resume-truth
+# for both the orchestrator and the `wiggum` CLI.
+#   $1 specs   $2 workdir   $3 gates dir (optional; feature-scoped state passes an
+#   explicit .wiggum/features/<slug>/gates. Omitted → legacy <workdir>/.wiggum/gates).
 wiggum_spec_first_unapproved() {
-  _wiggum_spec_py first-unapproved --specs "$1" --workdir "$2"
+  if [[ -n "${3:-}" ]]; then
+    _wiggum_spec_py first-unapproved --specs "$1" --workdir "$2" --gates-dir "$3"
+  else
+    _wiggum_spec_py first-unapproved --specs "$1" --workdir "$2"
+  fi
+}
+
+# Print the feature slug for a spec — the durable-state namespace under
+# .wiggum/features/<slug>/. A spec inside a .specify feature dir yields that dir's
+# sanitized basename; everything else (native SPECS.md, root-level spec) → "default".
+wiggum_spec_feature_slug() {
+  _wiggum_spec_py feature-slug --specs "$1"
 }
 
 # Print the adapter that would be used for a spec ("native" | "speckit-tasks").
@@ -139,8 +151,17 @@ wiggum_spec_detect() {
   _wiggum_spec_py detect --specs "$1"
 }
 
-# Print "name<TAB>path" for any Spec Kit context docs (spec.md/plan.md/constitution)
-# around a spec file. Empty output when the spec is not inside a .specify project.
+# Print "name<TAB>path" for any Spec Kit context docs (spec/plan/research/data-model/
+# quickstart/contracts*/checklists*/constitution) around a spec file. Empty output
+# when the spec is not inside a .specify project.
 wiggum_spec_context() {
   _wiggum_spec_py context --specs "$1"
+}
+
+# Print the fully-rendered Spec Kit context block for a spec — every context doc,
+# budget-allocated in descending gating order, line-clean + fence-safe truncated
+# under WIGGUM_CONTEXT_BUDGET. Empty for non-speckit specs. This is the ready-to-
+# inject block both the proposer prompt and the critic use (one truncation impl).
+wiggum_spec_render_context() {
+  _wiggum_spec_py render-context --specs "$1"
 }

@@ -64,12 +64,15 @@ Install Wiggum once (clone it wherever you keep tools); it is *not* the working
 directory. Each run points at your project:
 
 - **`-w/--workdir DIR`** — where the proposer works. All generated state lives
-  under `.wiggum/` — `PROGRESS.md` in `.wiggum/` and the gate files in
-  `.wiggum/gates/` — so the workdir root holds only your real artifacts.
-  Default: `$PWD`.
+  under `.wiggum/features/<slug>/` (gates, evidence, PROGRESS.md, verdicts), so the
+  workdir root holds only your real artifacts. Default: `$PWD`.
 - **`-s/--specs FILE`** — the spec, **any name, any location** (`SPECS.md`,
   `ROADMAP.md`, `plan.md`, …). A relative path resolves against the directory you
-  launched from, not the workdir. Default: `<workdir>/SPECS.md`.
+  launched from, not the workdir. Default: `<workdir>/SPECS.md` — or, inside a Spec
+  Kit project, [auto-discovered](#spec-resolution-zero-flag-start) with no `-s`.
+- **`--feature SLUG`** — the feature namespace for durable state
+  (`.wiggum/features/<slug>/`), for repos with more than one Spec Kit feature. Also
+  `WIGGUM_FEATURE`. Default: the feature dir's basename, or `default`.
 
 So the same installed Wiggum drives any project:
 
@@ -306,41 +309,61 @@ with **zero containers**. Two views over the same event stream:
 Everything is read-only **except `stop` and `resume`** — those are the only two
 subcommands that mutate a run (they write `stop.flag` / relaunch the orchestrator).
 
+All inspection subcommands take `--feature SLUG` and default to the **last run's
+feature** (from `.wiggum/last-run.conf`); `status --all` spans every feature.
+
 | Command | Shows / does |
 |---|---|
-| `wiggum status [-w DIR] [-s SPEC]` | one-screen state: a run-state headline (RUNNING / STOPPED / HALTED / DONE) + current phase + a ✓/✗ table of which contract files exist |
-| `wiggum phases [-w DIR] [-s SPEC]` | phases parsed from the spec + each one's state (also lints the spec) |
-| `wiggum tail   [-w DIR]` | `tail -f` the orchestrator `run.log` (the raw log) |
-| `wiggum events [-w DIR] [-f\|--follow] [--json]` | the raw event stream ("RPC view"): every milestone **and** every agent tool call / message as `HH:MM:SS event key=value…` lines. `--follow` streams; `--json` emits the raw JSONL |
-| `wiggum verdicts [-w DIR] [N]` | the critic's full reply(ies): prompt + response + parse decision |
-| `wiggum feedback <N> [-w DIR]` | `GATE<N>-FEEDBACK.md` |
+| `wiggum status [-w DIR] [-s SPEC] [--feature S] [--all]` | one-screen state: a run-state headline (RUNNING / STOPPED / HALTED / DONE) + current phase + a ✓/✗ table of which contract files exist. `--all` lists every feature with its approved/total phase counts |
+| `wiggum phases [-w DIR] [-s SPEC] [--feature S]` | phases parsed from the spec + each one's state (also lints the spec) |
+| `wiggum tail   [-w DIR] [--feature S]` | `tail -f` the orchestrator `run.log` (the raw log) |
+| `wiggum events [-w DIR] [--feature S] [-f\|--follow] [--json]` | the raw event stream ("RPC view"): every milestone **and** every agent tool call / message as `HH:MM:SS event key=value…` lines. `--follow` streams; `--json` emits the raw JSONL |
+| `wiggum verdicts [-w DIR] [--feature S] [N]` | the critic's full reply(ies): prompt + response + parse decision |
+| `wiggum feedback <N> [-w DIR] [--feature S]` | `GATE<N>-FEEDBACK.md` |
 | `wiggum watch  [-w DIR]` | the live status card (with heartbeat + run totals) |
-| `wiggum stop   [-w DIR] [--now]` | **(mutates)** request a clean stop — writes `stop.flag`; the run finishes its current pass and exits 6. `--now` also kill-trees the in-flight proposer pass (via `.wiggum/proposer.pid`) so it stops within seconds |
-| `wiggum resume [-w DIR] [overrides…]` | **(mutates)** relaunch the orchestrator from the saved config of the last run (`.wiggum/last-run.conf`); refuses if a run is already active. Extra args override the saved flags (last-wins) |
+| `wiggum stop   [-w DIR] [--now]` | **(mutates)** request a clean stop — writes `stop.flag`; the run finishes its current pass and exits 6. `--now` also kill-trees the in-flight proposer pass so it stops within seconds. Stops the single running run regardless of feature |
+| `wiggum resume [-w DIR] [--feature S] [overrides…]` | **(mutates)** relaunch the orchestrator from the saved config of the last run (`.wiggum/last-run.conf`, or a feature's own with `--feature`); refuses if a run is already active. Extra args override the saved flags (last-wins) |
 
 ## The on-disk contract
 
-`SPECS.md` is the one input you write; it can live anywhere (`-s`). Everything
-else Wiggum generates lives under `.wiggum/gates/`, so the workdir root stays
-clean — only your real project artifacts sit there.
+`SPECS.md` (or a Spec Kit `tasks.md`) is the one input you write; it can live
+anywhere (`-s`, or discovered — see [Spec resolution](#spec-resolution-zero-flag-start)).
+Everything else Wiggum generates lives under `.wiggum/`, **namespaced per feature**,
+so the workdir root stays clean — only your real project artifacts sit there.
 
 | File | Written by | Meaning |
 |---|---|---|
-| `SPECS.md` | you | Ordered phases + acceptance criteria (the input). |
-| `.wiggum/PROGRESS.md` | proposer | Durable state; read first each iteration. |
-| `.wiggum/gates/GATE<N>-EVIDENCE.md` | proposer | Evidence phase N's criteria are met. Written atomically. |
-| `.wiggum/gates/GATE<N>-APPROVED` | **critic** | Empty marker; unblocks phase N+1. |
-| `.wiggum/gates/GATE<N>-FEEDBACK.md` | **critic** | Present after a REJECT; the gaps to fix. |
+| `SPECS.md` / `tasks.md` | you | Ordered phases + acceptance criteria (the input). |
+| `.wiggum/features/<slug>/PROGRESS.md` | proposer | Durable state; read first each iteration. |
+| `.wiggum/features/<slug>/gates/GATE<N>-EVIDENCE.md` | proposer | Evidence phase N's criteria are met. Written atomically. |
+| `.wiggum/features/<slug>/gates/GATE<N>-APPROVED` | **critic** | Empty marker; unblocks phase N+1. |
+| `.wiggum/features/<slug>/gates/GATE<N>-FEEDBACK.md` | **critic** | Present after a REJECT; the gaps to fix. |
 | `.wiggum/` | orchestrator | State dir (see below). The current phase is **derived** from the `GATE*` markers, never stored. |
 
-`.wiggum/` holds: `gates/` (all the phase-control files above — this is the one
-place to look for what the loop produced), `runs/<run-id>/{run.log,events.jsonl}` (each run isolated;
-stable `run.log`/`events.jsonl` symlinks point at the newest), `stop.flag`,
-`lock`, `last-run.conf` (the `%q`-escaped, sourceable config of the last launch —
-what `wiggum resume` replays), `proposer.pid` (the in-flight proposer pass, so
-`wiggum stop --now` can kill the tree; removed when the pass ends), `verdicts/`
-(critic transcripts), `attempts/phase<N>/attempt<M>/` (archived rejected attempts
-— the full audit trail), and `debug/`.
+**Feature-scoped state.** Durable state hangs off `.wiggum/features/<slug>/` so
+multiple Spec Kit features can build into **one** repo without their gates,
+evidence, and verdicts colliding. `<slug>` is the feature-dir basename when the
+spec lives inside a `.specify` project (`001-reverse-engineering-analysis`), and
+`default` otherwise — which is also the back-compat identity of every pre-v2
+`.wiggum/gates/` on disk (a native workdir keeps its state, transparently migrated
+once on the next run).
+
+| Path | Scope | Holds |
+|---|---|---|
+| `.wiggum/features/<slug>/gates/` (+ `gates/proofs/`) | per-feature | all the phase-control files above — where to look for what the loop produced |
+| `.wiggum/features/<slug>/runs/<run-id>/{run.log,events.jsonl}` | per-feature | each run isolated |
+| `.wiggum/features/<slug>/{verdicts,attempts,debug}/` | per-feature | critic transcripts, archived rejected attempts (`attempts/phase<N>/attempt<M>/`), debug dumps |
+| `.wiggum/features/<slug>/PROGRESS.md`, `last-run.conf` | per-feature | proposer notes; that feature's resume config |
+| `.wiggum/lock`, `.wiggum/stop.flag` | **workdir** | one run per repo, ever — concurrency is per-workdir, **not** per-feature |
+| `.wiggum/run.log`, `.wiggum/events.jsonl` | **workdir** | symlinks retargeted into the **active** feature's newest run, so `wiggum tail`/`watch`/`events` work with no flags |
+| `.wiggum/last-run.conf` | **workdir** | the active-feature pointer + last launch config; what bare `wiggum resume` replays |
+| `.wiggum/features/<slug>/proposer.pid` | per-feature | in-flight proposer pass, so `wiggum stop --now` can kill the tree |
+
+**One run per workdir.** The `lock` stays at the `.wiggum/` root: a second
+`wiggum run` in the same workdir exits `E_LOCK` (5) **even for a different
+feature**, because the workdir *is* the repo and two features mutating one source
+tree concurrently is a corruption, not a feature. Sequence features with the
+operator; `wiggum status --all` makes the sequence visible.
 
 ### The event stream
 
@@ -361,7 +384,7 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | `attempt_archived` | orchestrator | a rejected evidence file was archived before retry |
 | `verdict` | critic | the critic's APPROVED/REJECTED decision |
 | `reject` | orchestrator | phase N rejected (attempt M) with feedback |
-| `git_checkpoint` / `gates_migrated` | orchestrator | per-phase commit / one-time gate-file relocation |
+| `git_checkpoint` / `gates_migrated` | orchestrator | per-phase commit / one-time relocation of pre-v2 state into `features/default/` |
 | `agent_init` | agent tap | once per pass: model + tool count |
 | `agent_tool` | agent tap | every proposer tool call: tool name + compact target |
 | `agent_text` | agent tap | first line of each assistant message (thinking/narration) |
@@ -401,17 +424,79 @@ cited file paths are exactly what the grounding pass verifies):
 ```
 
 When the `tasks.md` lives inside a Spec Kit project (a `.specify/` directory above
-it), the feature's `spec.md` / `plan.md` and the project `constitution.md` are
-injected into the proposer prompt as **read-only context** — they explain the
-*why/how*, but only the tasks are gated. A file named `tasks.md`, or any doc whose
-`## Phase N:` headings carry `- [ ]` task lines and no `### Acceptance criteria`, is
-detected as `speckit-tasks`; everything else is `native`. A runnable example lives
-at `examples/speckit-tasks.example.md`:
+it), the feature's **full design-doc set** is injected into both the proposer prompt
+and the critic as **read-only context** — they explain the *why/how* and are the
+documents a grounding claim is verified against, but only the tasks are gated. The
+set, in **descending gating value** (the order the context budget truncates from the
+tail):
+
+`constitution.md` → `spec.md` → `plan.md` → every `contracts/*.md` →
+`data-model.md` → `research.md` → `quickstart.md` → every `checklists/*.md`.
+
+Each is optional (included only when present). The **total** injected context
+respects `WIGGUM_CONTEXT_BUDGET` (default ~24000 chars), allocated across docs in
+that priority order with per-doc floors — so a large `plan.md` cannot starve
+`contracts/` — and truncation is line-clean and code-fence-safe (never mid-line,
+never a dangling ```` ``` ````), marked explicitly in the prompt.
+
+A file named `tasks.md`, or any doc whose `## Phase N:` headings carry `- [ ]` task
+lines and no `### Acceptance criteria`, is detected as `speckit-tasks`; everything
+else is `native`. A runnable example lives at `examples/speckit-tasks.example.md`:
 
 ```bash
 mkdir -p /tmp/wiggum-speckit && cp examples/speckit-tasks.example.md /tmp/wiggum-speckit/tasks.md
 wiggum run -w /tmp/wiggum-speckit -s /tmp/wiggum-speckit/tasks.md
 ```
+
+#### Spec resolution (zero-flag start)
+
+Inside a real Spec Kit project you rarely need `-s`. When it is omitted, Wiggum
+resolves the spec in this order (never picking silently between candidates):
+
+1. `<workdir>/SPECS.md` — unchanged precedence, so native users are unaffected.
+2. `<workdir>/.specify/feature.json` → its `feature_directory` → `<dir>/tasks.md`.
+3. glob `<workdir>/specs/*/tasks.md` — exactly one match is used; two or more with
+   no `--feature` exits `E_SPEC` (3) listing every candidate with the `-s` and
+   `--feature` forms to disambiguate.
+4. none of the above → an error naming every location tried.
+
+So a single-feature project starts with just `wiggum run -w <project>`:
+
+```bash
+wiggum run -w ./            # resolves specs/001-.../tasks.md, no -s
+```
+
+#### Multiple features in one repo
+
+Spec Kit numbers every feature's `tasks.md` from 1 and builds them all into one
+repo. Wiggum keeps each feature's gates independent under
+`.wiggum/features/<slug>/` (above), selected with `--feature SLUG` (or
+`WIGGUM_FEATURE`) — which also disambiguates step 3 of resolution. The inspection
+CLI is feature-aware: `wiggum status`/`phases`/`verdicts`/`feedback`/`tail`/`events`
+take `--feature` and default to the last run's feature; `wiggum status --all` lists
+every feature with its approved/total phase counts; `wiggum resume --feature X`
+replays that feature's saved config (preserving its `SPEC_FORMAT`).
+
+```bash
+wiggum run    -w ./ --feature 001-login     # run one feature to completion
+wiggum run    -w ./ --feature 002-billing   # then the next — independent gates
+wiggum status -w ./ --all                    # see both, side by side
+```
+
+#### `SPECS.md` vs `tasks.md`: which is the source of truth?
+
+Never keep both for the same work — gate approvals live in `.wiggum/`, not in
+either markdown, so a hand-written `SPECS.md` beside a `tasks.md` becomes a second,
+un-reconciled source of truth and the `tasks.md` checkboxes silently drift.
+
+- **Inside a `.specify` project → `tasks.md` is the SoT.** It is generated from the
+  feature's `spec.md`/`plan.md`; let Spec Kit own it.
+- **For non-feature-shaped work → `SPECS.md` (native) is the SoT.** Migrations,
+  refactors, ops roadmaps, this repo's own specs — anything not a Spec Kit feature.
+
+Wiggum never writes checkbox state back into `tasks.md`; approvals stay in
+`.wiggum/features/<slug>/gates/`, so there is exactly one source of truth for
+"is phase N done".
 
 > **Runtime is bash + python3 stdlib** — no pip, no dependency manager,
 > clone-and-run. Contributors run the test suite with the stdlib runner:

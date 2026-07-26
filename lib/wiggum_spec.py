@@ -19,9 +19,11 @@ Two adapters ship:
                         headings and each phase's acceptance criteria are its
                         ``- [ ] T### …`` task lines (every task is a checkable,
                         file-path-bearing deliverable — exactly what the critic's
-                        grounding pass verifies). ``spec.md`` / ``plan.md`` /
-                        ``constitution.md`` from the surrounding ``.specify`` project
-                        are surfaced as read-only *context*, never as gates.
+                        grounding pass verifies). The full feature-dir document set
+                        (``spec.md`` / ``plan.md`` / ``research.md`` /
+                        ``data-model.md`` / ``quickstart.md`` / ``contracts/*`` /
+                        ``checklists/*``) plus the project ``constitution.md`` are
+                        surfaced as read-only *context*, never as gates.
 
 The adapter is chosen by :func:`detect_format`: an explicit override
 (``--format`` / ``WIGGUM_SPEC_FORMAT``) wins, else a filename+content sniff, else
@@ -292,22 +294,183 @@ def find_specify_root(start):
     return None
 
 
+def _sanitize_slug(name):
+    """Reduce a feature-dir basename to the durable-state slug charset
+    ``[A-Za-z0-9._-]``. Disallowed runs collapse to a single ``-``; leading/trailing
+    separators are trimmed. An empty or all-illegal name yields ``""`` so the caller
+    can fall back to ``default``."""
+    s = re.sub(r'[^A-Za-z0-9._-]+', '-', name or "").strip("-")
+    return s
+
+
+def feature_slug(specs_path):
+    """The feature namespace for durable state (`.wiggum/features/<slug>/`).
+
+    When the resolved spec lives inside a `.specify` project AND in a feature
+    subdirectory of it (the Spec Kit shape: `specs/001-…/tasks.md`), the slug is
+    that feature dir's sanitized basename (`001-reverse-engineering-analysis`).
+    Everything else — a native SPECS.md, or a spec sitting at the project root —
+    resolves to `default`, which is also the back-compat identity of every existing
+    `.wiggum/gates/` on disk (so a pre-v2 native workdir keeps its state)."""
+    feature_dir = os.path.dirname(os.path.abspath(specs_path))
+    root = find_specify_root(feature_dir)
+    if not root or os.path.abspath(feature_dir) == os.path.abspath(root):
+        return "default"
+    slug = _sanitize_slug(os.path.basename(feature_dir))
+    return slug or "default"
+
+
 def speckit_context(specs_path):
-    """Return {name: path} for Spec Kit context docs around a spec file, if any:
-    sibling spec.md / plan.md in the feature dir, and the global constitution at
-    <root>/.specify/memory/constitution.md. Only existing files are returned."""
+    """Return an ordered ``{name: path}`` of Spec Kit context docs around a spec
+    file — read-only background for the proposer and critic, never a gate.
+
+    Ordered by DESCENDING gating value (constitution, spec, plan, contracts,
+    data-model, research, quickstart, checklists) because Phase 5's context budget
+    truncates from the tail, so the most decision-relevant docs must come first.
+    Every entry is optional and included only when the file exists. ``contracts/``
+    and ``checklists/`` files get compound, collision-proof names
+    (``contract:grounding-rules`` / ``checklist:requirements``). Returns ``{}`` when
+    the spec is not inside a ``.specify`` project."""
     out = {}
     feature_dir = os.path.dirname(os.path.abspath(specs_path))
-    for name, fn in (("spec", "spec.md"), ("plan", "plan.md")):
-        p = os.path.join(feature_dir, fn)
-        if os.path.isfile(p):
-            out[name] = p
     root = find_specify_root(feature_dir)
+
+    # 1. constitution (project-wide charter — highest gating value)
     if root:
         cons = os.path.join(root, ".specify", "memory", "constitution.md")
         if os.path.isfile(cons):
             out["constitution"] = cons
+    # 2. spec, 3. plan — the feature's what/how
+    for name, fn in (("spec", "spec.md"), ("plan", "plan.md")):
+        p = os.path.join(feature_dir, fn)
+        if os.path.isfile(p):
+            out[name] = p
+    # 4. contracts/*.md — the interface/behavior each phase is verified against
+    for p in sorted(_glob_md(os.path.join(feature_dir, "contracts"))):
+        out["contract:%s" % _stem(p)] = p
+    # 5. data-model, 6. research, 7. quickstart — supporting design detail
+    for name, fn in (("data-model", "data-model.md"),
+                     ("research", "research.md"),
+                     ("quickstart", "quickstart.md")):
+        p = os.path.join(feature_dir, fn)
+        if os.path.isfile(p):
+            out[name] = p
+    # 8. checklists/*.md — lowest gating value, truncated first
+    for p in sorted(_glob_md(os.path.join(feature_dir, "checklists"))):
+        out["checklist:%s" % _stem(p)] = p
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Context rendering + safe truncation (Phase 5). ONE implementation, shared by
+#  the proposer prompt (orchestrator.sh) and the critic (critic.py), so both inject
+#  the same Spec Kit background under the same budget with the same fence-safe cuts.
+# ─────────────────────────────────────────────────────────────────────────────
+CONTEXT_BUDGET_DEFAULT = 24000    # total chars across ALL context docs (WIGGUM_CONTEXT_BUDGET)
+CONTEXT_DOC_FLOOR      = 1200     # min chars a doc gets before it is dropped, so a
+                                  # large plan.md cannot starve contracts/ of space
+
+
+def _truncate_clean(text, limit):
+    """Return `text` cut to at most `limit` chars WITHOUT splitting a line and
+    WITHOUT leaving an unbalanced ``` code fence. Appends a visible marker when it
+    truncates. A single line longer than the limit is hard-cut (last resort) but
+    still fence-balanced."""
+    if len(text) <= limit:
+        body, truncated = text, False
+    else:
+        cut = text.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit                       # one giant line: hard cut
+        body, truncated = text[:cut], True
+    # Balance code fences: if an odd number of ``` opened, close the block so the
+    # surrounding prompt markdown isn't swallowed by a dangling fence.
+    if body.count("```") % 2 == 1:
+        body = body.rstrip("\n") + "\n```"
+    if truncated:
+        body = body.rstrip("\n") + "\n… (context truncated at line boundary) …"
+    return body
+
+
+def _allocate_budget(sizes, total, floor):
+    """Split `total` chars across docs of the given `sizes` (in priority order —
+    index 0 is highest value). Each doc gets what it needs up to a fair share;
+    leftover cascades forward. A doc that would receive less than `floor` is dropped
+    (returns 0) so the tail cannot get an unreadable sliver — but a doc smaller than
+    the floor is kept whole. Returns a same-length list of per-doc char budgets."""
+    n = len(sizes)
+    out = [0] * n
+    remaining = total
+    for i, sz in enumerate(sizes):
+        if remaining <= 0:
+            break
+        left = n - i
+        share = max(remaining // left, floor)
+        give = min(sz, share, remaining)
+        # Drop a doc that can't clear the floor UNLESS the whole doc fits in it.
+        if give < floor and sz > give:
+            give = 0
+        out[i] = give
+        remaining -= give
+    return out
+
+
+def render_context(specs_path, budget=None, fmt=None):
+    """Render the Spec Kit context set for a spec as a single prompt block, honoring
+    a TOTAL char budget (WIGGUM_CONTEXT_BUDGET) allocated in descending gating order
+    with per-doc floors and fence-safe, line-clean truncation. Returns "" when the
+    spec is not a Spec Kit tasks.md or has no surrounding context docs."""
+    if fmt is None:
+        try:
+            with open(specs_path, encoding="utf-8", errors="replace") as fh:
+                fmt = detect_format(specs_path, fh.read())
+        except OSError:
+            return ""
+    if fmt != "speckit-tasks":
+        return ""
+    ctx = speckit_context(specs_path)
+    if not ctx:
+        return ""
+    if budget is None:
+        try:
+            budget = int(os.environ.get("WIGGUM_CONTEXT_BUDGET", CONTEXT_BUDGET_DEFAULT))
+        except ValueError:
+            budget = CONTEXT_BUDGET_DEFAULT
+
+    names = list(ctx.keys())
+    bodies, sizes = [], []
+    for name in names:
+        try:
+            with open(ctx[name], encoding="utf-8", errors="replace") as fh:
+                b = fh.read()
+        except OSError:
+            b = ""
+        bodies.append(b)
+        sizes.append(len(b))
+    allocs = _allocate_budget(sizes, budget, CONTEXT_DOC_FLOOR)
+
+    blocks = []
+    for name, path, body, alloc in zip(names, [ctx[n] for n in names], bodies, allocs):
+        if alloc <= 0:
+            continue
+        rendered = _truncate_clean(body, alloc)
+        blocks.append("## Context: %s (read-only background, NOT a gate) — %s\n%s"
+                      % (name, path, rendered))
+    return "\n\n".join(blocks)
+
+
+def _glob_md(directory):
+    """Every *.md file directly inside `directory` (empty when it is not a dir)."""
+    try:
+        return [os.path.join(directory, fn) for fn in os.listdir(directory)
+                if fn.endswith(".md") and os.path.isfile(os.path.join(directory, fn))]
+    except OSError:
+        return []
+
+
+def _stem(path):
+    """Basename without its `.md` extension (`grounding-rules.md` → `grounding-rules`)."""
+    return os.path.splitext(os.path.basename(path))[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,13 +499,24 @@ def main(argv=None):
                                  description="Wiggum spec parser (single source of truth)")
     ap.add_argument("subcommand",
                     choices=["numbers", "title", "slice", "validate",
-                             "first-unapproved", "detect", "context"])
+                             "first-unapproved", "detect", "context",
+                             "render-context", "feature-slug"])
     ap.add_argument("n", nargs="?", help="phase number (for title/slice)")
     ap.add_argument("--specs", required=True)
     ap.add_argument("--workdir", default=".")
+    ap.add_argument("--gates-dir", default=None,
+                    help="explicit gates dir for first-unapproved (else "
+                         "<workdir>/.wiggum/gates)")
     ap.add_argument("--format", default=None,
                     help="native|speckit-tasks (else auto-detect)")
     args = ap.parse_args(argv)
+
+    # feature-slug is a pure-path operation — it needs neither the spec text nor a
+    # resolved format, so answer it before reading/sniffing (a slug must resolve even
+    # for an odd spec).
+    if args.subcommand == "feature-slug":
+        print(feature_slug(args.specs))
+        return 0
 
     text = _read(args.specs)
     try:
@@ -358,6 +532,11 @@ def main(argv=None):
     if args.subcommand == "context":
         for name, path in speckit_context(args.specs).items():
             print("%s\t%s" % (name, path))
+        return 0
+
+    if args.subcommand == "render-context":
+        # Budget-aware, fence-safe context block (Phase 5). Empty for non-speckit.
+        sys.stdout.write(render_context(args.specs, fmt=fmt))
         return 0
 
     if args.subcommand == "validate":
@@ -390,7 +569,10 @@ def main(argv=None):
         return 0
 
     if args.subcommand == "first-unapproved":
-        gates = os.path.join(os.path.abspath(args.workdir), ".wiggum", "gates")
+        # Gates dir is explicit when given (feature-scoped state lives under
+        # .wiggum/features/<slug>/gates); else the legacy <workdir>/.wiggum/gates.
+        gates = (args.gates_dir if args.gates_dir
+                 else os.path.join(os.path.abspath(args.workdir), ".wiggum", "gates"))
         for p in get_phases(text, fmt):
             if not os.path.isfile(os.path.join(gates, "GATE%d-APPROVED" % p.n)):
                 print(p.n)
