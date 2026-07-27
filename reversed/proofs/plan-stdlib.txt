@@ -1,0 +1,15 @@
+27:optional telemetry sinks — all on a stdlib-only, clone-and-run runtime.
+31:**Language/Version**: Bash (orchestration spine) + Python 3 standard library
+32:(all `lib/*.py` components; no version pin, CPython3 stdlib only). Runtime tools:
+37:`urllib.request`, JSON is the stdlib `json` module, and OTLP/HTTP+JSON is
+38:hand-built (per `wiggum-lib.sh` head docstring "No pip, no jq" and `lib/critic.py`
+39:"All HTTP is stdlib urllib. No pip installs"). External *backends* the user may
+50:**Testing**: Stdlib-runnable Python test modules colocated in `lib/`
+53:runnable with the stdlib test invocation and no venv. A telemetry parity test
+73:**Constraints**: Stdlib-only / clone-and-run (no pip, no jq); every observability
+108:- **VI. Stdlib-Only, Clone-and-Run** — PASS. Technical Context records a
+109:  zero-dependency runtime (no pip, no jq); every Python component is stdlib-only.
+159:│   │                              #   APPROVED or GATE<N>-FEEDBACK.md; stdlib urllib.
+168:│   │                              #   (stdlib urllib; low-cardinality labels +
+179:│   └── _test_http.py              # shared stdlib HTTP test helper/fixtures.
+212:  coreutils + python3 stdlib, clone-and-run) without giving up structured parsing.

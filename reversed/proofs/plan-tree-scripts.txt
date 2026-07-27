@@ -1,0 +1,13 @@
+16:phase of a spec, a **proposer** (`proposer.sh`, the "Ralph" role) runs a fresh
+21:bounded attempt. An **orchestrator** (`orchestrator.sh`, the "Maggie" role)
+38:hand-built (per `wiggum-lib.sh` head docstring "No pip, no jq" and `lib/critic.py`
+82:(`orchestrator.sh`, `proposer.sh`, `wiggum`, `wiggum-lib.sh`) + 8 Python library
+94:  (`proposer.sh` `test -f <evidence>`; `orchestrator.sh` hands the path to the
+135:├── orchestrator.sh                # "Maggie" driver: phase loop; derives resume
+141:├── proposer.sh                    # "Ralph" worker: fresh headless coding-agent
+145:├── wiggum                         # CLI front door: run / status / watch / tail /
+148:├── wiggum-lib.sh                  # shared bash lib sourced by the three above:
+203:  (`orchestrator.sh`, `proposer.sh`, `wiggum`, `wiggum-lib.sh`), and it keeps the
+209:  `wiggum-lib.sh` (bash → Python parser) and the shared `events.jsonl` record
+215:  grammar was historically hardcoded twice — awk inside `wiggum-lib.sh` and a
+223:  `wiggum-lib.sh` calls the parser through the thin `wiggum_spec_*` shims (its head

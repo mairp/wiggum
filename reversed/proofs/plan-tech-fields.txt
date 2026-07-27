@@ -1,0 +1,9 @@
+31:**Language/Version**: Bash (orchestration spine) + Python 3 standard library
+35:**Primary Dependencies**: NONE beyond the language runtimes. Explicitly no `pip`
+43:**Storage**: Plain files on disk. Durable per-feature state is namespaced under
+50:**Testing**: Stdlib-runnable Python test modules colocated in `lib/`
+56:**Target Platform**: Linux (developed/tested on a Linux host; bash + coreutils +
+61:**Project Type**: Single-project CLI / orchestration tool (a bash-driven
+65:**Performance Goals**: Not throughput-bound. Human-perceptible responsiveness for
+73:**Constraints**: Stdlib-only / clone-and-run (no pip, no jq); every observability
+81:**Scale/Scope**: Small, self-contained tool — 4 top-level bash entrypoints

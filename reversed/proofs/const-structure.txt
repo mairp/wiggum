@@ -1,0 +1,8 @@
+11:## Core Principles
+13:### I. File-Based Coordination, No Watcher (NON-NEGOTIABLE)
+31:### II. Adversarial, Non-Self-Approving Gate (NON-NEGOTIABLE)
+48:### III. Grounded, Read-Only, Injection-Proof Verification (NON-NEGOTIABLE)
+66:### IV. Single Source of Truth for Spec Grammar
+84:### V. Best-Effort Observability That Never Breaks the Loop
+100:### VI. Stdlib-Only, Clone-and-Run (NON-NEGOTIABLE)
+147:## Governance

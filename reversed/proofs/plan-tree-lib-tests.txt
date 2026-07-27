@@ -1,0 +1,8 @@
+51:(`test_wiggum_spec.py`, `test_critic.py`, `test_ralph_loki_ship.py`,
+52:`test_ralph_otel_ship.py`, `test_telemetry_parity.py`, `_test_http.py`),
+173:│   ├── test_wiggum_spec.py        # tests for the single spec parser.
+174:│   ├── test_critic.py             # tests for the critic gate.
+175:│   ├── test_ralph_loki_ship.py    # tests for the Loki shipper.
+176:│   ├── test_ralph_otel_ship.py    # tests for the OTLP shipper.
+177:│   ├── test_telemetry_parity.py   # parity test: the two shippers emit byte-
+179:│   └── _test_http.py              # shared stdlib HTTP test helper/fixtures.

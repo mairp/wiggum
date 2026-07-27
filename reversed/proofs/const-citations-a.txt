@@ -1,0 +1,6 @@
+7:  source file/lines where the enforcement lives. If a principle here ever stops
+22:- **Rationale / enforcement.** `orchestrator.sh` header states detection is "by
+25:  exited — no race window" (lines 13–15). `proposer.sh` header codifies the
+34:(`lib/critic.py`) generates a fresh random nonce per call and accepts a verdict
+40:- **Rationale / enforcement.** `lib/critic.py` module docstring: "The nonce is
+58:- **Rationale / enforcement.** `lib/critic.py` head docstring: "does a cheap

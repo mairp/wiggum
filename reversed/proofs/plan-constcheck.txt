@@ -1,0 +1,6 @@
+92:- **I. File-Based Coordination, No Watcher** — PASS. The plan's coordination
+96:- **II. Adversarial, Non-Self-Approving Gate** — PASS. The critic
+99:- **III. Grounded, Read-Only, Injection-Proof Verification** — PASS. Verification
+102:- **IV. Single Source of Truth for Spec Grammar** — PASS. All spec parsing routes
+105:- **V. Best-Effort Observability That Never Breaks the Loop** — PASS. The stream
+108:- **VI. Stdlib-Only, Clone-and-Run** — PASS. Technical Context records a

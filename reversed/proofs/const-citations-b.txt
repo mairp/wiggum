@@ -1,0 +1,21 @@
+62:  (`lib/critic.py:39–40`), and the snapshot/probe machinery lives in the same
+70:`lib/wiggum_spec.py`. The bash side reaches it through thin `wiggum_spec_*` shims
+71:in `wiggum-lib.sh`; the critic reaches it via `import wiggum_spec`. The grammar
+75:- **Rationale / enforcement.** `lib/wiggum_spec.py` head docstring: "the SINGLE
+77:  twice — awk in wiggum-lib.sh and a regex mirror in lib/critic.py — kept in sync
+79:  registry." `wiggum-lib.sh` head docstring confirms its parsing helpers are
+80:  "thin shims that delegate to lib/wiggum_spec.py, the SINGLE source of truth …
+86:Everything observability-related — the stream tap (`lib/agent_stream.py`), the
+88:telemetry shippers (`lib/ralph_loki_ship.py`, `lib/ralph_otel_ship.py`) — is
+93:- **Rationale / enforcement.** `lib/agent_stream.py` head docstring: each action
+95:  the loop)." `lib/ralph_otel_ship.py` head docstring: "BEST-EFFORT — any failure
+108:- **Rationale / enforcement.** `wiggum-lib.sh` head docstring: "Deliberately
+110:  clone-and-run. No pip, no jq." `lib/critic.py` head docstring: "All HTTP is
+111:  stdlib urllib. No pip installs." `lib/ralph_otel_ship.py` head docstring: "No
+117:- **Language / runtime.** Bash (the orchestration spine: `orchestrator.sh`,
+118:  `proposer.sh`, `wiggum`, `wiggum-lib.sh`) + Python 3 stdlib (all `lib/*.py`
+123:  markers, never a stored counter (`orchestrator.sh` `derive_phase` →
+128:  without parsing logs (`orchestrator.sh` exit-code header block).
+131:  lock code (`orchestrator.sh` `acquire_lock`).
+135:- **Every code path degrades rather than fails.** Neither `orchestrator.sh` nor
+136:  `proposer.sh` uses `set -e` — "a failing proposer pass must not kill the run" —

@@ -1,0 +1,17 @@
+18:automated **critic** (`lib/critic.py`, the "Lisa" role) judges that evidence
+38:hand-built (per `wiggum-lib.sh` head docstring "No pip, no jq" and `lib/critic.py`
+97:  (`lib/critic.py`) is a separate role with a per-call nonce; the proposer that
+103:  through `lib/wiggum_spec.py`; bash uses `wiggum_spec_*` shims, the critic
+150:│                                  #   shims that delegate to lib/wiggum_spec.py.
+152:│   ├── wiggum_spec.py             # SINGLE source of truth for spec parsing:
+157:│   ├── critic.py                  # "Lisa" gate: grounding snapshot + harness probes
+160:│   ├── agent_stream.py            # always-on stream tap: parse the agent's
+163:│   ├── present.py                 # live presenter: render events as a scrolling
+165:│   ├── banner.py                  # cosmetics: startup ASCII portrait + palette /
+167:│   ├── ralph_loki_ship.py         # telemetry sink A: ship events.jsonl to Loki
+170:│   ├── ralph_otel_ship.py         # telemetry sink B: ship to an OTLP collector
+210:  shape (bash `wiggum_emit`, `critic.py` emit, `agent_stream.py` `EventSink` all
+214:- *Why `lib/wiggum_spec.py` is the single source of truth for spec parsing.* Spec
+216:  regex mirror inside `lib/critic.py` — and kept in sync by hand, which drifts.
+224:  docstring: parsing helpers are "thin shims that delegate to lib/wiggum_spec.py,
+225:  the SINGLE source of truth … both now call one parser"), and `lib/critic.py`
