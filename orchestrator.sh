@@ -351,6 +351,26 @@ migrate_root_gate_files() {
   (( moved > 0 )) && { log "----- migrated $moved stray control item(s) into features/default/ -----"; wiggum_emit gates_migrated count "$moved" dir "$DEFAULT_FEATURE_DIR"; }
 }
 
+# The canonical progress note is $FEATURE_DIR/PROGRESS.md. The proposer prompt says
+# so, but the LLM occasionally writes PROGRESS.md under the gates dir (or the workdir
+# root) despite that. migrate_root_gate_files() only runs once at startup, so a stray
+# copy written mid-run just lingers and confuses anyone reading the tree. Sweep it
+# back to the canonical path at each phase boundary. Newest content wins so a stray
+# copy holding later notes is not silently discarded. Read-only-safe: no-op when clean.
+sweep_stray_progress() {
+  local canon="$FEATURE_DIR/PROGRESS.md" f
+  for f in "$GATES_DIR/PROGRESS.md" "$WORKDIR/PROGRESS.md"; do
+    [[ -e "$f" && "$f" != "$canon" ]] || continue
+    if [[ -e "$canon" && "$canon" -nt "$f" ]]; then
+      rm -f "$f"                       # canonical is newer → stray is stale, drop it
+    else
+      mv -f "$f" "$canon"              # stray is newer (or canon absent) → promote it
+    fi
+    log "----- swept stray PROGRESS.md ($f) into $canon -----"
+    wiggum_emit progress_swept from "$f" to "$canon"
+  done
+}
+
 LOG="$RUN_DIR/run.log"
 WIGGUM_EVENTS="$RUN_DIR/events.jsonl"
 : > "$LOG"; : > "$WIGGUM_EVENTS"
@@ -713,6 +733,7 @@ run_phase() {
   wiggum_emit phase_start phase "$n" title "$title" total "$PHASE_COUNT"
   log ""
   log "===== PHASE $n${title:+ — $title}  ($(date -Is)) ====="
+  sweep_stray_progress
 
   while (( attempt <= MAX_REJECTS + 1 )); do
     # stop.flag / budget checks at each phase-boundary step
