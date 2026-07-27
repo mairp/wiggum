@@ -20,7 +20,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from critic import (extract_paths, grounding_gap, harness_probes,  # noqa: E402
-                    grounding_search_dirs, _resolve_cited)
+                    grounding_search_dirs, grounding_snapshot, _resolve_cited)
 
 
 def _probe(env_example_content):
@@ -126,6 +126,36 @@ def test_bare_citation_in_gate_subdir_resolves():
         assert _resolve_cited("nope.txt", d, sd) is None
 
 
+def test_snapshot_labels_bare_gate_citation_by_resolved_path():
+    """A bare `GATE0-EVIDENCE.md` citation (as written when describing the atomic
+    evidence write) resolves under the feature's gates/ dir. The snapshot MUST show
+    the workdir-relative resolved path, not the bare token — otherwise the critic
+    reads it as a ROOT-LEVEL file and rejects "no file outside reversed/" on a file
+    that only exists as expected .wiggum/ run-state (the phantom-gate reject bug)."""
+    with tempfile.TemporaryDirectory() as d:
+        gates_rel = os.path.join(".wiggum", "features", "default", "gates")
+        os.makedirs(os.path.join(d, gates_rel))
+        open(os.path.join(d, gates_rel, "GATE0-EVIDENCE.md"), "w").write("evidence\n")
+        sd = grounding_search_dirs(gates_rel, d)
+        snap = grounding_snapshot(["GATE0-EVIDENCE.md"], d, sd)
+        # The resolved feature-scoped path is shown …
+        assert gates_rel.replace(os.sep, "/") + "/GATE0-EVIDENCE.md" in snap.replace(os.sep, "/"), \
+            "snapshot must show resolved path, got:\n%s" % snap
+        # … and the file is reported present, not MISSING.
+        assert "MISSING" not in snap, "resolved file must not be MISSING:\n%s" % snap
+        # No bare root-level `GATE0-EVIDENCE.md` presence line survives the relabel.
+        assert "- `GATE0-EVIDENCE.md` —" not in snap, \
+            "bare root-level label must not appear, got:\n%s" % snap
+
+
+def test_snapshot_keeps_missing_label_for_absent_citation():
+    """A genuinely-absent citation still reports MISSING with the cited token — the
+    relabel only applies to files that actually resolved on disk."""
+    with tempfile.TemporaryDirectory() as d:
+        snap = grounding_snapshot(["reversed/nope.md"], d)
+        assert "- `reversed/nope.md` — **MISSING**" in snap, snap
+
+
 if __name__ == "__main__":
     test_config_dotfiles_and_long_suffixes_are_grounded()
     test_prose_fragments_are_not_grounded()
@@ -135,4 +165,6 @@ if __name__ == "__main__":
     test_secret_scan_passes_placeholders()
     test_gitignore_probe_reports_env_ignored()
     test_bare_citation_in_gate_subdir_resolves()
+    test_snapshot_labels_bare_gate_citation_by_resolved_path()
+    test_snapshot_keeps_missing_label_for_absent_citation()
     print("OK: all critic grounding assertions pass")

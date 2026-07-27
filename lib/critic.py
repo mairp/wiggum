@@ -429,12 +429,22 @@ def grounding_snapshot(paths, workdir, search_dirs=None):
             lines.append("- `%s` — **MISSING** (does not exist on disk)" % p)
             shown += 1
             continue
+        # Label the entry with the path we ACTUALLY resolved to, not the raw cited
+        # token. A bare basename (e.g. `GATE0-EVIDENCE.md`, cited while describing an
+        # atomic write) resolves via search_dirs to its real home under the feature's
+        # gates/ dir — but shown as the bare token it reads as a ROOT-LEVEL file and
+        # the critic rejects "no file outside reversed/" on a file that only exists in
+        # expected .wiggum/ run-state. Show the workdir-relative resolved path so the
+        # location is unambiguous. Absolute citations and already-exact paths are left
+        # as-is; a path resolving outside the workdir (rel starts with "..") keeps p.
+        rel = os.path.relpath(full, workdir)
+        disp = p if (os.path.isabs(p) or p == rel or rel.startswith("..")) else rel
         if os.path.isdir(full):
             try:
                 n = len(os.listdir(full))
             except OSError:
                 n = "?"
-            lines.append("- `%s` — directory, %s entries" % (p, n))
+            lines.append("- `%s` — directory, %s entries" % (disp, n))
             shown += 1
             continue
         mtime = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))
@@ -446,7 +456,7 @@ def grounding_snapshot(paths, workdir, search_dirs=None):
                     fh.seek(max(0, st.st_size - GROUNDING_TAIL_BYTES))
                     tail = fh.read(GROUNDING_TAIL_BYTES)
         except OSError as e:
-            lines.append("- `%s` — exists, %d bytes, mtime %s" % (p, st.st_size, mtime))
+            lines.append("- `%s` — exists, %d bytes, mtime %s" % (disp, st.st_size, mtime))
             lines.append("  (could not read: %s)" % e)
             shown += 1
             continue
@@ -460,11 +470,11 @@ def grounding_snapshot(paths, workdir, search_dirs=None):
             kind, dims = _sniff_binary(head)
             desc = "%s%s" % (kind, (", %s" % dims) if dims else "")
             lines.append("- `%s` — exists, %d bytes, mtime %s — binary (%s); "
-                         "content not excerpted" % (p, st.st_size, mtime, desc))
+                         "content not excerpted" % (disp, st.st_size, mtime, desc))
             shown += 1
             continue
 
-        lines.append("- `%s` — exists, %d bytes, mtime %s" % (p, st.st_size, mtime))
+        lines.append("- `%s` — exists, %d bytes, mtime %s" % (disp, st.st_size, mtime))
         shown += 1
         excerpt = head.decode("utf-8", "replace").replace("\x00", "�")
         if tail:
