@@ -1,0 +1,8 @@
+## Phase 1: Setup (Shared Infrastructure)
+## Phase 2: Foundational (Blocking Prerequisites)
+## Phase 3: User Story 1 - Deliver a whole specification unattended, behind a quality gate (Priority: P1) 🎯 MVP
+## Phase 4: User Story 2 - Watch the run work, live (Priority: P1)
+## Phase 5: User Story 3 - Stop, resume, and survive a crash (Priority: P2)
+## Phase 6: User Story 4 - Deliver many features in one repository (Priority: P2)
+## Phase 7: User Story 5 - Optionally stream observability to external dashboards (Priority: P3)
+## Phase 8: Polish & Cross-Cutting Concerns

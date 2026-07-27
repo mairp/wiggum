@@ -1,0 +1,13 @@
+### Phase Dependencies
+
+- **Setup (Phase 1)**: No dependencies — can start immediately.
+- **Foundational (Phase 2)**: Depends on Setup. BLOCKS all user stories — the parser
+  (`lib/wiggum_spec.py`) and the event stream (`wiggum-lib.sh`) are prerequisites for every story.
+- **User Story 1 (Phase 3, P1)**: Depends only on Foundational. This is the MVP.
+- **User Story 2 (Phase 4, P1)**: Depends on Foundational; consumes the event stream US1 emits
+  but is independently testable (a run can be watched without telemetry or resume).
+- **User Story 3 (Phase 5, P2)**: Depends on Foundational; builds on the US1 loop and marker set.
+- **User Story 4 (Phase 6, P2)**: Depends on Foundational; extends the parser and orchestrator.
+- **User Story 5 (Phase 7, P3)**: Depends on Foundational (the event stream); strictly additive
+  to every other story.
+- **Polish (Phase 8)**: Depends on all desired user stories being complete.

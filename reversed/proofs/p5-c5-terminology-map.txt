@@ -1,0 +1,16 @@
+#### Terminology map (role names ↔ as-built component names)
+
+This specification names the three roles technology-agnostically. The other reverse-engineered
+artifacts (`plan.md`, `research.md`, `data-model.md`, `quickstart.md`, `contracts/`,
+`memory/constitution.md`, `tasks.md`) refer to the same three roles by the as-built
+implementation component names. They are one-to-one:
+
+| Role (this spec)     | As-built component name | As-built file        |
+|----------------------|-------------------------|----------------------|
+| the authoring role   | **proposer**            | `proposer.sh`        |
+| the reviewing role   | **critic**              | `lib/critic.py`      |
+| the coordinating role| **orchestrator**        | `orchestrator.sh`    |
+
+Wherever a downstream artifact says "proposer", "critic", or "orchestrator", it denotes the
+authoring, reviewing, or coordinating role respectively; the terms are interchangeable and the
+mapping above is authoritative.

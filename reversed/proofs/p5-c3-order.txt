@@ -1,0 +1,13 @@
+### Within Each User Story
+
+- Tests (where included) are written to FAIL first, then implementation makes them pass.
+- Parser/model before consumers; event primitive before presenter and telemetry.
+- Core loop before archival/checkpoint; verification before feedback plumbing.
+- Story complete before moving to the next priority.
+
+### Parallel Opportunities
+
+- All Setup tasks marked [P] (T001–T005) touch different files and can run in parallel.
+- Foundational tasks T009–T012 marked [P] can run alongside the parser work once T006 lands.
+- Once Foundational completes, US1–US5 can proceed in parallel (different files) if staffed.
+- Test tasks marked [P] within a story run in parallel with each other.

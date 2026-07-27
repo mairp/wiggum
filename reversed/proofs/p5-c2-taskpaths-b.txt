@@ -1,0 +1,25 @@
+# Proof C2 (part b): every task T025-T047 cites an EXACT target file path.
+# Continues p5-c2-taskpaths-a.txt; 47 tasks total, 0 without a file path.
+T025 -> `proposer.sh`
+T026 -> `wiggum`
+T027 -> `lib/banner.py`
+T028 -> `orchestrator.sh`
+T029 -> `orchestrator.sh`
+T030 -> `proposer.sh`
+T031 -> `wiggum`
+T032 -> `orchestrator.sh`
+T033 -> `lib/wiggum_spec.py`
+T034 -> `lib/wiggum_spec.py`
+T035 -> `lib/wiggum_spec.py`
+T036 -> `wiggum`
+T037 -> `orchestrator.sh`
+T038 -> `orchestrator.sh`
+T039 -> `lib/test_ralph_loki_ship.py`
+T040 -> `lib/test_ralph_otel_ship.py`
+T041 -> `lib/test_telemetry_parity.py`
+T042 -> `lib/ralph_loki_ship.py`
+T043 -> `lib/ralph_otel_ship.py`
+T044 -> `README.md`
+T045 -> `reversed/quickstart.md`
+T046 -> `telemetry/docker-compose.yml`
+T047 -> `reversed/spec.md`

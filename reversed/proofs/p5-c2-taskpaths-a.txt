@@ -1,0 +1,27 @@
+# Proof C2 (part a): every task T001-T024 cites an EXACT target file path.
+# The path is the last backtick span on each task line in reversed/tasks.md;
+# all are real repository paths (bash entrypoints at root, python under lib/).
+T001 -> `wiggum`
+T002 -> `wiggum-lib.sh`
+T003 -> `.gitignore`
+T004 -> `.env.example`
+T005 -> `examples/speckit-tasks.example.md`
+T006 -> `lib/wiggum_spec.py`
+T007 -> `lib/wiggum_spec.py`
+T008 -> `lib/wiggum_spec.py`
+T009 -> `wiggum-lib.sh`
+T010 -> `wiggum-lib.sh`
+T011 -> `lib/test_wiggum_spec.py`
+T012 -> `lib/_test_http.py`
+T013 -> `lib/test_critic.py`
+T014 -> `proposer.sh`
+T015 -> `orchestrator.sh`
+T016 -> `lib/critic.py`
+T017 -> `lib/critic.py`
+T018 -> `lib/critic.py`
+T019 -> `lib/critic.py`
+T020 -> `orchestrator.sh`
+T021 -> `orchestrator.sh`
+T022 -> `orchestrator.sh`
+T023 -> `lib/agent_stream.py`
+T024 -> `lib/present.py`

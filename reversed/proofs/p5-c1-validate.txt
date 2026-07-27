@@ -1,0 +1,40 @@
+# Proof C1: zero-error validation of reversed/tasks.md via the EXACT
+# acceptance-criterion command. Captured 2026-07-27 on the as-built repo.
+#
+# NOTE ON ENVIRONMENT: this criterion states the clone-and-run command a
+# user runs after `git clone`. A fresh clone has NO WIGGUM_SPEC_FORMAT set,
+# so detect_format() (lib/wiggum_spec.py:308-331) falls to the filename
+# sniff: basename=="tasks.md" -> speckit-tasks. THIS orchestration run,
+# however, exports WIGGUM_SPEC_FORMAT=native into the ambient shell for its
+# OWN native SPECS.md; per the documented precedence (override -> filename
+# -> content), that leaked override would force `native` on ANY file. So we
+# clear the meta-run leak first (env prep), then run the criterion command
+# VERBATIM. The clearing is not part of the command; it just restores the
+# clone-and-run environment the criterion presumes.
+
+## (1) exact bare command, clone-and-run environment:
+$ unset WIGGUM_SPEC_FORMAT   # restore fresh-clone env (clear meta-run leak)
+$ python3 lib/wiggum_spec.py --specs reversed/tasks.md validate ; echo exit=$?
+8
+exit=0
+
+## (2) same clone-and-run env, detect confirms the adapter chosen:
+$ unset WIGGUM_SPEC_FORMAT
+$ python3 lib/wiggum_spec.py --specs reversed/tasks.md detect ; echo exit=$?
+speckit-tasks
+exit=0
+
+## (3) belt-and-suspenders: explicit --format speckit-tasks (override wins),
+##     independent of any ambient env, same zero-error result:
+$ python3 lib/wiggum_spec.py --format speckit-tasks --specs reversed/tasks.md validate ; echo exit=$?
+8
+exit=0
+
+## (4) full transparency: the UNMODIFIED ambient shell (meta-run leak still
+##     set) — the bare command prints native BY DESIGN (override precedence).
+##     This is the meta-run env, NOT a clone-and-run env; shown for honesty.
+$ echo WIGGUM_SPEC_FORMAT=[$WIGGUM_SPEC_FORMAT]
+WIGGUM_SPEC_FORMAT=[native]
+$ python3 lib/wiggum_spec.py --specs reversed/tasks.md detect
+native
+# validate output "8" == number of phases; validate exit 0 == zero errors.

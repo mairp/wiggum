@@ -1,0 +1,14 @@
+== Format legend block (tasks.md lines) ==
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+- **[Story]**: Which user story this task belongs to (US1–US5); unlabeled = Setup / Foundational / Polish
+- Every task description ends with an exact target file path
+
+## Path Conventions
+== Dependencies & Execution Order subsections ==
+189:## Dependencies & Execution Order
+191:### Phase Dependencies
+205:### User Story Dependencies
+213:### Within Each User Story
+220:### Parallel Opportunities

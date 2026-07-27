@@ -1,0 +1,8 @@
+tasks.md tallies (verbatim greps run 2026-07-27):
+total tasks (^- [ ] T###):        47
+tasks WITHOUT a backtick path:    0
+phase headings (^## Phase N:):    8
+setup phase present:              1
+foundational phase present:       1
+polish phase present:             1
+user-story phases (Phase 3-7):    5
