@@ -1,0 +1,19 @@
+Phase 3 · Criterion 3 — the CLI contract lists all seven exit codes (0–6) with
+meanings matching orchestrator.sh.
+
+reversed/contracts/cli.md §4 lists all seven codes. They match orchestrator.sh:26-31
+verbatim:
+
+  #    0 all phases approved · 1 internal error · 2 MAX_REJECTS exceeded (human) ·
+  #    3 invalid spec/config · 4 budget exceeded (wall/MAX_ITER) · 5 lock held ·
+  #    6 stopped via stop.flag (clean; rerun resumes).
+  E_OK=0; E_INTERNAL=1; E_REJECTS=2; E_SPEC=3; E_BUDGET=4; E_LOCK=5; E_STOP=6
+
+Table in cli.md §4:
+  0 E_OK       all phases approved                        orchestrator.sh:582,888
+  1 E_INTERNAL internal error (cd/python3/no-evidence)    orchestrator.sh:790-792
+  2 E_REJECTS  MAX_REJECTS exceeded → HALT                orchestrator.sh:866-867
+  3 E_SPEC     invalid spec/config/bad usage              orchestrator.sh:510-512
+  4 E_BUDGET   wall budget or proposer max-iter           orchestrator.sh:746-750,785-789
+  5 E_LOCK     another run holds the lock                 orchestrator.sh:493,499
+  6 E_STOP     stopped via stop.flag (clean; resumes)     orchestrator.sh:740-745,777-782

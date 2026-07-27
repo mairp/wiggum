@@ -1,0 +1,19 @@
+Phase 3 · Criterion 4b — event contract: the agent-tap set + synthetic _reopen.
+
+reversed/contracts/events.md §3 — agent-tap events, emitter lib/agent_stream.py
+(declared agent_stream.py:15-19):
+
+  agent_init       model, tools(count)                    agent_stream.py:177-181
+  agent_tool       tool(name), target                     agent_stream.py:194-199
+  agent_text       text (first line ≤160 chars)           agent_stream.py:188-193
+  agent_result     model,cost_usd,duration_ms,num_turns,  agent_stream.py:217-232
+                   input_tokens,output_tokens,cache_*
+  evidence_writing tool, target                           agent_stream.py:200-204
+
+reversed/contracts/events.md §4 — the synthetic event, emitter lib/present.py:
+
+  _reopen          (no fields; envelope-less control marker)  lib/present.py:378-382
+
+_reopen is injected by the presenter (NOT written to events.jsonl) when the followed
+events.jsonl symlink is retargeted by a new run (st_dev/st_ino change), so the
+timeline resets across runs. Handled at lib/present.py:222, 504, 644.

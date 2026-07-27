@@ -1,0 +1,24 @@
+Phase 3 · Criterion 6 — spec-format contract states resolution order, ambiguity
+rule, and context-injection priority order.
+
+reversed/contracts/spec-formats.md §3 — four-step spec resolution order
+(orchestrator.sh:159-233, resolve_spec):
+  1. <workdir>/SPECS.md                      orchestrator.sh:169-172
+  2. .specify/feature.json → feature_dir/tasks.md   orchestrator.sh:173-190
+  3. glob specs/*/tasks.md                    orchestrator.sh:191-207
+  4. none → error listing every location tried   orchestrator.sh:219-227
+
+spec-formats.md §3a — ambiguity rule: 2+ glob candidates AND no --feature → loud
+E_SPEC error listing each candidate + the disambiguating commands; NEVER auto-selects
+("nothing auto-selected"). orchestrator.sh:208-218 (return 2 → exit 3 at 230-232).
+
+spec-formats.md §4 — context-injection priority order (speckit_context,
+lib/wiggum_spec.py:415-453), highest gating value first (budget truncates from tail):
+  1 constitution.md   (.specify/memory/)   lib/wiggum_spec.py:430-433
+  2 spec.md                                lib/wiggum_spec.py:436-439
+  3 plan.md                                lib/wiggum_spec.py:436-439
+  4 contracts/*.md   (contract:<stem>)     lib/wiggum_spec.py:440-442
+  5 data-model.md                          lib/wiggum_spec.py:443-449
+  6 research.md                            lib/wiggum_spec.py:443-449
+  7 quickstart.md                          lib/wiggum_spec.py:443-449
+  8 checklists/*.md  (checklist:<stem>)    lib/wiggum_spec.py:450-452

@@ -1,0 +1,17 @@
+Phase 3 · Criterion 2 — reversed/contracts/ contains ≥4 documents covering CLI,
+filesystem layout, event schema, and spec formats.
+
+The directory reversed/contracts/ holds EXACTLY these four contract documents (4 ≥ 4):
+
+  reversed/contracts/cli.md          → CLI: front-door routing, launch flags+defaults,
+                                       inspection verbs, exit-code table 0–6.
+  reversed/contracts/filesystem.md   → on-disk .wiggum/ layout + rules (writer
+                                       discipline, atomicity, stale-evidence archival,
+                                       lock scope, migration, symlink retargeting).
+  reversed/contracts/events.md       → events.jsonl schema: envelope + every lifecycle,
+                                       agent-tap, and synthetic event with emitter.
+  reversed/contracts/spec-formats.md → both grammars, auto-detection, four-step spec
+                                       resolution order, budgeted context injection.
+
+Each maps 1:1 to a required coverage area: CLI, filesystem layout, event schema,
+spec formats.

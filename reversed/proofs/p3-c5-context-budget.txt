@@ -1,0 +1,18 @@
+Phase 3 · Criterion 5 — configuration model records WIGGUM_CONTEXT_BUDGET with its
+default and the per-doc floor, as implemented in lib/wiggum_spec.py.
+
+reversed/data-model.md §10b (and spec-formats.md §4) record:
+
+  Knob:      WIGGUM_CONTEXT_BUDGET
+  Default:   CONTEXT_BUDGET_DEFAULT = 24000 chars (total across ALL context docs)
+  Per-doc floor: CONTEXT_DOC_FLOOR = 1200 chars (a doc that would receive less is
+                 dropped, unless the whole doc fits within the floor)
+
+Verbatim source (lib/wiggum_spec.py:461-462):
+  CONTEXT_BUDGET_DEFAULT = 24000    # total chars across ALL context docs (WIGGUM_CONTEXT_BUDGET)
+  CONTEXT_DOC_FLOOR      = 1200     # min chars a doc gets before it is dropped
+
+The env knob is read in render_context (lib/wiggum_spec.py:526-530):
+  budget = int(os.environ.get("WIGGUM_CONTEXT_BUDGET", CONTEXT_BUDGET_DEFAULT))
+  (falls back to CONTEXT_BUDGET_DEFAULT on unset or non-integer).
+The floor is enforced in _allocate_budget (lib/wiggum_spec.py:487-507).

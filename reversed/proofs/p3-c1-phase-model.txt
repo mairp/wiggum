@@ -1,0 +1,21 @@
+Phase 3 · Criterion 1 — data-model.md defines the Phase model's four attributes.
+
+reversed/data-model.md §1 documents the Phase model with EXACTLY these four
+attributes, as implemented in lib/wiggum_spec.py:54-61:
+
+  n        int        phase number (also the GATE<N> id)       lib/wiggum_spec.py:58
+  title    str        human title (heading after the number)   lib/wiggum_spec.py:59
+  section  str        full heading→next-heading slice (raw)     lib/wiggum_spec.py:60
+  criteria list[str]  the checkable acceptance lines            lib/wiggum_spec.py:61
+
+Verbatim source (lib/wiggum_spec.py:54-61):
+    class Phase:
+        __slots__ = ("n", "title", "section", "criteria")
+        def __init__(self, n, title, section, criteria):
+            self.n = n
+            self.title = title
+            self.section = section
+            self.criteria = criteria
+
+__slots__ binds the class to these four fields only, so the normalized shape is
+enforced by the data structure. See reversed/data-model.md section "1. Phase model".

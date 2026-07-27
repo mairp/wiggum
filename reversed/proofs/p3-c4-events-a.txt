@@ -1,0 +1,21 @@
+Phase 3 · Criterion 4a — event contract: lifecycle events + all six run_stop reasons.
+
+reversed/contracts/events.md §2 documents (event → key fields → emitter → source):
+
+  run_start        workdir,phases,feature,proposer,critic,resume   orch  orchestrator.sh:575
+  run_end          outcome,phases                                  orch  orchestrator.sh:581,887
+  run_stop         reason,phase (+rc/attempts)                     orch  orchestrator.sh:742..866
+  phase_start      phase,title,total                               orch  orchestrator.sh:733
+  phase_done       phase,attempt,title                             orch  orchestrator.sh:822
+  verdict          phase,attempt,result,title,reason               CRITIC lib/critic.py:865,934
+  reject           phase,attempt                                   orch  orchestrator.sh:835
+  attempt_archived phase,attempt,dir                               orch  orchestrator.sh:635
+  git_checkpoint   phase                                           orch  orchestrator.sh:597
+
+The six run_stop reason values (events.md §2a), matching orchestrator.sh:
+  stop_flag            orchestrator.sh:742,779   (exit E_STOP=6)
+  wall_budget          orchestrator.sh:748       (exit E_BUDGET=4)
+  proposer_max_iter    orchestrator.sh:787       (exit E_BUDGET=4)
+  proposer_no_evidence orchestrator.sh:791       (exit E_INTERNAL=1)
+  critic_config        orchestrator.sh:829       (exit E_SPEC=3)
+  max_rejects          orchestrator.sh:866       (exit E_REJECTS=2)
