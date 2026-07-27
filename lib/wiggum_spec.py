@@ -7,7 +7,7 @@ wiggum-lib.sh and a regex mirror in lib/critic.py — kept in sync by hand. This
 module unifies both behind one small **document-type adapter registry** so a new
 spec format is one adapter, not a second parser to keep in sync.
 
-Two adapters ship:
+Three adapters ship:
 
   * ``native``        — the original grammar: a phase is a level-2 heading
                         ``## Phase <N>`` containing a ``### Acceptance criteria``
@@ -27,6 +27,12 @@ Two adapters ship:
                         ``data-model.md`` / ``quickstart.md`` / ``contracts/*`` /
                         ``checklists/*``) plus the project ``constitution.md`` are
                         surfaced as read-only *context*, never as gates.
+
+  * ``openspec-change`` — an OpenSpec change ``tasks.md``: numbered level-2
+                         work sections become phases and their checkbox items
+                         become required deliverables. ``proposal.md``, delta
+                         specs, ``design.md``, and the matching current system
+                         specs are surfaced as read-only context.
 
 The adapter is chosen by :func:`detect_format`: an explicit override
 (``--format`` / ``WIGGUM_SPEC_FORMAT``) wins, else a filename+content sniff, else
@@ -294,6 +300,79 @@ def _validate_speckit(text):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  OpenSpec change adapter — openspec/changes/<change>/tasks.md.
+# ─────────────────────────────────────────────────────────────────────────────
+_OPENSPEC_HEAD = re.compile(r'^##[ \t]+([0-9]+)[.)]?[ \t]+(.+?)\s*$', re.M)
+_OPENSPEC_TASK = re.compile(
+    r'^[ \t]*-[ \t]*\[[ xX]?\][ \t]+([0-9]+(?:\.[0-9]+)+)\b[ \t]*(.*)$',
+    re.M,
+)
+
+
+def _parse_openspec(text):
+    lines = text.splitlines()
+    phases = []
+    cur = None
+    for ln in lines:
+        m = _OPENSPEC_HEAD.match(ln)
+        if m:
+            if cur is not None:
+                phases.append(cur)
+            cur = {"n": int(m.group(1)), "title": m.group(2).strip(),
+                   "section": [ln], "criteria": []}
+            continue
+        if cur is not None and _ANY_L2.match(ln):
+            phases.append(cur)
+            cur = None
+        if cur is not None:
+            cur["section"].append(ln)
+            task = _OPENSPEC_TASK.match(ln)
+            if task:
+                cur["criteria"].append(
+                    (task.group(1) + " " + task.group(2)).strip()
+                )
+    if cur is not None:
+        phases.append(cur)
+    return [Phase(p["n"], p["title"], "\n".join(p["section"]), p["criteria"])
+            for p in phases]
+
+
+def _validate_openspec(text):
+    phases = _parse_openspec(text)
+    errors = []
+    if not phases:
+        return False, 0, [
+            'OpenSpec tasks.md has zero phases '
+            '(need task-bearing "## <N>. <title>" sections)'
+        ]
+    for p in phases:
+        if not p.criteria:
+            errors.append(
+                'phase %d (%s) has no OpenSpec task checkboxes '
+                '("- [ ] N.N …" lines)' % (p.n, p.title or "?")
+            )
+    nums = [p.n for p in phases]
+    for i in range(1, len(nums)):
+        if nums[i] == nums[i - 1]:
+            errors.append("duplicate phase number: %d" % nums[i])
+        if nums[i] != nums[i - 1] + 1:
+            errors.append("non-contiguous phases: %d follows %d (must ascend by 1)"
+                          % (nums[i], nums[i - 1]))
+    return len(errors) == 0, len(phases), errors
+
+
+def is_openspec_tasks_path(path):
+    """Whether path has the canonical openspec/changes/<change>/tasks.md shape."""
+    norm = os.path.normpath(os.path.abspath(path))
+    change_dir = os.path.dirname(norm)
+    changes_dir = os.path.dirname(change_dir)
+    openspec_root = os.path.dirname(changes_dir)
+    return (os.path.basename(norm).lower() == "tasks.md"
+            and os.path.basename(changes_dir) == "changes"
+            and os.path.basename(openspec_root) == "openspec")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Adapter registry + format detection.
 # ─────────────────────────────────────────────────────────────────────────────
 ADAPTERS = {
@@ -302,6 +381,9 @@ ADAPTERS = {
     "speckit-tasks": {"parse": _parse_speckit, "validate": _validate_speckit,
                       "criteria_heading":
                           "Tasks to complete (each `- [ ]` is a required deliverable)"},
+    "openspec-change": {"parse": _parse_openspec, "validate": _validate_openspec,
+                        "criteria_heading":
+                            "OpenSpec tasks to complete (each `- [ ]` is required)"},
 }
 
 
@@ -316,7 +398,12 @@ def detect_format(path, text, override=None):
         return ov
     if ov and ov not in ADAPTERS:
         # unknown explicit value: fail loudly rather than silently guessing
-        raise ValueError("unknown spec format: %s (native|speckit-tasks)" % ov)
+        raise ValueError(
+            "unknown spec format: %s "
+            "(native|speckit-tasks|openspec-change)" % ov
+        )
+    if is_openspec_tasks_path(path):
+        return "openspec-change"
     if os.path.basename(path).lower() == "tasks.md":
         return "speckit-tasks"
     has_ac = re.search(r'^###[ \t]+Acceptance[ \t]+criteria', text, re.M)
@@ -328,6 +415,8 @@ def detect_format(path, text, override=None):
     has_tasks = re.search(r'^[ \t]*-[ \t]*\[[ xX]?\][ \t]*T[0-9]', text, re.M)
     if has_phase and has_tasks and not has_ac:
         return "speckit-tasks"
+    if _OPENSPEC_HEAD.search(text) and _OPENSPEC_TASK.search(text):
+        return "openspec-change"
     return "native"
 
 
@@ -363,8 +452,12 @@ def phase_title(text_or_section, n=None, fmt="native"):
         m = _SPECKIT_PRIORITY_HEAD.match(
             (text_or_section or "").splitlines()[0] if text_or_section else ""
         )
-        return (text_or_section or "").splitlines()[0].split("##", 1)[1].strip() \
-            if m else ""
+        if m:
+            return (text_or_section or "").splitlines()[0].split("##", 1)[1].strip()
+        m = _OPENSPEC_HEAD.match(
+            (text_or_section or "").splitlines()[0] if text_or_section else ""
+        )
+        return m.group(2).strip() if m else ""
     for p in get_phases(text_or_section, fmt):
         if p.n == n:
             return p.title
@@ -398,18 +491,88 @@ def _sanitize_slug(name):
 def feature_slug(specs_path):
     """The feature namespace for durable state (`.wiggum/features/<slug>/`).
 
-    When the resolved spec lives inside a `.specify` project AND in a feature
-    subdirectory of it (the Spec Kit shape: `specs/001-…/tasks.md`), the slug is
-    that feature dir's sanitized basename (`001-reverse-engineering-analysis`).
-    Everything else — a native SPECS.md, or a spec sitting at the project root —
-    resolves to `default`, which is also the back-compat identity of every existing
-    `.wiggum/gates/` on disk (so a pre-v2 native workdir keeps its state)."""
+    A Spec Kit feature uses its feature-directory basename; an OpenSpec change
+    uses its change-directory basename. Everything else — a native SPECS.md, or a
+    spec sitting at the project root — resolves to `default`, which is also the
+    back-compat identity of every existing `.wiggum/gates/` on disk."""
+    openspec = openspec_change_paths(specs_path)
+    if openspec:
+        return _sanitize_slug(os.path.basename(openspec["change_dir"])) or "default"
     feature_dir = os.path.dirname(os.path.abspath(specs_path))
     root = find_specify_root(feature_dir)
     if not root or os.path.abspath(feature_dir) == os.path.abspath(root):
         return "default"
     slug = _sanitize_slug(os.path.basename(feature_dir))
     return slug or "default"
+
+
+def openspec_change_paths(specs_path):
+    """Resolve canonical OpenSpec locations for an active change tasks.md."""
+    path = os.path.normpath(os.path.abspath(specs_path))
+    if os.path.basename(path).lower() != "tasks.md":
+        return None
+    change_dir = os.path.dirname(path)
+    changes_dir = os.path.dirname(change_dir)
+    openspec_root = os.path.dirname(changes_dir)
+    if (os.path.basename(changes_dir) != "changes"
+            or os.path.basename(openspec_root) != "openspec"):
+        return None
+    return {
+        "root": openspec_root,
+        "change_dir": change_dir,
+        "change": os.path.basename(change_dir),
+    }
+
+
+def _glob_md_recursive(directory):
+    out = []
+    if not os.path.isdir(directory):
+        return out
+    for root, dirs, files in os.walk(directory):
+        dirs.sort()
+        for fn in sorted(files):
+            if fn.endswith(".md"):
+                out.append(os.path.join(root, fn))
+    return out
+
+
+def openspec_context(specs_path):
+    """Return ordered context artifacts for an OpenSpec active change.
+
+    The task list is the gate. Intent, delta requirements, design, and matching
+    current system specs are read-only context used to judge those gates.
+    """
+    locations = openspec_change_paths(specs_path)
+    if not locations:
+        return {}
+    root = locations["root"]
+    change_dir = locations["change_dir"]
+    out = {}
+
+    proposal = os.path.join(change_dir, "proposal.md")
+    if os.path.isfile(proposal):
+        out["proposal"] = proposal
+
+    delta_root = os.path.join(change_dir, "specs")
+    delta_specs = _glob_md_recursive(delta_root)
+    for path in delta_specs:
+        rel = os.path.relpath(path, delta_root)
+        name = os.path.splitext(rel)[0].replace(os.sep, "/")
+        out["delta-spec:%s" % name] = path
+
+    design = os.path.join(change_dir, "design.md")
+    if os.path.isfile(design):
+        out["design"] = design
+
+    # A delta at changes/<name>/specs/<domain>/spec.md modifies the current
+    # source of truth at openspec/specs/<domain>/spec.md.
+    for delta in delta_specs:
+        rel = os.path.relpath(delta, delta_root)
+        current = os.path.join(root, "specs", rel)
+        if os.path.isfile(current):
+            name = os.path.splitext(rel)[0].replace(os.sep, "/")
+            out["current-spec:%s" % name] = current
+    return out
 
 
 def speckit_context(specs_path):
@@ -508,19 +671,22 @@ def _allocate_budget(sizes, total, floor):
 
 
 def render_context(specs_path, budget=None, fmt=None):
-    """Render the Spec Kit context set for a spec as a single prompt block, honoring
+    """Render a supported document set as a single prompt context block, honoring
     a TOTAL char budget (WIGGUM_CONTEXT_BUDGET) allocated in descending gating order
     with per-doc floors and fence-safe, line-clean truncation. Returns "" when the
-    spec is not a Spec Kit tasks.md or has no surrounding context docs."""
+    adapter has no document context or no surrounding context docs exist."""
     if fmt is None:
         try:
             with open(specs_path, encoding="utf-8", errors="replace") as fh:
                 fmt = detect_format(specs_path, fh.read())
         except OSError:
             return ""
-    if fmt != "speckit-tasks":
+    if fmt == "speckit-tasks":
+        ctx = speckit_context(specs_path)
+    elif fmt == "openspec-change":
+        ctx = openspec_context(specs_path)
+    else:
         return ""
-    ctx = speckit_context(specs_path)
     if not ctx:
         return ""
     if budget is None:
@@ -600,7 +766,8 @@ def main(argv=None):
                     help="explicit gates dir for first-unapproved (else "
                          "<workdir>/.wiggum/gates)")
     ap.add_argument("--format", default=None,
-                    help="native|speckit-tasks (else auto-detect)")
+                    help="native|speckit-tasks|openspec-change "
+                         "(else auto-detect)")
     args = ap.parse_args(argv)
 
     # feature-slug is a pure-path operation — it needs neither the spec text nor a
@@ -622,12 +789,18 @@ def main(argv=None):
         return 0
 
     if args.subcommand == "context":
-        for name, path in speckit_context(args.specs).items():
+        if fmt == "speckit-tasks":
+            context = speckit_context(args.specs)
+        elif fmt == "openspec-change":
+            context = openspec_context(args.specs)
+        else:
+            context = {}
+        for name, path in context.items():
             print("%s\t%s" % (name, path))
         return 0
 
     if args.subcommand == "render-context":
-        # Budget-aware, fence-safe context block (Phase 5). Empty for non-speckit.
+        # Budget-aware, fence-safe context block for document-set adapters.
         sys.stdout.write(render_context(args.specs, fmt=fmt))
         return 0
 

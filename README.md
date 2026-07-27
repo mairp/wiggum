@@ -395,7 +395,7 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 ### Spec formats
 
 Wiggum parses the spec through a single pluggable layer (`lib/wiggum_spec.py` —
-the one source of truth both the bash side and the critic call). Two formats ship;
+the one source of truth both the bash side and the critic call). Three formats ship;
 the format is **auto-detected**, or forced with `--spec-format` /
 `WIGGUM_SPEC_FORMAT`.
 
@@ -448,7 +448,8 @@ never a dangling ```` ``` ````), marked explicitly in the prompt.
 
 A file named `tasks.md`, or any doc whose `## Phase N:` or task-bearing `## P<N>`
 headings carry `- [ ]` task lines and no `### Acceptance criteria`, is detected as
-`speckit-tasks`; everything else is `native`. A runnable example lives at
+`speckit-tasks` unless it has the canonical OpenSpec change path described below.
+A runnable Spec Kit example lives at
 `examples/speckit-tasks.example.md`:
 
 ```bash
@@ -456,16 +457,41 @@ mkdir -p /tmp/wiggum-speckit && cp examples/speckit-tasks.example.md /tmp/wiggum
 wiggum run -w /tmp/wiggum-speckit -s /tmp/wiggum-speckit/tasks.md
 ```
 
+**`openspec-change`** — an active
+[OpenSpec](https://github.com/Fission-AI/OpenSpec) change at
+`openspec/changes/<change>/tasks.md`. Each numbered level-2 task group becomes a
+Wiggum phase and its dotted checkbox items become required deliverables:
+
+```markdown
+## 1. Domain contract
+- [ ] 1.1 Add the export requirement.
+- [ ] 1.2 Add empty and populated-log scenarios.
+
+## 2. Implementation
+- [ ] 2.1 Implement the exporter in `src/audit/export.py`.
+```
+
+The change name becomes the feature-scoped Wiggum state slug. Wiggum injects the
+change's `proposal.md`, every delta `specs/**/spec.md`, `design.md`, and matching
+current `openspec/specs/**/spec.md` documents into both proposer and critic as
+read-only context. The task list remains the gate; Wiggum does not sync or archive
+the OpenSpec change.
+
+Canonical OpenSpec paths are detected before the generic `tasks.md` filename rule.
+The numbered task shape is also content-detected when the file has another name.
+A standalone example is available at `examples/openspec-tasks.example.md`.
+
 #### Spec resolution (zero-flag start)
 
-Inside a real Spec Kit project you rarely need `-s`. When it is omitted, Wiggum
-resolves the spec in this order (never picking silently between candidates):
+Inside a Spec Kit or OpenSpec project you rarely need `-s`. When it is omitted,
+Wiggum resolves the spec in this order (never picking silently between candidates):
 
 1. `<workdir>/SPECS.md` — unchanged precedence, so native users are unaffected.
 2. `<workdir>/.specify/feature.json` → its `feature_directory` → `<dir>/tasks.md`.
-3. glob `<workdir>/specs/*/tasks.md` — exactly one match is used; two or more with
-   no `--feature` exits `E_SPEC` (3) listing every candidate with the `-s` and
-   `--feature` forms to disambiguate.
+3. discover `<workdir>/specs/*/tasks.md` and
+   `<workdir>/openspec/changes/*/tasks.md` — exactly one match is used; two or more
+   with no `--feature` exits `E_SPEC` (3), listing every candidate with the `-s`
+   and `--feature` forms to disambiguate.
 4. none of the above → an error naming every location tried.
 
 So a single-feature project starts with just `wiggum run -w <project>`:

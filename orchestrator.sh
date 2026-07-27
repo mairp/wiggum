@@ -48,14 +48,13 @@ OPTIONS
                         <workdir>/SPECS.md). A relative path resolves against the
                         directory you launched from, not the workdir. Lets you
                         keep the spec (e.g. ROADMAP.md, plan.md) wherever it lives.
-  --spec-format FMT     Spec grammar: native | speckit-tasks. Default: auto-detect
-                        (a GitHub Spec Kit tasks.md is recognized by name/content;
-                        everything else is native "## Phase <N>" + acceptance
-                        criteria). Also settable via WIGGUM_SPEC_FORMAT.
+  --spec-format FMT     Spec grammar: native | speckit-tasks | openspec-change.
+                        Default: auto-detect. Also settable via
+                        WIGGUM_SPEC_FORMAT.
   --feature SLUG        Feature namespace for durable state (.wiggum/features/SLUG/).
-                        Default: the feature dir's basename when the spec lives in a
-                        .specify project, else "default". Also disambiguates when a
-                        workdir has multiple specs/*/task.md. Also via WIGGUM_FEATURE.
+                        Default: the Spec Kit feature or OpenSpec change directory
+                        basename, else "default". Also disambiguates multiple
+                        discovered task specs. Also via WIGGUM_FEATURE.
   --proposer BACKEND    Proposer backend: claude | codex | bebop[:name]
                         (default: $WIGGUM_PROPOSER or claude).
   --critic BACKEND      Critic provider: claude | codex | bebop
@@ -92,7 +91,7 @@ fi
 
 WORKDIR="$PWD"
 SPECS=""
-SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect (native|speckit-tasks)
+SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect
 FEATURE="${WIGGUM_FEATURE:-}"           # explicit feature slug (Spec Kit multi-feature)
 START_PHASE=""
 DEBUG="false"
@@ -162,8 +161,8 @@ WORKDIR="$PWD"
 # between ambiguous candidates:
 #   1. <workdir>/SPECS.md            — unchanged precedence; native users unaffected.
 #   2. .specify/feature.json         — its feature_directory → <dir>/tasks.md.
-#   3. glob specs/*/tasks.md         — exactly one → use it; --feature selects among
-#                                      many; 2+ and no --feature → E_SPEC (loud).
+#   3. discover Spec Kit and OpenSpec active-change tasks.md files — exactly one
+#                                      → use it; --feature selects among many.
 #   4. none of the above             — error listing every location tried.
 resolve_spec() {
   # 1. native SPECS.md at the workdir root wins (no behavior change).
@@ -188,18 +187,19 @@ except Exception:
       fi
     fi
   fi
-  # 3. glob specs/*/tasks.md.
+  # 3. discover Spec Kit features and active OpenSpec changes.
   local -a cands=()
   local t
   shopt -s nullglob
   for t in "$WORKDIR"/specs/*/tasks.md; do cands+=("$t"); done
+  for t in "$WORKDIR"/openspec/changes/*/tasks.md; do cands+=("$t"); done
   shopt -u nullglob
   if [[ -n "$FEATURE" ]]; then
     # --feature selects the matching candidate directly (basename of its dir).
     for t in "${cands[@]}"; do
       [[ "$(basename "$(dirname "$t")")" == "$FEATURE" ]] && { printf '%s\n' "$t"; return 0; }
     done
-    echo "spec not found: no specs/$FEATURE/tasks.md under $WORKDIR (--feature $FEATURE)" >&2
+    echo "spec not found: no feature/change '$FEATURE' tasks.md under $WORKDIR" >&2
     return 1
   fi
   if [[ "${#cands[@]}" -eq 1 ]]; then
@@ -223,6 +223,7 @@ except Exception:
     echo "    - $WORKDIR/SPECS.md              (native default)"
     echo "    - $WORKDIR/.specify/feature.json (Spec Kit feature pointer)"
     echo "    - $WORKDIR/specs/*/tasks.md      (Spec Kit feature glob)"
+    echo "    - $WORKDIR/openspec/changes/*/tasks.md (OpenSpec active changes)"
   } >&2
   return 1
 }
@@ -258,11 +259,12 @@ export WIGGUM_SPEC_FORMAT="$SPEC_FORMAT"
 #     run.log, events.jsonl    ← symlinks retargeted into the active feature's run.
 #     features/<slug>/
 #       gates/ (+ gates/proofs/) attempts/ verdicts/ debug/ runs/  PROGRESS.md
-# <slug> = the feature-dir basename inside a .specify project; "default" otherwise
+# <slug> = the Spec Kit feature or OpenSpec change directory basename; "default"
+# otherwise
 # (also the back-compat identity of every pre-v2 .wiggum/gates/ on disk).
 STATE_DIR="$WORKDIR/.wiggum"
 # Resolve the feature slug: explicit --feature/WIGGUM_FEATURE wins (sanitized);
-# else derive from the spec's location under a .specify project.
+# else derive from the spec's Spec Kit/OpenSpec location.
 if [[ -n "$FEATURE" ]]; then
   SLUG="$(printf '%s' "$FEATURE" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//')"
   [[ -n "$SLUG" ]] || SLUG="default"
@@ -663,8 +665,8 @@ build_proposer_prompt() {
     echo "${GATES_REL}/GATE${n}-EVIDENCE.md.tmp first, then \`mv\` it onto"
     echo "${GATES_REL}/GATE${n}-EVIDENCE.md (mv within the same folder is atomic, so the"
     echo "gate never sees a half file)."
-    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
-      echo "The evidence must, for EACH task (- [ ] T…) below, state concretely how it is"
+    if [[ "$SPEC_FORMAT" != "native" ]]; then
+      echo "The evidence must, for EACH checkbox task below, state concretely how it is"
       echo "completed and cite the exact files/paths it produced or changed. Do NOT write"
       echo "the evidence file until every task is actually done — its mere existence ends"
       echo "this phase."
@@ -676,24 +678,21 @@ build_proposer_prompt() {
     echo
     # The criteria heading is adapter-specific: native calls them acceptance
     # criteria; a Spec Kit tasks.md phase is a checklist of deliverable tasks.
-    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
+    if [[ "$SPEC_FORMAT" == "openspec-change" ]]; then
+      echo "## OpenSpec tasks to complete (each \`- [ ]\` is required)"
+    elif [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
       echo "## Tasks to complete (each \`- [ ]\` is a required deliverable)"
     else
       echo "## Acceptance criteria (the phase spec)"
     fi
     echo "$section"
-    # Spec Kit context: inject the feature's full design-doc set (spec/plan/research/
-    # data-model/quickstart/contracts*/checklists*/constitution) as read-only
-    # background when the spec lives inside a .specify project. Budget-allocated,
-    # line-clean + fence-safe truncation is done once in wiggum_spec.render_context.
-    # These are CONTEXT, never gates — the tasks above are the only thing gated.
-    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
-      local ctx_block
-      ctx_block="$(wiggum_spec_render_context "$SPECS" 2>/dev/null)"
-      if [[ -n "$ctx_block" ]]; then
-        echo
-        printf '%s\n' "$ctx_block"
-      fi
+    # Document-set context (Spec Kit or OpenSpec) is read-only background. The
+    # shared renderer owns discovery, priority, budgeting, and safe truncation.
+    local ctx_block
+    ctx_block="$(wiggum_spec_render_context "$SPECS" 2>/dev/null)"
+    if [[ -n "$ctx_block" ]]; then
+      echo
+      printf '%s\n' "$ctx_block"
     fi
     if [[ "$attempt" -gt 1 && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
       echo

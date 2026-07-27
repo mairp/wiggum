@@ -56,7 +56,7 @@ def die(code, msg):
 # ─────────────────────────────────────────────────────────────────────────────
 #  SPEC slicing — delegated to the shared parser (lib/wiggum_spec.py), the single
 #  source of truth for every spec format. `fmt` is the adapter chosen for this
-#  spec (native | speckit-tasks); it is resolved once in main() and threaded here.
+#  spec; it is resolved once in main() and threaded here.
 # ─────────────────────────────────────────────────────────────────────────────
 def slice_phase(specs_text, n, fmt="native"):
     return wiggum_spec.slice_phase(specs_text, n, fmt)
@@ -711,10 +711,11 @@ def main():
                     default=int(os.environ.get("WIGGUM_CRITIC_TIMEOUT", "300")))
     ap.add_argument("--grounding", default=os.environ.get("WIGGUM_CRITIC_GROUNDING", "true"))
     ap.add_argument("--format", default=os.environ.get("WIGGUM_SPEC_FORMAT") or None,
-                    help="spec format: native|speckit-tasks (else auto-detect)")
+                    help="spec format: native|speckit-tasks|openspec-change "
+                         "(else auto-detect)")
     ap.add_argument("--feature", default=os.environ.get("WIGGUM_FEATURE") or None,
                     help="feature slug — durable state under .wiggum/features/<slug>/ "
-                         "(else derived from the spec's .specify location)")
+                         "(else derived from its Spec Kit/OpenSpec location)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -722,7 +723,7 @@ def main():
     n = args.phase
     # Durable state is feature-scoped: .wiggum/features/<slug>/. The slug is passed
     # explicitly by the orchestrator (--feature/WIGGUM_FEATURE); a standalone critic
-    # invocation derives it from the spec's .specify location (default otherwise).
+    # invocation derives it from the spec's Spec Kit/OpenSpec location.
     slug = args.feature or wiggum_spec.feature_slug(args.specs)
     slug = re.sub(r'[^A-Za-z0-9._-]+', '-', slug or "").strip("-") or "default"
     feature_dir = os.path.join(workdir, ".wiggum", "features", slug)
@@ -800,9 +801,8 @@ def main():
         # a shell — the gate stays deterministic and injection-proof.
         grounding += harness_probes(paths, section, evidence, workdir)
 
-    # Spec Kit design context (Phase 5): the full feature-dir doc set as read-only
-    # background, budget-allocated + fence-safe truncated by the shared renderer.
-    # Only non-empty for a speckit-tasks spec inside a .specify project.
+    # Document-set context (Spec Kit/OpenSpec): read-only background,
+    # budget-allocated and fence-safe truncated by the shared renderer.
     context = wiggum_spec.render_context(args.specs, fmt=fmt)
 
     nonce = secrets.token_hex(8)

@@ -83,6 +83,7 @@ wiggum_emit() {
 #  WIGGUM_SPEC_FORMAT / the orchestrator's --spec-format):
 #    * native        — "## Phase <N>" + "### Acceptance criteria" (the original).
 #    * speckit-tasks — a GitHub Spec Kit tasks.md ("## Phase N:" + "- [ ] T###").
+#    * openspec-change — an OpenSpec change tasks.md ("## N. Title" + "- [ ] N.N").
 #
 #  These shims keep the exact names, arguments, stdout and exit codes the awk had,
 #  so every call site in orchestrator.sh and the wiggum CLI is unchanged. The
@@ -118,7 +119,7 @@ wiggum_spec_slice() {
 
 # Validate the spec. Prints errors to stderr and returns non-zero on: zero phases,
 # duplicate/non-contiguous phase numbers, or a phase missing its criteria block
-# (native: "### Acceptance criteria"; speckit-tasks: "- [ ] T###" task lines).
+# (native acceptance criteria, Spec Kit T### tasks, or OpenSpec N.N tasks).
 # On success prints the phase count to stdout and returns 0.
 wiggum_spec_validate() {
   local specs="$1"
@@ -146,22 +147,20 @@ wiggum_spec_feature_slug() {
   _wiggum_spec_py feature-slug --specs "$1"
 }
 
-# Print the adapter that would be used for a spec ("native" | "speckit-tasks").
+# Print the adapter that would be used for a spec.
 wiggum_spec_detect() {
   _wiggum_spec_py detect --specs "$1"
 }
 
-# Print "name<TAB>path" for any Spec Kit context docs (spec/plan/research/data-model/
-# quickstart/contracts*/checklists*/constitution) around a spec file. Empty output
-# when the spec is not inside a .specify project.
+# Print "name<TAB>path" for context docs owned by a document-set adapter.
 wiggum_spec_context() {
   _wiggum_spec_py context --specs "$1"
 }
 
-# Print the fully-rendered Spec Kit context block for a spec — every context doc,
+# Print the fully-rendered document-set context block for a spec — every context doc,
 # budget-allocated in descending gating order, line-clean + fence-safe truncated
-# under WIGGUM_CONTEXT_BUDGET. Empty for non-speckit specs. This is the ready-to-
-# inject block both the proposer prompt and the critic use (one truncation impl).
+# under WIGGUM_CONTEXT_BUDGET. Empty for formats without document context. This is
+# the ready-to-inject block both proposer and critic use (one truncation impl).
 wiggum_spec_render_context() {
   _wiggum_spec_py render-context --specs "$1"
 }
