@@ -137,11 +137,27 @@ def extract_paths(evidence_text):
 GROUNDING_SEARCH_DIRS = ("", ".wiggum/gates/proofs", ".wiggum/gates", "out")
 
 
-def grounding_search_dirs(gates_rel):
+def grounding_search_dirs(gates_rel, workdir=None):
     """The workdir-relative proof dirs to resolve a bare citation against, for the
     ACTIVE feature. `gates_rel` is .wiggum/features/<slug>/gates. Root first (so an
-    exact path wins), then the feature's proofs/ and gates/, then a bare `out`."""
-    return ("", os.path.join(gates_rel, "proofs"), gates_rel, "out")
+    exact path wins), then the feature's proofs/ and gates/, then a bare `out`.
+
+    When `workdir` is given, ALSO include every immediate subdirectory of the gates
+    dir (e.g. `gates/c6-run/`). Proposers routinely stage proofs in a per-run
+    subdir and cite them by bare basename; without those subdirs here a bare
+    citation of a file that plainly exists resolves to MISSING, and the critic
+    rejects a genuinely-satisfied criterion forever. Read-only listdir, best-effort."""
+    dirs = ["", os.path.join(gates_rel, "proofs"), gates_rel, "out"]
+    if workdir:
+        gates_abs = os.path.join(workdir, gates_rel)
+        try:
+            for name in sorted(os.listdir(gates_abs)):
+                sub = os.path.join(gates_rel, name)
+                if sub not in dirs and os.path.isdir(os.path.join(workdir, sub)):
+                    dirs.append(sub)
+        except OSError:
+            pass
+    return tuple(dirs)
 
 
 def _resolve_cited(p, workdir, search_dirs=None):
@@ -750,7 +766,7 @@ def main():
         paths = ev_paths + spec_paths
         # Resolve bare citations against the ACTIVE feature's proof dirs (Phase 2),
         # not a hardcoded flat .wiggum/gates.
-        search_dirs = grounding_search_dirs(gates_rel)
+        search_dirs = grounding_search_dirs(gates_rel, workdir)
         grounding = grounding_snapshot(paths, workdir, search_dirs) if paths else \
             "\n## Grounding snapshot\n(No file paths cited in the evidence.)"
         # Anti-blind-spot backstop: files cited (by evidence OR spec) that the strict

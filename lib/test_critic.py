@@ -19,7 +19,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from critic import extract_paths, grounding_gap, harness_probes  # noqa: E402
+from critic import (extract_paths, grounding_gap, harness_probes,  # noqa: E402
+                    grounding_search_dirs, _resolve_cited)
 
 
 def _probe(env_example_content):
@@ -109,6 +110,22 @@ def test_gitignore_probe_reports_env_ignored():
     assert ".env" in out and "IGNORED" in out and "PASS" in out
 
 
+def test_bare_citation_in_gate_subdir_resolves():
+    """A proof staged in a per-run subdir of gates/ (e.g. gates/c6-run/) and cited
+    by bare basename MUST resolve — otherwise the critic reports a present file as
+    MISSING and rejects a satisfied criterion forever (the phase-4 c6-run bug)."""
+    with tempfile.TemporaryDirectory() as d:
+        gates_rel = os.path.join(".wiggum", "features", "default", "gates")
+        subdir = os.path.join(d, gates_rel, "c6-run")
+        os.makedirs(subdir)
+        open(os.path.join(subdir, "proof-c1.txt"), "w").write("qwen3.6-35b-a3b\n")
+        sd = grounding_search_dirs(gates_rel, d)
+        assert any("c6-run" in x for x in sd), "gate subdir must be searched: %s" % (sd,)
+        assert _resolve_cited("proof-c1.txt", d, sd), "bare citation must resolve"
+        # A truly-absent file still resolves to None (no false positives).
+        assert _resolve_cited("nope.txt", d, sd) is None
+
+
 if __name__ == "__main__":
     test_config_dotfiles_and_long_suffixes_are_grounded()
     test_prose_fragments_are_not_grounded()
@@ -117,4 +134,5 @@ if __name__ == "__main__":
     test_secret_scan_flags_real_key()
     test_secret_scan_passes_placeholders()
     test_gitignore_probe_reports_env_ignored()
+    test_bare_citation_in_gate_subdir_resolves()
     print("OK: all critic grounding assertions pass")
