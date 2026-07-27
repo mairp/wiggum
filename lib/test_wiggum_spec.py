@@ -123,6 +123,60 @@ def test_speckit_phase_without_tasks_rejected():
     assert any("no task checkboxes" in e for e in errors)
 
 
+PRIORITY_TASKS = """\
+# Executable Tasks
+
+## P0 — Safety and correctness
+- [ ] T001 Create synthetic fixtures.
+- [ ] T002 Add a consistency test.
+
+## P1 — Contract alignment
+- [ ] T003 Align the CLI contract.
+
+## P1 — Security controls
+- [ ] T004 Add a residue audit.
+
+## P2 — Maintainability
+- [ ] T005 Add packaging metadata.
+
+## Dependency order
+Fixtures before regression tests.
+
+## Definition of done
+- use synthetic data;
+- keep documentation aligned.
+"""
+
+
+def test_speckit_priority_groups_become_unique_ordered_phases():
+    phases = wiggum_spec.get_phases(PRIORITY_TASKS, "speckit-tasks")
+    assert [p.n for p in phases] == [0, 1, 2, 3]
+    assert [p.title for p in phases] == [
+        "P0 — Safety and correctness",
+        "P1 — Contract alignment",
+        "P1 — Security controls",
+        "P2 — Maintainability",
+    ]
+    assert phases[2].criteria == ["T004 Add a residue audit."]
+
+
+def test_speckit_priority_groups_preserve_shared_trailing_context():
+    phases = wiggum_spec.get_phases(PRIORITY_TASKS, "speckit-tasks")
+    assert all("## Dependency order" in p.section for p in phases)
+    assert all("## Definition of done" in p.section for p in phases)
+    assert all("keep documentation aligned" in p.section for p in phases)
+
+
+def test_speckit_priority_groups_validate_with_repeated_priorities():
+    ok, count, errors = wiggum_spec.validate(PRIORITY_TASKS, "speckit-tasks")
+    assert ok and count == 4 and errors == []
+
+
+def test_speckit_priority_groups_detect_by_content():
+    assert wiggum_spec.detect_format("/x/work-items.md", PRIORITY_TASKS) \
+        == "speckit-tasks"
+
+
 # ── detection precedence ─────────────────────────────────────────────────────
 def test_explicit_override_beats_sniff():
     text = read(SPECKIT_SPEC)

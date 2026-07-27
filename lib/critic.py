@@ -593,10 +593,22 @@ def _http_json(url, headers, payload, timeout):
 
 
 def call_claude(prompt, model, timeout):
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Critic-specific overrides keep an Anthropic-compatible critic gateway
+    # isolated from the Claude CLI proposer, which inherits the process env.
+    key = (
+        os.environ.get("WIGGUM_CLAUDE_CRITIC_API_KEY", "")
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
     if not key:
-        raise RuntimeError("WIGGUM_CRITIC=claude needs ANTHROPIC_API_KEY")
-    base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/") or "https://api.anthropic.com"
+        raise RuntimeError(
+            "WIGGUM_CRITIC=claude needs WIGGUM_CLAUDE_CRITIC_API_KEY "
+            "or ANTHROPIC_API_KEY"
+        )
+    base = (
+        os.environ.get("WIGGUM_CLAUDE_CRITIC_BASE_URL", "")
+        or os.environ.get("ANTHROPIC_BASE_URL", "")
+        or "https://api.anthropic.com"
+    ).rstrip("/")
     url = base + "/v1/messages"
     headers = {"Content-Type": "application/json", "x-api-key": key,
                "anthropic-version": "2023-06-01"}

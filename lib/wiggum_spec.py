@@ -15,8 +15,11 @@ Two adapters ship:
                         Ported verbatim from the awk so existing SPECS.md files
                         parse byte-for-byte identically.
 
-  * ``speckit-tasks`` — a GitHub Spec Kit ``tasks.md``: phases are ``## Phase N:``
-                        headings and each phase's acceptance criteria are its
+  * ``speckit-tasks`` — a GitHub Spec Kit ``tasks.md``: explicit
+                        ``## Phase N:`` headings are used when present. Implementations
+                        that group tasks by priority (``## P0``, ``## P1``, including
+                        repeated priorities) are normalized into ordered, uniquely
+                        numbered phases. Each phase's acceptance criteria are its
                         ``- [ ] T### …`` task lines (every task is a checkable,
                         file-path-bearing deliverable — exactly what the critic's
                         grounding pass verifies). The full feature-dir document set
@@ -154,8 +157,15 @@ def _raw_after_phase(text, n):
 # ─────────────────────────────────────────────────────────────────────────────
 #  speckit-tasks adapter — GitHub Spec Kit tasks.md.
 #
-#  Heading form:  ## Phase <N>: <free text>   e.g.
+#  Preferred heading form:  ## Phase <N>: <free text>   e.g.
 #      ## Phase 3: User Story 1 - Login (Priority: P1) 🎯 MVP
+#  Some Spec Kit implementations emit priority groups instead:
+#      ## P0 — Safety and correctness
+#      ## P1 — Contract alignment
+#      ## P1 — Security controls
+#  In that form P0/P1 are priorities, not unique gate identifiers. Wiggum assigns
+#  contiguous phase ids in document order, starting at the first priority number,
+#  while retaining the priority label in each visible title.
 #  A phase's acceptance criteria are its checkbox task lines anywhere in the
 #  section (Spec Kit nests them under ### Tests / ### Implementation h3s):
 #      - [ ] T012 [P] [US1] Create model in src/models/user.py
@@ -164,9 +174,13 @@ def _raw_after_phase(text, n):
 #  the on-disk GATE<N> id stay aligned (no surprising renumber).
 # ─────────────────────────────────────────────────────────────────────────────
 _SPECKIT_HEAD = re.compile(r'^##[ \t]+Phase[ \t]+([0-9]+)[ \t]*:?[ \t]*(.*)$')
+_SPECKIT_PRIORITY_HEAD = re.compile(
+    r'^##[ \t]+([Pp])([0-9]+)\b[ \t]*(?:[-—:]+[ \t]*)?(.*)$',
+    re.M,
+)
 
 
-def _parse_speckit(text):
+def _parse_speckit_explicit(text):
     lines = text.splitlines()
     phases = []
     cur = None
@@ -192,11 +206,79 @@ def _parse_speckit(text):
             for p in phases]
 
 
+def _speckit_l2_sections(text):
+    """Split a tasks document into raw level-2 sections, excluding its preamble."""
+    sections = []
+    cur = None
+    for ln in text.splitlines():
+        if _ANY_L2.match(ln):
+            if cur is not None:
+                sections.append(cur)
+            cur = [ln]
+        elif cur is not None:
+            cur.append(ln)
+    if cur is not None:
+        sections.append(cur)
+    return sections
+
+
+def _speckit_section_criteria(lines):
+    criteria = []
+    for ln in lines:
+        cb = _CHECKBOX.match(ln)
+        if cb and cb.group(1).strip():
+            criteria.append(cb.group(1).strip())
+    return criteria
+
+
+def _parse_speckit_priority(text):
+    """Normalize task-bearing ``## P<N>`` groups into ordered Wiggum phases.
+
+    Repeated priorities are valid because priority is scheduling metadata rather
+    than a unique gate id. Trailing non-task H2 sections (for example dependency
+    order and Definition of Done) are shared constraints, so append them to every
+    normalized phase for both proposer and critic visibility.
+    """
+    sections = _speckit_l2_sections(text)
+    candidates = []
+    for index, lines in enumerate(sections):
+        m = _SPECKIT_PRIORITY_HEAD.match(lines[0])
+        criteria = _speckit_section_criteria(lines)
+        if m and criteria:
+            candidates.append((index, m, lines, criteria))
+    if not candidates:
+        return []
+
+    last_phase_index = candidates[-1][0]
+    shared_sections = sections[last_phase_index + 1:]
+    shared = "\n".join("\n".join(lines) for lines in shared_sections).strip()
+    start = int(candidates[0][1].group(2))
+
+    phases = []
+    for offset, (_index, _match, lines, criteria) in enumerate(candidates):
+        section = "\n".join(lines)
+        if shared:
+            section = section.rstrip() + "\n\n" + shared
+        title = lines[0].split("##", 1)[1].strip()
+        phases.append(Phase(start + offset, title, section, criteria))
+    return phases
+
+
+def _parse_speckit(text):
+    explicit = _parse_speckit_explicit(text)
+    if explicit:
+        return explicit
+    return _parse_speckit_priority(text)
+
+
 def _validate_speckit(text):
     phases = _parse_speckit(text)
     errors = []
     if not phases:
-        return False, 0, ['tasks.md has zero phases (need at least one "## Phase <N>:")']
+        return False, 0, [
+            'tasks.md has zero phases (need task-bearing "## Phase <N>:" '
+            'or "## P<N>" sections)'
+        ]
     for p in phases:
         if not p.criteria:
             errors.append('phase %d (%s) has no task checkboxes '
@@ -226,7 +308,8 @@ ADAPTERS = {
 def detect_format(path, text, override=None):
     """Choose an adapter. Priority: explicit override (flag/env) → filename+content
     sniff → native. A Spec Kit tasks.md is recognized by its filename, or by having
-    `## Phase N:` headings with `- [ ]` task lines and NO `### Acceptance criteria`."""
+    `## Phase N:` / task-bearing `## P<N>` headings with `- [ ]` task lines and
+    NO `### Acceptance criteria`."""
     ov = override or os.environ.get("WIGGUM_SPEC_FORMAT", "")
     ov = ov.strip().lower()
     if ov in ADAPTERS:
@@ -237,8 +320,11 @@ def detect_format(path, text, override=None):
     if os.path.basename(path).lower() == "tasks.md":
         return "speckit-tasks"
     has_ac = re.search(r'^###[ \t]+Acceptance[ \t]+criteria', text, re.M)
-    has_phase = _SPECKIT_HEAD.search(text) or re.search(r'^##[ \t]+Phase[ \t]+[0-9]',
-                                                        text, re.M)
+    has_phase = (
+        _SPECKIT_HEAD.search(text)
+        or _SPECKIT_PRIORITY_HEAD.search(text)
+        or re.search(r'^##[ \t]+Phase[ \t]+[0-9]', text, re.M)
+    )
     has_tasks = re.search(r'^[ \t]*-[ \t]*\[[ xX]?\][ \t]*T[0-9]', text, re.M)
     if has_phase and has_tasks and not has_ac:
         return "speckit-tasks"
@@ -272,7 +358,13 @@ def phase_title(text_or_section, n=None, fmt="native"):
         # try speckit heading too
         m = _SPECKIT_HEAD.match((text_or_section or "").splitlines()[0]
                                 if text_or_section else "")
-        return m.group(2).strip() if m else ""
+        if m:
+            return m.group(2).strip()
+        m = _SPECKIT_PRIORITY_HEAD.match(
+            (text_or_section or "").splitlines()[0] if text_or_section else ""
+        )
+        return (text_or_section or "").splitlines()[0].split("##", 1)[1].strip() \
+            if m else ""
     for p in get_phases(text_or_section, fmt):
         if p.n == n:
             return p.title

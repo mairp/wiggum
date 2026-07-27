@@ -423,6 +423,13 @@ cited file paths are exactly what the grounding pass verifies):
 - [ ] T004 [US1] Add a __main__ block to src/greet.py
 ```
 
+Wiggum also accepts Spec Kit implementations that group executable tasks under
+priority headings such as `## P0 — Safety`, `## P1 — Contracts`, and repeated
+`## P1 — Security` sections. Each task-bearing priority section becomes an
+ordered phase with a unique gate id; the priority label remains in the title.
+Trailing shared sections such as `## Dependency order` and
+`## Definition of done` are included in every normalized phase's context.
+
 When the `tasks.md` lives inside a Spec Kit project (a `.specify/` directory above
 it), the feature's **full design-doc set** is injected into both the proposer prompt
 and the critic as **read-only context** — they explain the *why/how* and are the
@@ -439,9 +446,10 @@ that priority order with per-doc floors — so a large `plan.md` cannot starve
 `contracts/` — and truncation is line-clean and code-fence-safe (never mid-line,
 never a dangling ```` ``` ````), marked explicitly in the prompt.
 
-A file named `tasks.md`, or any doc whose `## Phase N:` headings carry `- [ ]` task
-lines and no `### Acceptance criteria`, is detected as `speckit-tasks`; everything
-else is `native`. A runnable example lives at `examples/speckit-tasks.example.md`:
+A file named `tasks.md`, or any doc whose `## Phase N:` or task-bearing `## P<N>`
+headings carry `- [ ]` task lines and no `### Acceptance criteria`, is detected as
+`speckit-tasks`; everything else is `native`. A runnable example lives at
+`examples/speckit-tasks.example.md`:
 
 ```bash
 mkdir -p /tmp/wiggum-speckit && cp examples/speckit-tasks.example.md /tmp/wiggum-speckit/tasks.md
