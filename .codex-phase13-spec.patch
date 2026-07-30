@@ -1,0 +1,76 @@
+diff --git a/specs/001-governed-agentic-workflow/tasks.md b/specs/001-governed-agentic-workflow/tasks.md
+--- a/specs/001-governed-agentic-workflow/tasks.md
++++ b/specs/001-governed-agentic-workflow/tasks.md
+@@
+ **Release Gate**: This phase is mandatory for operational completion and cannot be deferred.
+ 
++**Implementation Authorization (2026-07-28)**: The accountable operator explicitly
++requested full autonomous implementation and authorized the implementation run to proceed
++while Phase 13 release-evidence checklist items remain open. Those checklist items MUST
++remain unchecked until their named evidence exists; incomplete release evidence is not a
++reason to skip implementation or to claim completion.
++
+ **Goal**: Provide an accessible live operational graph in Kanban and close the executor
+ readiness gap that currently leaves linked workflows unclaimed in `submitted`.
+@@
+-- [ ] T160 [US10] Add executable health-checked spec, Wiggum proposer, critic, governance, PMO, registry, telemetry, troubleshooter, and release worker processes to Compose and root lifecycle commands
+-- [ ] T161 [US10] Extend `npm run health` and smoke validation with durable-consumer/lease readiness and a bounded disposable run-claim probe
++- [ ] T160 [US10] Add executable health-checked spec, Wiggum proposer, critic, governance, PMO, registry, telemetry, troubleshooter, and release worker processes to Compose and root lifecycle commands; the controller MUST automatically create/queue the next governed step, workers MUST claim by role with expiring leases and heartbeats, and the proposer path MUST execute the configured Wiggum/Codex plus independent `compass_claude` critic runtime rather than a synthetic completion
++- [ ] T161 [US10] Extend `npm run health` and smoke validation with durable-consumer/lease readiness, per-role heartbeat/claim proof, and a bounded disposable run-claim probe that fails if the run remains `submitted`
+diff --git a/specs/001-governed-agentic-workflow/spec.md b/specs/001-governed-agentic-workflow/spec.md
+--- a/specs/001-governed-agentic-workflow/spec.md
++++ b/specs/001-governed-agentic-workflow/spec.md
+@@
+ - **FR-101**: Run listing MUST support validated status, risk-tier, objective-text, and limit
+   filters; invalid values MUST fail without querying another service database or mutating state.
++- **FR-102**: An accepted submission MUST require no operator command after `agentctl submit`
++  to advance through specification, knowledge, governance, PMO, agent binding, proposal,
++  independent criticism, bounded recovery, post-execution governance, release validation,
++  evidence finalization, and Kanban projection. The controller MUST schedule the next role,
++  persist the transition and outbox event atomically, enforce one expiring lease per step,
++  reclaim abandoned leases idempotently, and escalate rather than silently stall when no
++  eligible worker can claim within the readiness SLO.
++- **FR-103**: A worker health endpoint MUST distinguish liveness, dependency readiness,
++  runtime resolution, heartbeat freshness, durable-consumer/lease capability, and most recent
++  successful claim. A process that only imports role libraries or returns static HTTP 200
++  MUST NOT satisfy autonomous readiness.
+@@
+ - **SC-041**: Table and JSON listing tests return 100% of matching authoritative test runs,
+   preserve complete run/card UUIDs, reject invalid filters, and expose unlinked runs without
+   fabricating card identifiers.
++- **SC-042**: 100% of low-risk disposable acceptance runs submitted while all required
++  workers are ready leave `submitted` within the configured claim SLO and reach a governed
++  terminal state without an additional operator command.
++- **SC-043**: Killing a leased disposable worker and restarting it produces exactly one
++  reclaimed continuation with no duplicate material side effect, while an absent required
++  runtime makes platform readiness fail with the missing role and reason.
+diff --git a/specs/001-governed-agentic-workflow/plan.md b/specs/001-governed-agentic-workflow/plan.md
+--- a/specs/001-governed-agentic-workflow/plan.md
++++ b/specs/001-governed-agentic-workflow/plan.md
+@@
+ 18. The Constellation renders deterministic gravity, causal/rejection/dependency edges,
+     PMO overlays, human-action states, replay, and an equivalent accessible table while
+     preserving Board and Dashboard behavior.
++
++### Autonomous scheduling and worker claims
++
++Submission is the only normal operator trigger. In the same PostgreSQL transaction that
++changes authoritative run state, the controller creates the next role-bound
++`workflow_steps` record and an outbox message. Role workers consume or poll only through a
++controller-owned claim protocol, acquire a compare-and-set expiring lease, heartbeat while
++running, and complete with content-addressed evidence plus an idempotency key. Completion
++atomically closes the current step, appends its decision/event, and schedules the next
++eligible role. A reaper returns an expired lease to the same bounded attempt or routes it
++to troubleshooting; it never invents successful output.
++
++The real proposer execution boundary invokes Wiggum with Codex as proposer and the approved
++non-interactive `compass_claude` shim as independent critic. Runtime secrets remain in the
++approved runtime environment and are never persisted in PostgreSQL, NATS, Kanban,
++ClickHouse, evidence, Compose source, or health responses. Deterministic test executors are
++allowed only behind an explicit test mode and cannot make production readiness green.
++
++The required role set is derived from the immutable specification and enabled policy.
++Readiness is fail-closed unless every required role reports a fresh heartbeat, proves its
++runtime/dependencies, and successfully claims a bounded disposable probe. The probe is
++cancelled and excluded from portfolio metrics after evidence is recorded.
+*** End Patch

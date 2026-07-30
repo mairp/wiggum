@@ -48,14 +48,13 @@ OPTIONS
                         <workdir>/SPECS.md). A relative path resolves against the
                         directory you launched from, not the workdir. Lets you
                         keep the spec (e.g. ROADMAP.md, plan.md) wherever it lives.
-  --spec-format FMT     Spec grammar: native | speckit-tasks. Default: auto-detect
-                        (a GitHub Spec Kit tasks.md is recognized by name/content;
-                        everything else is native "## Phase <N>" + acceptance
-                        criteria). Also settable via WIGGUM_SPEC_FORMAT.
+  --spec-format FMT     Spec grammar: native | speckit-tasks | openspec-change.
+                        Default: auto-detect. Also settable via
+                        WIGGUM_SPEC_FORMAT.
   --feature SLUG        Feature namespace for durable state (.wiggum/features/SLUG/).
-                        Default: the feature dir's basename when the spec lives in a
-                        .specify project, else "default". Also disambiguates when a
-                        workdir has multiple specs/*/task.md. Also via WIGGUM_FEATURE.
+                        Default: the Spec Kit feature or OpenSpec change directory
+                        basename, else "default". Also disambiguates multiple
+                        discovered task specs. Also via WIGGUM_FEATURE.
   --proposer BACKEND    Proposer backend: claude | codex | bebop[:name]
                         (default: $WIGGUM_PROPOSER or claude).
   --critic BACKEND      Critic provider: claude | codex | bebop
@@ -63,6 +62,16 @@ OPTIONS
   --max-rejects N       Critic REJECTs per phase before halting (default: 3).
   --max-iter N          Proposer passes per phase (default: 30).
   --start-phase N       Override the derived resume phase.
+  --verification MODE   Verification lifecycle: off | plan | required.
+                        plan creates/attaches a hash-bound TEST_PLAN.md before the
+                        proposer loop; required also executes fixed-argv phase and
+                        release gates. Default: off. Also WIGGUM_VERIFICATION.
+  --test-plan FILE      Absolute TEST_PLAN.md projection path (default when
+                        verification is enabled: <workdir>/testautomation/TEST_PLAN.md).
+                        Also WIGGUM_TEST_PLAN.
+  --generate-tests DIR  Safely scaffold tests below this absolute directory.
+                        Existing changed artifacts are never overwritten. Supplying
+                        this flag enables plan mode. Also WIGGUM_GENERATE_TESTS.
   --telemetry           Ship the event stream to Loki (off by default).
   --loki-url URL        Loki base URL (with --telemetry; default :3100).
   --otel                Ship the event stream to an OTLP collector (off by default).
@@ -92,7 +101,7 @@ fi
 
 WORKDIR="$PWD"
 SPECS=""
-SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect (native|speckit-tasks)
+SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect
 FEATURE="${WIGGUM_FEATURE:-}"           # explicit feature slug (Spec Kit multi-feature)
 START_PHASE=""
 DEBUG="false"
@@ -110,6 +119,9 @@ PROPOSER_TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
 CRITIC_TIMEOUT="${WIGGUM_CRITIC_TIMEOUT:-300}"
 MAX_WALL_MIN="${WIGGUM_MAX_WALL_MIN:-0}"
 GIT_COMMITS="${WIGGUM_GIT_COMMITS:-auto}"
+VERIFICATION="${WIGGUM_VERIFICATION:-off}"
+TEST_PLAN="${WIGGUM_TEST_PLAN:-}"
+GENERATE_TESTS="${WIGGUM_GENERATE_TESTS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -122,6 +134,9 @@ while [[ $# -gt 0 ]]; do
     --max-rejects)  MAX_REJECTS="${2:?}"; shift 2 ;;
     --max-iter)     MAX_ITER="${2:?}"; shift 2 ;;
     --start-phase)  START_PHASE="${2:?}"; shift 2 ;;
+    --verification) VERIFICATION="${2:?}"; shift 2 ;;
+    --test-plan)     TEST_PLAN="${2:?}"; shift 2 ;;
+    --generate-tests) GENERATE_TESTS="${2:?}"; shift 2 ;;
     --telemetry)    TELEMETRY="true"; shift ;;
     --loki-url)     LOKI_URL="${2:?}"; shift 2 ;;
     --otel)         OTEL="true"; shift ;;
@@ -156,14 +171,36 @@ fi
 cd "$WORKDIR" || exit "$E_INTERNAL"
 WORKDIR="$PWD"
 
+case "$VERIFICATION" in
+  off|plan|required) ;;
+  *) echo "orchestrator.sh: --verification must be off, plan, or required (got: $VERIFICATION)" >&2
+     exit "$E_SPEC" ;;
+esac
+if [[ -n "$GENERATE_TESTS" ]]; then
+  case "$GENERATE_TESTS" in
+    /*) ;;
+    *) echo "orchestrator.sh: --generate-tests must be an absolute path: $GENERATE_TESTS" >&2
+       exit "$E_SPEC" ;;
+  esac
+  [[ "$VERIFICATION" == "off" ]] && VERIFICATION="plan"
+fi
+if [[ "$VERIFICATION" != "off" ]]; then
+  TEST_PLAN="${TEST_PLAN:-$WORKDIR/testautomation/TEST_PLAN.md}"
+  case "$TEST_PLAN" in
+    /*) ;;
+    *) echo "orchestrator.sh: --test-plan must be an absolute path: $TEST_PLAN" >&2
+       exit "$E_SPEC" ;;
+  esac
+fi
+
 # ── spec resolution (Phase 0): find the spec when -s was NOT given ──────────────
 # An explicit -s always wins (resolved above). Otherwise walk an ordered discovery
 # so a GitHub Spec Kit project starts with zero flags, without ever silently picking
 # between ambiguous candidates:
 #   1. <workdir>/SPECS.md            — unchanged precedence; native users unaffected.
 #   2. .specify/feature.json         — its feature_directory → <dir>/tasks.md.
-#   3. glob specs/*/tasks.md         — exactly one → use it; --feature selects among
-#                                      many; 2+ and no --feature → E_SPEC (loud).
+#   3. discover Spec Kit and OpenSpec active-change tasks.md files — exactly one
+#                                      → use it; --feature selects among many.
 #   4. none of the above             — error listing every location tried.
 resolve_spec() {
   # 1. native SPECS.md at the workdir root wins (no behavior change).
@@ -188,18 +225,19 @@ except Exception:
       fi
     fi
   fi
-  # 3. glob specs/*/tasks.md.
+  # 3. discover Spec Kit features and active OpenSpec changes.
   local -a cands=()
   local t
   shopt -s nullglob
   for t in "$WORKDIR"/specs/*/tasks.md; do cands+=("$t"); done
+  for t in "$WORKDIR"/openspec/changes/*/tasks.md; do cands+=("$t"); done
   shopt -u nullglob
   if [[ -n "$FEATURE" ]]; then
     # --feature selects the matching candidate directly (basename of its dir).
     for t in "${cands[@]}"; do
       [[ "$(basename "$(dirname "$t")")" == "$FEATURE" ]] && { printf '%s\n' "$t"; return 0; }
     done
-    echo "spec not found: no specs/$FEATURE/tasks.md under $WORKDIR (--feature $FEATURE)" >&2
+    echo "spec not found: no feature/change '$FEATURE' tasks.md under $WORKDIR" >&2
     return 1
   fi
   if [[ "${#cands[@]}" -eq 1 ]]; then
@@ -223,6 +261,7 @@ except Exception:
     echo "    - $WORKDIR/SPECS.md              (native default)"
     echo "    - $WORKDIR/.specify/feature.json (Spec Kit feature pointer)"
     echo "    - $WORKDIR/specs/*/tasks.md      (Spec Kit feature glob)"
+    echo "    - $WORKDIR/openspec/changes/*/tasks.md (OpenSpec active changes)"
   } >&2
   return 1
 }
@@ -258,11 +297,12 @@ export WIGGUM_SPEC_FORMAT="$SPEC_FORMAT"
 #     run.log, events.jsonl    ← symlinks retargeted into the active feature's run.
 #     features/<slug>/
 #       gates/ (+ gates/proofs/) attempts/ verdicts/ debug/ runs/  PROGRESS.md
-# <slug> = the feature-dir basename inside a .specify project; "default" otherwise
+# <slug> = the Spec Kit feature or OpenSpec change directory basename; "default"
+# otherwise
 # (also the back-compat identity of every pre-v2 .wiggum/gates/ on disk).
 STATE_DIR="$WORKDIR/.wiggum"
 # Resolve the feature slug: explicit --feature/WIGGUM_FEATURE wins (sanitized);
-# else derive from the spec's location under a .specify project.
+# else derive from the spec's Spec Kit/OpenSpec location.
 if [[ -n "$FEATURE" ]]; then
   SLUG="$(printf '%s' "$FEATURE" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//')"
   [[ -n "$SLUG" ]] || SLUG="default"
@@ -277,8 +317,9 @@ FEATURE_DIR="$STATE_DIR/features/$SLUG"
 GATES_DIR="$FEATURE_DIR/gates"
 WIGGUM_RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 RUN_DIR="$FEATURE_DIR/runs/$WIGGUM_RUN_ID"
+VERIFICATION_JSON="$RUN_DIR/verification/verification-plan.json"
 mkdir -p "$RUN_DIR" "$FEATURE_DIR/verdicts" "$FEATURE_DIR/attempts" \
-         "$FEATURE_DIR/debug" "$GATES_DIR/proofs"
+         "$FEATURE_DIR/debug" "$GATES_DIR/proofs" "$RUN_DIR/verification"
 # Workdir-relative paths for the proposer prompt + critic threading (Phase 2). The
 # proposer is TOLD these literal paths, so they must track the feature dir.
 STATE_REL=".wiggum/features/$SLUG"
@@ -401,6 +442,10 @@ write_last_run_conf() {
     printf 'LOKI_URL=%q\n'         "$LOKI_URL"
     printf 'OTEL=%q\n'             "$OTEL"
     printf 'OTEL_URL=%q\n'         "$OTEL_URL"
+    printf 'VERIFICATION=%q\n'     "$VERIFICATION"
+    printf 'TEST_PLAN=%q\n'        "$TEST_PLAN"
+    printf 'GENERATE_TESTS=%q\n'    "$GENERATE_TESTS"
+    printf 'VERIFICATION_PLAN=%q\n' "$VERIFICATION_JSON"
     printf 'ORCHESTRATOR=%q\n'     "$SCRIPT_DIR/orchestrator.sh"
   } > "$dest" 2>/dev/null || true
 }
@@ -513,6 +558,27 @@ PHASE_COUNT="$(wiggum_spec_validate "$SPECS")" || {
 mapfile -t PHASES < <(wiggum_spec_phase_numbers "$SPECS")
 LAST_PHASE="${PHASES[-1]}"
 
+# ── pre-loop verification plan ───────────────────────────────────────────────
+# The source specification remains authoritative. The canonical JSON plan is a
+# hash-bound companion stored with this run; TEST_PLAN.md is its human projection.
+# `required` fails closed when no safe test command is discoverable.
+if [[ "$VERIFICATION" != "off" ]]; then
+  _verification_args=(
+    create
+    --workdir "$WORKDIR"
+    --specs "$SPECS"
+    --format "$SPEC_FORMAT"
+    --output "$TEST_PLAN"
+    --json-output "$VERIFICATION_JSON"
+  )
+  [[ "$VERIFICATION" == "required" ]] && _verification_args+=( --required )
+  [[ -n "$GENERATE_TESTS" ]] && _verification_args+=( --generate-tests "$GENERATE_TESTS" )
+  if ! python3 "$LIB_DIR/verification_plan.py" "${_verification_args[@]}" >> "$LOG" 2>&1; then
+    echo "orchestrator.sh: verification preflight failed (see $LOG)" >&2
+    exit "$E_SPEC"
+  fi
+fi
+
 # ── IS_SANDBOX for root (headless skip-permissions) ──────────────────────────
 if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${IS_SANDBOX:-}" ]]; then
   export IS_SANDBOX=1
@@ -555,6 +621,7 @@ log "  critic   : $CRITIC_BACKEND"
 log "  max-rej  : $MAX_REJECTS   max-iter/phase: $MAX_ITER"
 log "  timeouts : proposer ${PROPOSER_TIMEOUT}s  critic ${CRITIC_TIMEOUT}s   wall: ${MAX_WALL_MIN}min"
 log "  git      : $GIT_COMMITS   telemetry: $TELEMETRY$( [[ "$TELEMETRY" == "true" ]] && echo " -> $LOKI_URL" )$( [[ "$OTEL" == "true" ]] && echo "   otel: -> $OTEL_URL" )"
+log "  verify   : $VERIFICATION$( [[ "$VERIFICATION" != "off" ]] && echo "  plan: $TEST_PLAN" )$( [[ -n "$GENERATE_TESTS" ]] && echo "  scaffolds: $GENERATE_TESTS" )"
 log "  resume   : phase ${CUR_PHASE:-<all approved>}$( [[ -n "$START_PHASE" ]] && echo " (--start-phase)" )"
 log "  run_id   : $WIGGUM_RUN_ID"
 log "  stop with: touch $STOP_FLAG"
@@ -573,10 +640,33 @@ fi
 start_presenter
 
 wiggum_emit run_start workdir "$WORKDIR" phases "$PHASE_COUNT" feature "$SLUG" \
-  proposer "$PROPOSER_BACKEND" critic "$CRITIC_BACKEND" resume "${CUR_PHASE:-done}"
+  proposer "$PROPOSER_BACKEND" critic "$CRITIC_BACKEND" resume "${CUR_PHASE:-done}" \
+  verification "$VERIFICATION" verification_plan "$VERIFICATION_JSON"
+
+run_release_verification() {
+  [[ "$VERIFICATION" == "required" ]] || return 0
+  local release_evidence="$RUN_DIR/verification/release.json"
+  local release_rc
+  log "----- verification: release gate (fixed argv) -----"
+  python3 "$LIB_DIR/verification_plan.py" run \
+    --plan "$VERIFICATION_JSON" \
+    --specs "$SPECS" \
+    --phase release \
+    --evidence-output "$release_evidence" 2>&1 | emit_out
+  release_rc="${PIPESTATUS[0]}"
+  if [[ "$release_rc" -ne 0 ]]; then
+    log "# HALT — release verification failed (exit $release_rc)."
+    log "#   evidence: $release_evidence"
+    wiggum_emit run_stop reason release_verification rc "$release_rc" \
+      evidence "$release_evidence"
+    exit "$E_REJECTS"
+  fi
+  wiggum_emit verification_release_passed evidence "$release_evidence"
+}
 
 # Already fully done?
 if [[ -z "$CUR_PHASE" ]]; then
+  run_release_verification
   log "# All phases already approved. Nothing to do."
   wiggum_emit run_end outcome all_approved
   exit "$E_OK"
@@ -663,8 +753,8 @@ build_proposer_prompt() {
     echo "${GATES_REL}/GATE${n}-EVIDENCE.md.tmp first, then \`mv\` it onto"
     echo "${GATES_REL}/GATE${n}-EVIDENCE.md (mv within the same folder is atomic, so the"
     echo "gate never sees a half file)."
-    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
-      echo "The evidence must, for EACH task (- [ ] T…) below, state concretely how it is"
+    if [[ "$SPEC_FORMAT" != "native" ]]; then
+      echo "The evidence must, for EACH checkbox task below, state concretely how it is"
       echo "completed and cite the exact files/paths it produced or changed. Do NOT write"
       echo "the evidence file until every task is actually done — its mere existence ends"
       echo "this phase."
@@ -676,23 +766,29 @@ build_proposer_prompt() {
     echo
     # The criteria heading is adapter-specific: native calls them acceptance
     # criteria; a Spec Kit tasks.md phase is a checklist of deliverable tasks.
-    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
+    if [[ "$SPEC_FORMAT" == "openspec-change" ]]; then
+      echo "## OpenSpec tasks to complete (each \`- [ ]\` is required)"
+    elif [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
       echo "## Tasks to complete (each \`- [ ]\` is a required deliverable)"
     else
       echo "## Acceptance criteria (the phase spec)"
     fi
     echo "$section"
-    # Spec Kit context: inject the feature's full design-doc set (spec/plan/research/
-    # data-model/quickstart/contracts*/checklists*/constitution) as read-only
-    # background when the spec lives inside a .specify project. Budget-allocated,
-    # line-clean + fence-safe truncation is done once in wiggum_spec.render_context.
-    # These are CONTEXT, never gates — the tasks above are the only thing gated.
-    if [[ "$SPEC_FORMAT" == "speckit-tasks" ]]; then
-      local ctx_block
-      ctx_block="$(wiggum_spec_render_context "$SPECS" 2>/dev/null)"
-      if [[ -n "$ctx_block" ]]; then
+    # Document-set context (Spec Kit or OpenSpec) is read-only background. The
+    # shared renderer owns discovery, priority, budgeting, and safe truncation.
+    local ctx_block
+    ctx_block="$(wiggum_spec_render_context "$SPECS" 2>/dev/null)"
+    if [[ -n "$ctx_block" ]]; then
+      echo
+      printf '%s\n' "$ctx_block"
+    fi
+    if [[ "$VERIFICATION" != "off" && -f "$VERIFICATION_JSON" ]]; then
+      local verification_block
+      verification_block="$(python3 "$LIB_DIR/verification_plan.py" slice \
+        --plan "$VERIFICATION_JSON" --specs "$SPECS" --phase "$n" 2>/dev/null)"
+      if [[ -n "$verification_block" ]]; then
         echo
-        printf '%s\n' "$ctx_block"
+        printf '%s\n' "$verification_block"
       fi
     fi
     if [[ "$attempt" -gt 1 && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
@@ -792,24 +888,63 @@ run_phase() {
       exit "$E_INTERNAL"
     fi
 
-    # ── critic ──────────────────────────────────────────────────────────────
-    log "----- critic: phase $n attempt $attempt ($CRITIC_BACKEND) -----"
-    local -a crit_args=(
-      "$LIB_DIR/critic.py"
-      --workdir "$WORKDIR"
-      --specs "$SPECS"
-      --phase "$n"
-      --attempt "$attempt"
-      --max-rejects "$MAX_REJECTS"
-      --provider "$CRITIC_BACKEND"
-      --timeout "$CRITIC_TIMEOUT"
-      --format "$SPEC_FORMAT"
-      --feature "$SLUG"
-    )
-    [[ "$DEBUG" == "true" ]] && crit_args+=( --debug )
+    # ── deterministic verification + critic ────────────────────────────────
+    # In required mode the fixed-argv test gate runs BEFORE the LLM critic. A
+    # successful-looking evidence document cannot bypass a failing executable
+    # witness. plan mode still gives both agents the obligations but is advisory.
+    local verification_ok="true"
+    local crc
+    if [[ "$VERIFICATION" == "required" ]]; then
+      local verification_evidence="$RUN_DIR/verification/phase-${n}-attempt-${attempt}.json"
+      log "----- verification: phase $n attempt $attempt (fixed argv) -----"
+      wiggum_emit verification_start phase "$n" attempt "$attempt" plan "$VERIFICATION_JSON"
+      python3 "$LIB_DIR/verification_plan.py" run \
+        --plan "$VERIFICATION_JSON" \
+        --specs "$SPECS" \
+        --phase "$n" \
+        --evidence-output "$verification_evidence" 2>&1 | emit_out
+      local vrc="${PIPESTATUS[0]}"
+      if [[ "$vrc" -ne 0 ]]; then
+        verification_ok="false"
+        crc=10
+        {
+          echo "# Phase $n deterministic verification gate rejected"
+          echo
+          echo "The fixed-argv verification gate failed (exit $vrc)."
+          echo
+          echo "- Canonical verification plan: \`$VERIFICATION_JSON\`"
+          echo "- Verification evidence: \`$verification_evidence\`"
+          echo
+          echo "The phase cannot be approved solely from the proposer or critic claim."
+        } > "$GATES_DIR/GATE${n}-FEEDBACK.md"
+        wiggum_emit verification_failed phase "$n" attempt "$attempt" rc "$vrc" \
+          evidence "$verification_evidence"
+      else
+        wiggum_emit verification_passed phase "$n" attempt "$attempt" \
+          evidence "$verification_evidence"
+      fi
+    fi
 
-    python3 "${crit_args[@]}" 2>&1 | emit_out
-    local crc="${PIPESTATUS[0]}"
+    if [[ "$verification_ok" == "true" ]]; then
+      log "----- critic: phase $n attempt $attempt ($CRITIC_BACKEND) -----"
+      local -a crit_args=(
+        "$LIB_DIR/critic.py"
+        --workdir "$WORKDIR"
+        --specs "$SPECS"
+        --phase "$n"
+        --attempt "$attempt"
+        --max-rejects "$MAX_REJECTS"
+        --provider "$CRITIC_BACKEND"
+        --timeout "$CRITIC_TIMEOUT"
+        --format "$SPEC_FORMAT"
+        --feature "$SLUG"
+      )
+      [[ "$VERIFICATION" != "off" ]] && crit_args+=( --verification-plan "$VERIFICATION_JSON" )
+      [[ "$DEBUG" == "true" ]] && crit_args+=( --debug )
+
+      python3 "${crit_args[@]}" 2>&1 | emit_out
+      crc="${PIPESTATUS[0]}"
+    fi
 
     if [[ "$crc" -eq 0 && -f "$GATES_DIR/GATE${n}-APPROVED" ]]; then
       log "===== PHASE $n APPROVED (attempt $attempt) ====="
@@ -881,6 +1016,8 @@ for phase in "${PHASES[@]}"; do
   (( phase < CUR_PHASE )) && continue
   run_phase "$phase"
 done
+
+run_release_verification
 
 log ""
 log "# DONE — all $PHASE_COUNT phase(s) approved. $(date -Is)"

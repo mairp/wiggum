@@ -19,6 +19,7 @@ import wiggum_spec  # noqa: E402
 
 NATIVE_SPEC = os.path.join(ROOT, "SPECS.example.md")
 SPECKIT_SPEC = os.path.join(ROOT, "examples", "speckit-tasks.example.md")
+OPENSPEC_SPEC = os.path.join(ROOT, "examples", "openspec-tasks.example.md")
 
 
 def read(path):
@@ -175,6 +176,73 @@ def test_speckit_priority_groups_validate_with_repeated_priorities():
 def test_speckit_priority_groups_detect_by_content():
     assert wiggum_spec.detect_format("/x/work-items.md", PRIORITY_TASKS) \
         == "speckit-tasks"
+
+
+# ── OpenSpec change adapter ──────────────────────────────────────────────────
+def test_openspec_detect_by_canonical_path():
+    text = read(OPENSPEC_SPEC)
+    path = "/repo/openspec/changes/add-audit-export/tasks.md"
+    assert wiggum_spec.detect_format(path, text) == "openspec-change"
+
+
+def test_openspec_detect_by_content():
+    assert wiggum_spec.detect_format("/x/work-items.md", read(OPENSPEC_SPEC)) \
+        == "openspec-change"
+
+
+def test_openspec_phases_and_tasks():
+    phases = wiggum_spec.get_phases(read(OPENSPEC_SPEC), "openspec-change")
+    assert [p.n for p in phases] == [1, 2, 3]
+    assert phases[0].title == "Domain contract"
+    assert phases[1].criteria == [
+        "2.1 Implement the exporter in `src/audit/export.py`.",
+        "2.2 Add focused tests in `tests/test_audit_export.py`.",
+    ]
+    assert wiggum_spec.phase_title(phases[1].section) == "Implementation"
+
+
+def test_openspec_validate_rejects_taskless_section():
+    text = "## 1. Setup\nprose only\n"
+    ok, count, errors = wiggum_spec.validate(text, "openspec-change")
+    assert not ok and count == 1
+    assert any("no OpenSpec task checkboxes" in e for e in errors)
+
+
+def _make_openspec_change(root):
+    openspec = root / "openspec"
+    current = openspec / "specs" / "audit"
+    current.mkdir(parents=True)
+    (current / "spec.md").write_text("# Current audit behavior\n")
+    change = openspec / "changes" / "add-audit-export"
+    (change / "specs" / "audit").mkdir(parents=True)
+    (change / "proposal.md").write_text("# Proposal\n")
+    (change / "design.md").write_text("# Design\n")
+    (change / "specs" / "audit" / "spec.md").write_text("# Audit delta\n")
+    tasks = change / "tasks.md"
+    tasks.write_text(read(OPENSPEC_SPEC))
+    return tasks
+
+
+def test_openspec_context_and_order(tmp_path):
+    tasks = _make_openspec_change(tmp_path)
+    ctx = wiggum_spec.openspec_context(str(tasks))
+    assert list(ctx) == [
+        "proposal",
+        "delta-spec:audit/spec",
+        "design",
+        "current-spec:audit/spec",
+    ]
+    rendered = wiggum_spec.render_context(
+        str(tasks), fmt="openspec-change"
+    )
+    assert "Context: proposal" in rendered
+    assert "# Audit delta" in rendered
+    assert "# Current audit behavior" in rendered
+
+
+def test_openspec_feature_slug_is_change_name(tmp_path):
+    tasks = _make_openspec_change(tmp_path)
+    assert wiggum_spec.feature_slug(str(tasks)) == "add-audit-export"
 
 
 # ── detection precedence ─────────────────────────────────────────────────────
@@ -386,6 +454,12 @@ def test_bash_shim_slice_matches_python():
 def test_bash_shim_detect():
     shim = _shim("wiggum_spec_detect", SPECKIT_SPEC)
     assert shim.stdout.strip() == "speckit-tasks"
+
+
+def test_bash_shim_detects_openspec(tmp_path):
+    tasks = _make_openspec_change(tmp_path)
+    shim = _shim("wiggum_spec_detect", str(tasks))
+    assert shim.stdout.strip() == "openspec-change"
 
 
 def test_bash_shim_feature_slug(tmp_path):

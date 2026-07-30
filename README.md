@@ -83,6 +83,54 @@ wiggum run -w ~/projects/foo -s ~/projects/foo/ROADMAP.md
 (`wiggum` is the single front-door command — see **Install it permanently**
 just below.)
 
+### Pre-loop test automation
+
+Wiggum can derive a Lisa-compatible `VerificationPlan v1` before the first
+proposer pass. The canonical JSON is hash-bound to the authoritative
+specification, while `TEST_PLAN.md` is its human-readable projection.
+
+- `--verification off` preserves the legacy loop.
+- `--verification plan` creates the plan and injects its obligations into the
+  proposer and critic.
+- `--verification required` additionally runs fixed-argv tests before each
+  approval and runs a cumulative release gate, including on an already-approved
+  resumed workspace.
+
+All operator-supplied filesystem paths must be absolute. A maximum-observability
+run against Lisa is:
+
+```bash
+WIGGUM_AGENT_STREAM=true WIGGUM_LIVE_DETAIL=full \
+/home/marlon.lopez/wiggum/wiggum run \
+  --workdir /home/marlon.lopez/lisa \
+  --specs /home/marlon.lopez/lisa/SPECS.md \
+  --spec-format native \
+  --feature specification-bundle-v2 \
+  --verification required \
+  --test-plan /home/marlon.lopez/lisa/testautomation/AUTO_TEST_PLAN.md \
+  --generate-tests /home/marlon.lopez/lisa/testautomation/generated \
+  --live \
+  --debug \
+  --telemetry \
+  --loki-url http://127.0.0.1:13011 \
+  --otel \
+  --otel-url http://127.0.0.1:13018
+```
+
+Planning can also be run independently, before any loop:
+
+```bash
+/usr/bin/python3 \
+  /home/marlon.lopez/wiggum/lib/verification_plan.py create \
+  --workdir /home/marlon.lopez/lisa \
+  --specs /home/marlon.lopez/lisa/SPECS.md \
+  --format native \
+  --output /home/marlon.lopez/lisa/testautomation/AUTO_TEST_PLAN.md \
+  --json-output /home/marlon.lopez/lisa/.wiggum/verification/verification-plan.json \
+  --generate-tests /home/marlon.lopez/lisa/testautomation/generated \
+  --required
+```
+
 The Bash entry points (`orchestrator.sh`, `proposer.sh`, `wiggum`) sit at the top
 level; all Python components live under **`lib/`** (`lib/critic.py`,
 `lib/present.py`, `lib/ralph_loki_ship.py`, `lib/ralph_otel_ship.py`).
@@ -395,7 +443,7 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 ### Spec formats
 
 Wiggum parses the spec through a single pluggable layer (`lib/wiggum_spec.py` —
-the one source of truth both the bash side and the critic call). Two formats ship;
+the one source of truth both the bash side and the critic call). Three formats ship;
 the format is **auto-detected**, or forced with `--spec-format` /
 `WIGGUM_SPEC_FORMAT`.
 
@@ -448,7 +496,8 @@ never a dangling ```` ``` ````), marked explicitly in the prompt.
 
 A file named `tasks.md`, or any doc whose `## Phase N:` or task-bearing `## P<N>`
 headings carry `- [ ]` task lines and no `### Acceptance criteria`, is detected as
-`speckit-tasks`; everything else is `native`. A runnable example lives at
+`speckit-tasks` unless it has the canonical OpenSpec change path described below.
+A runnable Spec Kit example lives at
 `examples/speckit-tasks.example.md`:
 
 ```bash
@@ -456,16 +505,41 @@ mkdir -p /tmp/wiggum-speckit && cp examples/speckit-tasks.example.md /tmp/wiggum
 wiggum run -w /tmp/wiggum-speckit -s /tmp/wiggum-speckit/tasks.md
 ```
 
+**`openspec-change`** — an active
+[OpenSpec](https://github.com/Fission-AI/OpenSpec) change at
+`openspec/changes/<change>/tasks.md`. Each numbered level-2 task group becomes a
+Wiggum phase and its dotted checkbox items become required deliverables:
+
+```markdown
+## 1. Domain contract
+- [ ] 1.1 Add the export requirement.
+- [ ] 1.2 Add empty and populated-log scenarios.
+
+## 2. Implementation
+- [ ] 2.1 Implement the exporter in `src/audit/export.py`.
+```
+
+The change name becomes the feature-scoped Wiggum state slug. Wiggum injects the
+change's `proposal.md`, every delta `specs/**/spec.md`, `design.md`, and matching
+current `openspec/specs/**/spec.md` documents into both proposer and critic as
+read-only context. The task list remains the gate; Wiggum does not sync or archive
+the OpenSpec change.
+
+Canonical OpenSpec paths are detected before the generic `tasks.md` filename rule.
+The numbered task shape is also content-detected when the file has another name.
+A standalone example is available at `examples/openspec-tasks.example.md`.
+
 #### Spec resolution (zero-flag start)
 
-Inside a real Spec Kit project you rarely need `-s`. When it is omitted, Wiggum
-resolves the spec in this order (never picking silently between candidates):
+Inside a Spec Kit or OpenSpec project you rarely need `-s`. When it is omitted,
+Wiggum resolves the spec in this order (never picking silently between candidates):
 
 1. `<workdir>/SPECS.md` — unchanged precedence, so native users are unaffected.
 2. `<workdir>/.specify/feature.json` → its `feature_directory` → `<dir>/tasks.md`.
-3. glob `<workdir>/specs/*/tasks.md` — exactly one match is used; two or more with
-   no `--feature` exits `E_SPEC` (3) listing every candidate with the `-s` and
-   `--feature` forms to disambiguate.
+3. discover `<workdir>/specs/*/tasks.md` and
+   `<workdir>/openspec/changes/*/tasks.md` — exactly one match is used; two or more
+   with no `--feature` exits `E_SPEC` (3), listing every candidate with the `-s`
+   and `--feature` forms to disambiguate.
 4. none of the above → an error naming every location tried.
 
 So a single-feature project starts with just `wiggum run -w <project>`:
