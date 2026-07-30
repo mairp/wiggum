@@ -7,14 +7,8 @@
 ![Dependencies](https://img.shields.io/badge/deps-stdlib_only-2ea44f?style=for-the-badge&logo=gnu&logoColor=white)
 ![LLM](https://img.shields.io/badge/LLM-Claude_·_Codex_·_bebop-8A3FFC?style=for-the-badge&logo=anthropic&logoColor=white)
 ![Ralph](https://img.shields.io/badge/Ralph-loop-F2A900?style=for-the-badge&logo=cycling&logoColor=white)
-![Git](https://img.shields.io/badge/Git-checkpoints-F05032?style=for-the-badge&logo=git&logoColor=white)
-<br>
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![Loki](https://img.shields.io/badge/Loki-logs-F5A800?style=for-the-badge&logo=grafana&logoColor=white)
 ![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-OTLP-425CC7?style=for-the-badge&logo=opentelemetry&logoColor=white)
-![Grafana](https://img.shields.io/badge/Grafana-dashboards-F46800?style=for-the-badge&logo=grafana&logoColor=white)
 ![Events](https://img.shields.io/badge/Events-JSONL_stream-000000?style=for-the-badge&logo=json&logoColor=white)
-![Telemetry](https://img.shields.io/badge/Telemetry-optional-6E7681?style=for-the-badge&logo=prometheus&logoColor=white)
 
 You hand it a `SPECS.md` — an ordered set of phases, each with acceptance
 criteria — and it drives a coding agent phase by phase, but *nothing advances
