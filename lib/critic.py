@@ -28,6 +28,7 @@ import sys, os, re, json, time, argparse, secrets, urllib.request, urllib.error
 # the same directory this file lives in, regardless of the caller's CWD.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wiggum_spec  # noqa: E402
+import verification_plan  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config knobs (env-overridable; flags override env).
@@ -716,6 +717,10 @@ def main():
     ap.add_argument("--feature", default=os.environ.get("WIGGUM_FEATURE") or None,
                     help="feature slug — durable state under .wiggum/features/<slug>/ "
                          "(else derived from its Spec Kit/OpenSpec location)")
+    ap.add_argument("--verification-plan",
+                    default=os.environ.get("WIGGUM_VERIFICATION_PLAN") or None,
+                    help="absolute canonical VerificationPlan v1 JSON; its phase "
+                         "obligations become approval criteria")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -757,6 +762,18 @@ def main():
     if not section:
         die(3, "phase %d not found in %s" % (n, args.specs))
     title = phase_title(section)
+    if args.verification_plan:
+        try:
+            verification = verification_plan.load_plan(
+                args.verification_plan, args.specs)
+            verification_context = verification_plan.render_phase_context(
+                verification, n)
+        except verification_plan.VerificationError as exc:
+            die(3, "invalid verification plan: %s" % exc)
+        if verification_context:
+            # This is appended to the normative phase section, not merely background
+            # context: the critic must independently judge every generated obligation.
+            section = section.rstrip() + "\n\n" + verification_context
 
     evidence_file = os.path.join(gates_dir, "GATE%d-EVIDENCE.md" % n)
     if not os.path.isfile(evidence_file):
