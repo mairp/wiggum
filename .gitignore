@@ -33,3 +33,6 @@ __pycache__/
 
 # pytest cache (test tooling only; the runtime needs no venv/pip).
 .pytest_cache/
+
+# stray test-run artifact (accidental gitlink)
+.wiggum-autonomy-smoke
