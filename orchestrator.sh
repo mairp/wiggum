@@ -709,6 +709,57 @@ feedback_gist() {
   printf '%s' "$g"
 }
 
+# ── oscillation detector (W8) ────────────────────────────────────────────────
+# A non-converging loop re-rejects a criterion that an EARLIER attempt had already
+# cleared (a flip-flop) — the signature of the evidence lottery, not of real code
+# gaps. We parse each attempt's GATE<N>-FEEDBACK.md for its unmet criterion IDs
+# (T\d+ tokens) and, if any single criterion goes present→absent→present too many
+# times, stop the run early with a pointer to this failure mode instead of silently
+# burning to MAX_REJECTS. Threshold is env-overridable; default 2 reappearances.
+# Prints "OSCILLATING <criterion> <count>" to stdout when tripped, else nothing.
+WIGGUM_OSC_MAX="${WIGGUM_OSC_MAX:-2}"
+check_oscillation() {
+  local n="$1"
+  local -a fbs=()
+  local d
+  for d in "$FEATURE_DIR/attempts/phase${n}"/attempt*; do
+    [[ -f "$d/GATE${n}-FEEDBACK.md" ]] && fbs+=( "$d/GATE${n}-FEEDBACK.md" )
+  done
+  # the current (not-yet-archived) attempt's feedback lives in the gates dir
+  [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && fbs+=( "$GATES_DIR/GATE${n}-FEEDBACK.md" )
+  (( ${#fbs[@]} >= 4 )) || return 0   # a flip-flop needs several attempts to appear
+  python3 - "$WIGGUM_OSC_MAX" "${fbs[@]}" <<'PY'
+import re, sys
+thresh = int(sys.argv[1])
+files = sys.argv[2:]
+# ordered list of unmet-criterion ID sets, one per attempt
+seqs = []
+for f in files:
+    try:
+        txt = open(f, encoding="utf-8", errors="replace").read()
+    except OSError:
+        txt = ""
+    seqs.append(set(re.findall(r'\bT\d{2,}\b', txt)))
+ids = set().union(*seqs) if seqs else set()
+worst_id, worst = None, 0
+for cid in ids:
+    seen_before = False
+    prev = False
+    reappears = 0
+    for s in seqs:
+        cur = cid in s
+        if cur and not prev and seen_before:
+            reappears += 1
+        if cur:
+            seen_before = True
+        prev = cur
+    if reappears > worst:
+        worst, worst_id = reappears, cid
+if worst_id is not None and worst > thresh:
+    print("OSCILLATING %s %d" % (worst_id, worst))
+PY
+}
+
 # ── archive a rejected attempt (stale-evidence rule) ─────────────────────────
 # Moves GATE<N>-EVIDENCE.md + a snapshot of the feedback into the attempt dir so
 # the proposer's next pass does real work (its gate isn't satisfied by stale
@@ -763,6 +814,34 @@ build_proposer_prompt() {
       echo "met and cite the exact files/paths that prove it. Do NOT write the evidence"
       echo "file until the work is actually complete — its mere existence ends this phase."
     fi
+    echo
+    # ── evidence contract (W6) — make the critic able to ground your evidence ────
+    # The critic judges ONLY the evidence doc + a read-only "grounding snapshot" of the
+    # files you cite. It has hard limits; evidence written blind to them turns honest,
+    # implemented work into a rejection (the exact loop this contract exists to break).
+    echo "## Evidence contract — READ THIS or your evidence will be rejected despite correct code"
+    echo "A separate automated CRITIC judges ONLY (a) this evidence file and (b) a"
+    echo "read-only grounding snapshot of the files you CITE. It cannot browse the repo."
+    echo "So for EVERY acceptance criterion that names a file and/or a symbol:"
+    echo "  1. Cite THAT exact file path in your evidence (a workdir-relative path with a"
+    echo "     slash, e.g. \`packages/sdk/src/resilience.ts\`, not a bare method name)."
+    echo "  2. Stage a LINE-NUMBERED proof slice of that file showing the exact symbols"
+    echo "     the criterion names, under ${GATES_REL}/proofs/ (e.g."
+    echo "     \`sed -n '52,78p' packages/sdk/src/resilience.ts\` piped through \`nl -ba\`,"
+    echo "     or \`grep -n\`), and cite the proof file. Quote the symbol, not just its"
+    echo "     surrounding function — the critic greps your cited file for that symbol."
+    echo "How the critic's snapshot works (write evidence it can actually ground):"
+    echo "  - Files your criteria NAME are shown with ANCHORED excerpts: ±15 line-numbered"
+    echo "    lines around each named symbol. So naming the symbol in the criterion (and"
+    echo "    ensuring it appears verbatim in the cited file) is what makes it verifiable —"
+    echo "    a mid-file implementation IS reachable this way; a vague citation is not."
+    echo "  - There is a per-snapshot byte budget. A snapshot line 'content excerpt"
+    echo "    omitted — grounding byte budget reached' means the file was VERIFIED PRESENT;"
+    echo "    it is NOT a missing file. Criterion-named files are never omitted, so cite"
+    echo "    the precise path the criterion is about rather than dozens of tangential ones."
+    echo "  - Cite files by real relative paths. Do NOT cite RPC method names (\`jobs.run\`,"
+    echo "    \`events.subscribe@v1\`) as if they were files — they are not, and the critic"
+    echo "    ignores them."
     echo
     # The criteria heading is adapter-specific: native calls them acceptance
     # criteria; a Spec Kit tasks.md phase is a checklist of deliverable tasks.
@@ -968,6 +1047,30 @@ run_phase() {
     # REJECTED / MALFORMED (crc == 10 or other). Record and maybe retry.
     log "----- phase $n REJECTED on attempt $attempt/$MAX_REJECTS -----"
     wiggum_emit reject phase "$n" attempt "$attempt"
+
+    # Oscillation breaker (W8): if a criterion the loop had already cleared is being
+    # re-rejected (a flip-flop), the loop is not converging — stop now with a pointer to
+    # the grounding/evidence-lottery failure mode rather than spending the rest of the
+    # budget re-rolling the same dice.
+    local osc; osc="$(check_oscillation "$n")"
+    if [[ -n "$osc" ]]; then
+      local osc_id osc_ct
+      osc_id="$(awk '{print $2}' <<<"$osc")"
+      osc_ct="$(awk '{print $3}' <<<"$osc")"
+      log ""
+      log "############################################################"
+      log "# HALT — phase $n is OSCILLATING (exit $E_REJECTS). Not converging."
+      log "#   criterion $osc_id was cleared and re-rejected $osc_ct time(s) across attempts."
+      log "#   This is the signature of an EVIDENCE-GROUNDING problem (the critic sees a"
+      log "#   different slice of the repo each attempt), NOT accumulating code gaps."
+      log "#   Check the grounding snapshot for $osc_id's file (lib/critic.py W1/W2 anchored"
+      log "#   excerpts) and the proposer's proof slices before treating it as a real gap."
+      log "#   attempt history : $FEATURE_DIR/attempts/phase${n}/"
+      log "############################################################"
+      wiggum_emit gate_oscillation phase "$n" attempt "$attempt" criterion "$osc_id" reappears "$osc_ct"
+      wiggum_emit run_stop reason gate_oscillation phase "$n" attempts "$attempt"
+      exit "$E_REJECTS"
+    fi
 
     if (( attempt >= MAX_REJECTS )); then
       log ""

@@ -29,6 +29,7 @@ import sys, os, re, json, time, argparse, secrets, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wiggum_spec  # noqa: E402
 import verification_plan  # noqa: E402
+import verdict_pins  # noqa: E402  (W9 — per-criterion verdict pinning)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config knobs (env-overridable; flags override env).
@@ -37,11 +38,29 @@ GROUNDING_MAX_FILES   = 80         # hard cap on PRESENCE LINES (one per cited p
                                    # Must exceed the artifact count of the busiest
                                    # phase (Phase 1 cites ~65) so no cited path is
                                    # silently dropped and mistaken for "absent".
-GROUNDING_HEAD_BYTES  = 1500
-GROUNDING_TAIL_BYTES  = 500
-GROUNDING_TOTAL_CAP   = 32000     # hard cap on EXCERPT bytes appended (fenced
-                                   # head/tail blocks only — never suppresses a
-                                   # presence line, only its content excerpt)
+GROUNDING_HEAD_BYTES  = 4000       # was 1500 — a source file's public surface (imports,
+                                   # exported signatures) rarely fits in 1500 bytes.
+GROUNDING_TAIL_BYTES  = 1000       # was 500.
+GROUNDING_TOTAL_CAP   = 131072    # hard cap on EXCERPT bytes appended (fenced blocks
+                                   # only — never suppresses a presence line, only its
+                                   # content excerpt). Was 32000, which starved the
+                                   # snapshot on any phase citing ~20 source files and
+                                   # forced the critic to reject honest work solely
+                                   # because the evidence was elided (an evidence
+                                   # lottery). Modern context windows make 32 KB
+                                   # needlessly stingy; the adversarial gate is only
+                                   # sound if the judge can see the defendant's exhibit.
+ANCHOR_CONTEXT_LINES  = 15         # ±N lines quoted around each criterion-symbol match
+                                   # in a criterion-named file (W2 anchored excerpts).
+ANCHOR_MAX_BYTES      = 6000       # per-file FLOOR for an anchored excerpt (small files).
+ANCHOR_MAX_BYTES_CEIL = 24000      # per-file CEILING (W14): a large criterion-named file
+                                   # scales its anchor budget with its own size so a symbol
+                                   # implemented LATE (past where dense common-word anchor
+                                   # matches near the top would exhaust a fixed 6 KB budget)
+                                   # is still reachable. Without this, e.g. a 487-line
+                                   # operations file's `RunHandle`/`buildJobsGroup` bodies
+                                   # (lines 244/386) are structurally invisible and their
+                                   # criteria can NEVER be grounded — the phase-3 T024 wall.
 EVIDENCE_MAX_BYTES    = 60000     # truncate a huge evidence file for the prompt
 
 
@@ -86,7 +105,20 @@ PATH_RE = re.compile(
     r'|(?<![\w./])(\.[A-Za-z][\w\-]{1,})')
 
 
-def extract_paths(evidence_text):
+def extract_paths(evidence_text, workdir=None, search_dirs=None):
+    """Extract workdir-relative file paths the text cites, for grounding.
+
+    When `workdir` is given, a de-noising pass drops the two false-positive classes
+    the strict looks_path filter can't catch on its own (RC #3 in the phase-3 report):
+      (a) RPC method names carrying an `@vN` version tag (`jobs.run@v1`) — never files;
+      (b) a no-slash dotted token (`jobs.run`, `events.subscribe`, `.d.ts`) that does
+          NOT resolve on disk — these are prose/identifiers, and left in they become
+          "MISSING (does not exist on disk)" noise that biases the critic toward
+          "cited things are absent" and wastes the presence-line budget.
+    A no-slash token that DOES resolve (`.env.example`, `validate.py`) is kept — that
+    is the exact bare-basename grounding the regression test at critic.py locks in.
+    With no `workdir` (standalone text-only callers, e.g. the unit tests) the disk
+    filter is skipped and behavior is unchanged."""
     seen, out = set(), []
     for m in PATH_RE.finditer(evidence_text):
         cand = (m.group(1) or m.group(2) or m.group(3) or m.group(4) or "").strip()
@@ -99,6 +131,11 @@ def extract_paths(evidence_text):
             continue
         if re.search(r'\s', cand):
             continue                          # real paths here don't contain spaces
+        # RPC method names (`jobs.run@v1`, `events.subscribe@v2`) read like dotted
+        # filenames but are never files — the `@vN` version tag is the tell. Drop them
+        # before they become MISSING noise.
+        if re.search(r'@v\d', cand):
+            continue
         has_slash = "/" in cand
         if not has_slash and cand.startswith("."):
             # A bare leading-dot token is a dotfile: `.env`, `.gitignore`,
@@ -120,6 +157,14 @@ def extract_paths(evidence_text):
             continue
         # trim trailing punctuation the regex may have grabbed
         cand = cand.rstrip(".,:;)")
+        # De-noise (only when we can check disk): a no-slash dotted token that does
+        # NOT resolve is an identifier/prose fragment (`jobs.run`, `events.subscribe`,
+        # `.d.ts`), not a cited file. Dropping it keeps the snapshot free of spurious
+        # MISSING lines. A no-slash token that resolves is a legit bare basename and is
+        # kept; slash paths are always kept (a genuine missing path SHOULD show MISSING).
+        if workdir is not None and cand and "/" not in cand:
+            if _resolve_cited(cand, workdir, search_dirs) is None:
+                continue
         if cand and cand not in seen:
             seen.add(cand)
             out.append(cand)
@@ -161,13 +206,175 @@ def grounding_search_dirs(gates_rel, workdir=None):
     return tuple(dirs)
 
 
-def _resolve_cited(p, workdir, search_dirs=None):
+# ─────────────────────────────────────────────────────────────────────────────
+#  Workspace-aware resolution (W10). A pnpm monorepo names its build artifacts by
+#  a PACKAGE-relative path (`dist/index.js`) in each member's package.json
+#  `exports` — the only correct way to write it in a manifest. The proposer's
+#  evidence therefore cites bare `dist/index.js`, which resolves at neither the
+#  repo root nor the proof dirs, so a real, built `packages/sdk/dist/index.js`
+#  reads as MISSING and the critic rejects a true fact. The fix is to also try each
+#  declared workspace member as a base. Scoped strictly to members that declare a
+#  `package.json` — never a whole-tree glob, which would resolve a truly missing
+#  file to some unrelated namesake.
+# ─────────────────────────────────────────────────────────────────────────────
+_WORKSPACE_CACHE = {}
+
+
+def _yaml_packages_globs(text):
+    """Extract the `packages:` list globs from a pnpm-workspace.yaml WITHOUT a YAML
+    dependency (stdlib only). Handles the two shapes pnpm actually writes:
+        packages:
+          - 'packages/*'
+          - "apps/**"
+    and an inline flow list `packages: ['packages/*', 'apps/*']`. Best-effort and
+    read-only; anything it can't parse simply yields no members (root-only fallback)."""
+    globs = []
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = re.match(r'^packages\s*:\s*(.*)$', stripped)
+        if m:
+            inline = m.group(1).strip()
+            if inline.startswith("["):
+                for item in re.findall(r'''['"]([^'"]+)['"]''', inline):
+                    globs.append(item)
+                in_block = False
+            else:
+                in_block = True
+            continue
+        if in_block:
+            item = re.match(r'^-\s*(.+)$', stripped)
+            if item:
+                val = item.group(1).strip().strip('\'"')
+                if val:
+                    globs.append(val)
+            elif re.match(r'^\w[\w\-]*\s*:', stripped):
+                # a new top-level key ended the packages block
+                in_block = False
+    return globs
+
+
+def _workspace_members(workdir):
+    """The workdir-relative directories of every pnpm workspace member that declares a
+    package.json, computed once per workdir and cached. Returns [] when there is no
+    pnpm-workspace.yaml — so resolution stays exactly root-only for non-monorepos
+    (the required no-op). Only single-segment `*` and `**` globs are expanded, against
+    directories that actually exist on disk; read-only."""
+    if not workdir:
+        return []
+    key = os.path.abspath(workdir)
+    if key in _WORKSPACE_CACHE:
+        return _WORKSPACE_CACHE[key]
+    members = []
+    ws_path = os.path.join(workdir, "pnpm-workspace.yaml")
+    try:
+        with open(ws_path, encoding="utf-8", errors="replace") as fh:
+            globs = _yaml_packages_globs(fh.read())
+    except OSError:
+        globs = []
+    seen = set()
+    for g in globs:
+        g = g.strip().strip("/")
+        if not g or g.startswith("!"):        # negations are out of scope; skip
+            continue
+        # Expand only the trailing `*`/`**` segment against real dirs. A literal (no
+        # wildcard) glob names a member directly.
+        parts = g.split("/")
+        if parts and parts[-1] in ("*", "**"):
+            base_rel = "/".join(parts[:-1])
+            base_abs = os.path.join(workdir, base_rel) if base_rel else workdir
+            try:
+                entries = sorted(os.listdir(base_abs))
+            except OSError:
+                entries = []
+            candidates = [os.path.join(base_rel, e) if base_rel else e
+                          for e in entries]
+        else:
+            candidates = [g]
+        for rel in candidates:
+            abs_dir = os.path.join(workdir, rel)
+            if (rel not in seen and os.path.isdir(abs_dir)
+                    and os.path.isfile(os.path.join(abs_dir, "package.json"))):
+                seen.add(rel)
+                members.append(rel)
+    _WORKSPACE_CACHE[key] = members
+    return members
+
+
+def _declared_build_exports(workdir, members):
+    """The set of package-relative build-artifact paths every workspace member DECLARES
+    in its package.json (`exports` targets + `main`/`module`/`types`), normalized to
+    workdir-relative (`packages/sdk/dist/index.js`) AND kept package-relative
+    (`dist/index.js`). A cited path in this set that does not resolve is a build that
+    did not run — a real, actionable grounding GAP, never "the criterion is false"
+    (W11). Read-only; best-effort JSON parse."""
+    out = set()
+    for rel in (members or []):
+        pkg_path = os.path.join(workdir, rel, "package.json")
+        try:
+            with open(pkg_path, encoding="utf-8", errors="replace") as fh:
+                pkg = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        targets = []
+
+        def _collect(v):
+            if isinstance(v, str):
+                targets.append(v)
+            elif isinstance(v, dict):
+                for sub in v.values():
+                    _collect(sub)
+            elif isinstance(v, list):
+                for sub in v:
+                    _collect(sub)
+
+        _collect(pkg.get("exports"))
+        for key in ("main", "module", "types", "typings"):
+            if isinstance(pkg.get(key), str):
+                targets.append(pkg[key])
+        for t in targets:
+            t = t.lstrip("./")
+            if not t or "*" in t:
+                continue
+            out.add(t)                                   # package-relative
+            out.add(os.path.join(rel, t))                # workdir-relative
+    return out
+
+
+def _member_hint(text, members):
+    """Given free text (a criterion + evidence) and the workspace members, return the
+    member dir whose package name or dir basename the text names — so an ambiguous
+    basename (`dist/index.js` exists in every package) resolves to the RIGHT package
+    (`@lisa/sdk` → packages/sdk). Returns None when no member is clearly indicated."""
+    if not text or not members:
+        return None
+    # Longest basename first so `core-utils` wins over `core` when the text names it —
+    # a shorter namesake is a substring of the longer and `\bcore\b` matches inside
+    # `core-utils` (the hyphen is a word boundary), which would mis-hint otherwise.
+    for rel in sorted(members, key=lambda m: len(os.path.basename(m.rstrip("/"))),
+                      reverse=True):
+        base = os.path.basename(rel.rstrip("/"))
+        # `@scope/sdk` or a bare `packages/sdk` mention, or the package's own name.
+        if re.search(r'[\w@/\-]*/%s\b' % re.escape(base), text) or \
+           re.search(r'\b%s\b' % re.escape(base), text):
+            return rel
+    return None
+
+
+def _resolve_cited(p, workdir, search_dirs=None, members=None, hint=None):
     """Return the first existing on-disk path for a cited reference, searching the
     workdir root and the conventional proof directories. Returns None if the file
     exists nowhere. Absolute paths are honored as-is. This prevents a bare-filename
     citation of a file that lives under the feature's gates/proofs/ from being falsely
     reported MISSING (which would fail truthful evidence). `search_dirs` defaults to
-    the legacy flat layout for standalone callers; the critic threads the feature's."""
+    the legacy flat layout for standalone callers; the critic threads the feature's.
+
+    W10: `members` (workdir-relative workspace dirs) makes a PACKAGE-relative citation
+    (`dist/index.js`) resolve against each member; `hint` (a preferred member) is tried
+    first so an artifact present in many packages resolves to the criterion's package."""
     if search_dirs is None:
         search_dirs = GROUNDING_SEARCH_DIRS
     if os.path.isabs(p):
@@ -176,6 +383,18 @@ def _resolve_cited(p, workdir, search_dirs=None):
     direct = os.path.join(workdir, p)
     if os.path.exists(direct):
         return direct
+    # W10: a package-relative path (kept whole, e.g. `dist/index.js`) tried against each
+    # workspace member — the hinted member first so a namesake in the right package wins.
+    if members is None:
+        members = _workspace_members(workdir)
+    if members and "/" in p and not p.startswith(("../", "./")):
+        ordered = ([hint] + [m for m in members if m != hint]) if hint else members
+        for m in ordered:
+            if not m:
+                continue
+            cand = os.path.join(workdir, m, p)
+            if os.path.exists(cand):
+                return cand
     # bare/short reference: try the known proof dirs using just the basename
     base = os.path.basename(p)
     for d in search_dirs:
@@ -397,7 +616,118 @@ def harness_probes(paths, section, evidence, workdir):
             "gitignore / no-secrets criteria:\n\n" + "\n\n".join(out))
 
 
-def grounding_snapshot(paths, workdir, search_dirs=None):
+# A backticked token that names a code SYMBOL (function/type/method), not a file:
+# a bare identifier (`registerReconnector`, `AbortSignal`) or a dotted call
+# (`events.subscribe`), with no slash and no source-file extension. These are the
+# anchors W2 greps for so a mid-file implementation is quoted around the exact symbol
+# the criterion names, instead of a blind head/tail slice that can never reach it.
+_ANCHOR_TOKEN_RE = re.compile(r'`([^`\n]+)`')
+_ANCHOR_OK_RE = re.compile(r'^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$')
+_SRC_EXT_RE = re.compile(r'\.(?:ts|tsx|js|jsx|mjs|cjs|py|md|json|txt|sh|ya?ml|toml|'
+                         r'go|rs|java|rb|c|h|cpp|hpp|css|html)$', re.IGNORECASE)
+
+
+def extract_anchor_tokens(section_text):
+    """Symbols the criteria name (backticked identifiers/dotted calls), for W2 anchored
+    excerpts. Deliberately excludes file paths (they carry a source extension or a
+    slash) — those are grounded as files, not searched for as symbols inside a file."""
+    out, seen = [], set()
+    for m in _ANCHOR_TOKEN_RE.finditer(section_text or ""):
+        tok = m.group(1).strip()
+        # strip a trailing call/version suffix: `run()` -> run, `jobs.run@v1` -> jobs.run
+        tok = re.sub(r'\(\)$', '', tok)
+        tok = re.sub(r'@v\d.*$', '', tok)
+        if not tok or "/" in tok or _SRC_EXT_RE.search(tok):
+            continue
+        if not _ANCHOR_OK_RE.match(tok):
+            continue
+        # A single dotted call's LAST segment is the useful grep needle (`events.subscribe`
+        # rarely appears verbatim; `subscribe` does). Keep both the full token and, for a
+        # dotted one, its final segment.
+        for needle in ({tok, tok.rsplit(".", 1)[-1]} if "." in tok else {tok}):
+            if len(needle) >= 3 and needle not in seen:
+                seen.add(needle)
+                out.append(needle)
+    return out
+
+
+def _anchor_cap(text_bytes):
+    """W14: the per-file anchored-excerpt byte budget, scaled to the file's own size.
+    Small files keep the old ANCHOR_MAX_BYTES floor (a no-op for them); a large
+    criterion-named file gets room up to ANCHOR_MAX_BYTES_CEIL so its later symbols
+    aren't starved by dense anchor matches near the top. Bounded so the snapshot can't
+    blow up on a pathological file."""
+    return min(ANCHOR_MAX_BYTES_CEIL, max(ANCHOR_MAX_BYTES, text_bytes))
+
+
+def anchored_excerpt(full, anchors):
+    """Return a line-numbered excerpt of `full` built from ±ANCHOR_CONTEXT_LINES windows
+    around every line matching any anchor token, windows merged and deduped, capped at a
+    size-scaled per-file budget (W14; see _anchor_cap). Returns "" when no anchor matches
+    (caller falls back to head/tail). This is what lets a symbol implemented in the MIDDLE
+    or LATE part of a large file be seen at all — head/tail excerpting structurally cannot
+    reach it, and a fixed small cap cannot reach past dense early matches."""
+    if not anchors:
+        return ""
+    try:
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(512 * 1024)
+    except OSError:
+        return ""
+    cap = _anchor_cap(len(text.encode("utf-8")))
+    src_lines = text.splitlines()
+    hit = set()
+    for i, ln in enumerate(src_lines):
+        if any(a in ln for a in anchors):
+            lo = max(0, i - ANCHOR_CONTEXT_LINES)
+            hi = min(len(src_lines), i + ANCHOR_CONTEXT_LINES + 1)
+            hit.update(range(lo, hi))
+    if not hit:
+        return ""
+    ordered = sorted(hit)
+    chunks, cur = [], [ordered[0]]
+    for idx in ordered[1:]:
+        if idx == cur[-1] + 1:
+            cur.append(idx)
+        else:
+            chunks.append(cur)
+            cur = [idx]
+    chunks.append(cur)
+    out, total = [], 0
+    for ci, chunk in enumerate(chunks):
+        if ci > 0:
+            out.append("…")
+        for idx in chunk:
+            row = "%5d: %s" % (idx + 1, src_lines[idx])
+            if total + len(row) > cap:
+                out.append("… (anchored excerpt truncated at %d bytes)" % cap)
+                return "\n".join(out)
+            out.append(row)
+            total += len(row) + 1
+    return "\n".join(out)
+
+
+def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=None,
+                       members=None, hint=None, export_targets=None):
+    # `priority` = paths the criteria NAME (W1): they are ordered first AND their content
+    # excerpt is ALWAYS emitted (never suppressed by the byte budget) — a criterion that
+    # names a file must never be unverifiable because budget was spent on other files.
+    # `anchors` = criterion symbol tokens (W2): for a priority text file, quote ±N lines
+    # around each match instead of a blind head/tail slice.
+    # `members`/`hint` = W10 workspace resolution (package-relative citations); `hint`
+    # is the member a namesake prefers. `export_targets` = W11 declared build artifacts:
+    # such a path, if unresolved, renders as a NEEDS-GROUNDING build gap, not MISSING.
+    priority = set(priority or ())
+    anchors = list(anchors or ())
+    if members is None:
+        members = _workspace_members(workdir)
+    export_targets = set(export_targets or ())
+    # Order: criterion-named files first, then everything else — preserving each group's
+    # original (evidence-then-spec) order so the presence-line budget favors the paths a
+    # verdict actually turns on.
+    if priority:
+        paths = ([p for p in paths if p in priority]
+                 + [p for p in paths if p not in priority])
     lines = ["", "## Grounding snapshot (verified by the critic, read-only)",
              "The following is the ACTUAL on-disk state of files the evidence cites.",
              "Claims about files that do not exist, are empty, or contradict this "
@@ -419,9 +749,20 @@ def grounding_snapshot(paths, workdir, search_dirs=None):
                     "reached — omission here means NOT-SHOWN, it does NOT mean the "
                     "file is missing from disk)" % omitted)
             break
-        full = _resolve_cited(p, workdir, search_dirs)
+        full = _resolve_cited(p, workdir, search_dirs, members=members, hint=hint)
         if full is None:
-            lines.append("- `%s` — **MISSING** (does not exist on disk)" % p)
+            # W11: a cited path that is a DECLARED build export of a workspace member but
+            # does not resolve is a build that did not run — an actionable grounding gap,
+            # not a false criterion. Render it as NEEDS-GROUNDING (W4 semantics) so the
+            # critic never rejects it as "the artifact does not exist / criterion unmet".
+            norm = p.lstrip("./")
+            if norm in export_targets or p in export_targets:
+                lines.append(
+                    "- `%s` — **NEEDS-GROUNDING** (declared build export not found on "
+                    "disk; the build likely did not run — treat as a build-output gap, "
+                    "NOT as an unmet criterion; do not reject on this alone)" % p)
+            else:
+                lines.append("- `%s` — **MISSING** (does not exist on disk)" % p)
             shown += 1
             continue
         try:
@@ -477,11 +818,25 @@ def grounding_snapshot(paths, workdir, search_dirs=None):
 
         lines.append("- `%s` — exists, %d bytes, mtime %s" % (disp, st.st_size, mtime))
         shown += 1
-        excerpt = head.decode("utf-8", "replace").replace("\x00", "�")
-        if tail:
-            excerpt += "\n… (truncated) …\n" + tail.decode("utf-8", "replace").replace("\x00", "�")
-        block = "  ```\n" + "\n".join("  " + l for l in excerpt.splitlines()) + "\n  ```"
-        if total + len(block) <= GROUNDING_TOTAL_CAP:
+        is_priority = p in priority
+        # W2: for a criterion-named file, quote ±N lines around each criterion symbol
+        # instead of a blind head/tail slice — the only way a mid-file implementation
+        # (e.g. the T022 resume wiring buried in an 18 KB module) can ever appear.
+        anchored = anchored_excerpt(full, anchors) if is_priority else ""
+        if anchored:
+            block = ("  ```\n"
+                     + "\n".join("  " + l for l in anchored.splitlines())
+                     + "\n  ```\n  (anchored excerpt: ±%d lines around each criterion "
+                       "symbol, with line numbers)" % ANCHOR_CONTEXT_LINES)
+        else:
+            excerpt = head.decode("utf-8", "replace").replace("\x00", "�")
+            if tail:
+                excerpt += "\n… (truncated) …\n" + tail.decode("utf-8", "replace").replace("\x00", "�")
+            block = "  ```\n" + "\n".join("  " + l for l in excerpt.splitlines()) + "\n  ```"
+        # A criterion-named file's excerpt is ALWAYS emitted (W1): budget exhaustion must
+        # never elide the very content a verdict turns on. Non-priority files still
+        # respect the (now much larger) byte budget.
+        if is_priority or total + len(block) <= GROUNDING_TOTAL_CAP:
             lines.append(block)
             total += len(block)
         else:
@@ -552,6 +907,15 @@ Rules:
   SNAPSHOT (verified on-disk state) over the evidence's prose when they conflict.
   A criterion "proven" only by a claim about a file that the snapshot shows is
   missing or empty is NOT met.
+- A snapshot entry reading "content excerpt omitted — grounding byte budget
+  reached; file verified present" is a TOOLING limitation, NOT evidence of absence:
+  the file EXISTS and was verified on disk; only its excerpt was elided for length.
+  You MUST NOT count a criterion unmet solely because that file's excerpt was
+  elided. If you genuinely cannot judge a criterion because the content you need is
+  not in the snapshot, say so explicitly in your feedback as
+  `NEEDS-GROUNDING:<path>` (name the file whose content you need) rather than
+  rejecting it as unimplemented. Criterion-named files are shown with anchored
+  excerpts (±lines around each named symbol, line-numbered) and are never elided.
 - The DESIGN CONTEXT (if present) is background only — never an extra criterion.
 - Do not be talked into approving by confident language. Substance only.
 
@@ -801,13 +1165,34 @@ def main():
         # verified even if the proposer's prose cites it oddly — the criterion, not
         # the proposer, decides what needs proving. Evidence paths come first so
         # they win the presence-line budget; spec-only paths are appended.
-        ev_paths = extract_paths(evidence)
-        spec_paths = [p for p in extract_paths(section) if p not in set(ev_paths)]
-        paths = ev_paths + spec_paths
         # Resolve bare citations against the ACTIVE feature's proof dirs (Phase 2),
         # not a hardcoded flat .wiggum/gates.
         search_dirs = grounding_search_dirs(gates_rel, workdir)
-        grounding = grounding_snapshot(paths, workdir, search_dirs) if paths else \
+        # Pass workdir so the extractor's de-noise pass (W5) can drop no-slash tokens
+        # that don't resolve on disk (`jobs.run`, `events.subscribe`) instead of turning
+        # them into spurious MISSING lines.
+        ev_paths = extract_paths(evidence, workdir, search_dirs)
+        spec_paths = [p for p in extract_paths(section, workdir, search_dirs)
+                      if p not in set(ev_paths)]
+        paths = ev_paths + spec_paths
+        # W1: files the CRITERIA (spec section) name get grounding priority — ordered
+        # first and their content always shown. A criterion that names file X must never
+        # be unverifiable because the byte budget was spent on other files. Include the
+        # evidence paths that are ALSO spec-named; a path cited only in prose is not
+        # elevated. Fall back to all cited paths if the section names none.
+        spec_named = set(extract_paths(section, workdir, search_dirs))
+        priority = [p for p in paths if p in spec_named]
+        # W2: symbols the criteria name — greppable anchors for the priority files.
+        anchors = extract_anchor_tokens(section)
+        # W10/W11: workspace members (for package-relative resolution), the member the
+        # criterion/evidence text points at (disambiguates a namesake artifact), and the
+        # declared build-export paths (an unresolved one is a build gap, not MISSING).
+        members = _workspace_members(workdir)
+        hint = _member_hint(section + "\n" + evidence, members)
+        export_targets = _declared_build_exports(workdir, members)
+        grounding = grounding_snapshot(
+            paths, workdir, search_dirs, priority=priority, anchors=anchors,
+            members=members, hint=hint, export_targets=export_targets) if paths else \
             "\n## Grounding snapshot\n(No file paths cited in the evidence.)"
         # Anti-blind-spot backstop: files cited (by evidence OR spec) that the strict
         # extractor missed but that resolve on disk. Tell the critic to treat them as
@@ -832,8 +1217,24 @@ def main():
     # budget-allocated and fence-safe truncated by the shared renderer.
     context = wiggum_spec.render_context(args.specs, fmt=fmt)
 
+    # W9: per-criterion verdict pins. Compute a content hash of the criterion-backing
+    # (priority) files; load any criteria CONFIRMED in an earlier attempt of THIS phase
+    # against that SAME hash, and tell the critic not to re-litigate them for thin proof.
+    # The hash binding means ANY change to a backing file drops every pin (re-verify from
+    # scratch), so a pin can never mask a regression. Best-effort; failure => no pins.
+    pin_block = ""
+    all_crit_ids = verdict_pins.criterion_ids(section)
+    try:
+        pin_priority = [p for p in (priority or []) if p]
+        backing = verdict_pins.backing_hash(pin_priority, workdir)
+        confirmed_pins = verdict_pins.load_pins(feature_dir, n, backing)
+        pin_block = verdict_pins.render_pin_block(confirmed_pins)
+    except Exception as e:  # noqa: BLE001 — pins are an optimization, never fatal
+        warn("W9 pin load skipped: %s" % e)
+        backing = None
+
     nonce = secrets.token_hex(8)
-    prompt = build_prompt(n, section, evidence, grounding, nonce, context)
+    prompt = build_prompt(n, section, evidence, grounding + pin_block, nonce, context)
 
     if args.debug:
         with open(os.path.join(debug_dir, "critic-prompt.phase%d.att%d.txt" % (n, args.attempt)), "w") as fh:
@@ -881,8 +1282,25 @@ def main():
         _write_transcript(transcript, nonce, "APPROVED", detail, prompt, reply, args)
         emit(events_path, "verdict", phase=n, attempt=args.attempt, result="APPROVED",
              title=title)
+        # W9: phase fully approved — drop its pin file so a future re-run starts clean.
+        try:
+            verdict_pins.clear_pins(feature_dir, n)
+        except Exception:  # noqa: BLE001
+            pass
         print("APPROVED")
         sys.exit(0)
+
+    # W9: on a genuine REJECT, record which criteria WERE satisfied this round
+    # (= all phase criteria − the ones the reply names unmet) against the backing hash,
+    # so the next attempt need not re-prove them and the loop converges instead of
+    # rotating which criteria get grounded. Skip on MALFORMED (no trustworthy unmet set)
+    # and when the backing hash could not be computed.
+    if verdict == "REJECTED" and backing is not None and all_crit_ids:
+        try:
+            unmet = verdict_pins.unmet_ids(reply)
+            verdict_pins.update_pins(feature_dir, n, all_crit_ids, unmet, backing)
+        except Exception as e:  # noqa: BLE001
+            warn("W9 pin update skipped: %s" % e)
 
     # REJECTED or MALFORMED (fail-safe): both do not approve.
     _finish_reject(gates_dir, n, title, args, nonce, prompt, reply, verdict, detail,

@@ -26,6 +26,14 @@ MUTATION = re.compile(
     r"update|stop|resume|deploy|install|migrate|commit|push)\b",
     re.I,
 )
+# A phase whose criteria mention any of these implies a build artifact must exist —
+# so its gate should run `build`, not just `test` (W7). Kept narrow: a plain feature
+# phase with no artifact language does not pay the build cost at its gate.
+BUILD_ARTIFACT = re.compile(
+    r"\b(build|dist|artifact|tsc|compile[ds]?|bundle[ds]?|transpile[ds]?|"
+    r"typecheck|type-check|declaration file|\.d\.ts)\b",
+    re.I,
+)
 GENERATED_MARKER = "<!-- wiggum-verification-plan content-hash:"
 
 
@@ -296,6 +304,97 @@ def discover_project(workdir, environ=None):
     }
 
 
+def _workspace_export_artifacts(workdir):
+    """Return workdir-relative paths of every DECLARED build artifact across pnpm
+    workspace members (each member's package.json `exports` targets + main/module/
+    types). W12: after a build runs, the gate checks these exist and were freshly
+    written — a machine-checked artifact fact independent of the critic's textual
+    grounding. Stdlib-only, read-only, best-effort. Returns [] for a non-monorepo."""
+    ws_path = os.path.join(workdir, "pnpm-workspace.yaml")
+    if not os.path.isfile(ws_path):
+        return []
+    try:
+        with open(ws_path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    globs = []
+    in_block = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = re.match(r"^packages\s*:\s*(.*)$", stripped)
+        if m:
+            inline = m.group(1).strip()
+            if inline.startswith("["):
+                globs.extend(re.findall(r"""['"]([^'"]+)['"]""", inline))
+                in_block = False
+            else:
+                in_block = True
+            continue
+        if in_block:
+            item = re.match(r"^-\s*(.+)$", stripped)
+            if item:
+                globs.append(item.group(1).strip().strip("'\""))
+            elif re.match(r"^\w[\w\-]*\s*:", stripped):
+                in_block = False
+    members = []
+    for g in globs:
+        g = g.strip().strip("/")
+        if not g or g.startswith("!"):
+            continue
+        parts = g.split("/")
+        if parts and parts[-1] in ("*", "**"):
+            base_rel = "/".join(parts[:-1])
+            base_abs = os.path.join(workdir, base_rel) if base_rel else workdir
+            try:
+                entries = sorted(os.listdir(base_abs))
+            except OSError:
+                entries = []
+            candidates = [os.path.join(base_rel, e) if base_rel else e for e in entries]
+        else:
+            candidates = [g]
+        for rel in candidates:
+            abs_dir = os.path.join(workdir, rel)
+            if os.path.isdir(abs_dir) and os.path.isfile(
+                os.path.join(abs_dir, "package.json")
+            ):
+                members.append(rel)
+    artifacts = []
+    seen = set()
+    for rel in members:
+        try:
+            pkg = _read_json(os.path.join(workdir, rel, "package.json"))
+        except VerificationError:
+            continue
+        targets = []
+
+        def _collect(value):
+            if isinstance(value, str):
+                targets.append(value)
+            elif isinstance(value, dict):
+                for sub in value.values():
+                    _collect(sub)
+            elif isinstance(value, list):
+                for sub in value:
+                    _collect(sub)
+
+        _collect(pkg.get("exports"))
+        for key in ("main", "module", "types", "typings"):
+            if isinstance(pkg.get(key), str):
+                targets.append(pkg[key])
+        for target in targets:
+            target = target.lstrip("./")
+            if not target or "*" in target:
+                continue
+            path = os.path.join(rel, target)
+            if path not in seen:
+                seen.add(path)
+                artifacts.append(path)
+    return sorted(artifacts)
+
+
 def _criterion_text(criterion):
     match = re.match(r"^[ \t]*-[ \t]*\[[ xX]?\][ \t]*(.*)$", criterion)
     return (match.group(1) if match else criterion).strip()
@@ -379,6 +478,11 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
         for command in discovery["commands"]
         if command["kind"] == "test"
     ]
+    build_command_refs = [
+        command["id"]
+        for command in discovery["commands"]
+        if command["kind"] == "build"
+    ]
     suites = []
     gates = []
     cumulative = []
@@ -390,6 +494,20 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
         cumulative.extend(phase_refs)
         suite_id = "SUITE-phase-%s" % phase.n
         suite_ids.append(suite_id)
+        # W7: a phase whose spec text implies a build artifact (a criterion about
+        # `dist/`, a compiled bundle, `tsc`, …) must run `build` at its OWN gate — not
+        # only at GATE-release. Otherwise a build-artifact criterion is machine-
+        # unprovable at the phase gate and the proposer must hand-stage proof (another
+        # evidence-lottery ticket). Gate on the phase's own title+criteria text so
+        # unrelated phases don't pay the build cost.
+        phase_text = "\n".join(
+            [phase.title or ""] + [_criterion_text(c) for c in (phase.criteria or [])]
+        )
+        phase_command_refs = list(test_command_refs)
+        if build_command_refs and BUILD_ARTIFACT.search(phase_text):
+            phase_command_refs += [
+                ref for ref in build_command_refs if ref not in phase_command_refs
+            ]
         suites.append(
             {
                 "id": suite_id,
@@ -397,7 +515,7 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
                 "scope": "phase",
                 "phase": phase.n,
                 "obligationRefs": phase_refs,
-                "commandRefs": test_command_refs,
+                "commandRefs": phase_command_refs,
             }
         )
         gates.append(
@@ -715,12 +833,18 @@ def _safe_name(value):
     return re.sub(r"[^A-Za-z0-9_]+", "_", value).lower()
 
 
-def _generated_artifact(path, framework, plan, content):
+def _generated_artifact(path, framework, plan, content, marker=None):
     reused = False
     if os.path.exists(path):
         with open(path, encoding="utf-8", errors="replace") as handle:
             reused = handle.read() == content
-    _atomic_write(path, content)
+    # Pass the generation marker so a file that is ITSELF a prior scaffold (its first
+    # line carries `<comment> wiggum-verification-plan:`) can be regenerated when the
+    # plan changes — e.g. a resume after the plan's contentHash moved. Without this, any
+    # plan change strands the run: the preflight re-scaffolds, the hash-bearing marker
+    # line differs, and _atomic_write refuses to overwrite even its own earlier output.
+    # A genuinely user-edited file (no marker) is still protected.
+    _atomic_write(path, content, marker)
     return {
         "path": path,
         "framework": framework,
@@ -758,7 +882,8 @@ def scaffold_plan(plan, output_directory):
             )
         lines.extend(["});", ""])
         artifacts.append(
-            _generated_artifact(path, "vitest", plan, "\n".join(lines))
+            _generated_artifact(path, "vitest", plan, "\n".join(lines),
+                                marker="// wiggum-verification-plan:")
         )
     elif "jest" in frameworks:
         path = authorize_output(
@@ -780,7 +905,8 @@ def scaffold_plan(plan, output_directory):
             )
         lines.extend(["});", ""])
         artifacts.append(
-            _generated_artifact(path, "jest", plan, "\n".join(lines))
+            _generated_artifact(path, "jest", plan, "\n".join(lines),
+                                marker="// wiggum-verification-plan:")
         )
 
     if "pytest" in frameworks:
@@ -808,7 +934,8 @@ def scaffold_plan(plan, output_directory):
                 ]
             )
         artifacts.append(
-            _generated_artifact(path, "pytest", plan, "\n".join(lines))
+            _generated_artifact(path, "pytest", plan, "\n".join(lines),
+                                marker="# wiggum-verification-plan:")
         )
 
     manifest_path = authorize_output(
@@ -839,6 +966,10 @@ def scaffold_plan(plan, output_directory):
             "canonical",
             plan,
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            # The manifest has no comment line to carry a marker; its stable sorted-JSON
+            # opening ('{\n  "kind": "verification-test-scaffold",') is the signature that
+            # identifies it as prior generated output, safe to regenerate on a plan change.
+            marker='{\n  "kind": "verification-test-scaffold",',
         )
     )
     return artifacts
@@ -893,9 +1024,17 @@ def run_gate(plan, phase):
                 else "Advisory gate %s has no automated commands" % gate["id"]
             ),
         }
+    # W12: the workdir-relative build artifacts every workspace member DECLARES. After a
+    # build command runs we record which of these now exist and were written at/after the
+    # build started — a machine-checked "the build produced its declared outputs" fact the
+    # gate carries independent of the critic's textual grounding. Empty for a non-monorepo.
+    workdir = plan.get("project", {}).get("workdir", "")
+    declared_artifacts = _workspace_export_artifacts(workdir) if workdir else []
     evidence = []
+    build_artifacts = []
     for command in selected:
         started = time.monotonic()
+        wall_start = time.time()
         try:
             result = subprocess.run(
                 [command["executable"]] + command["args"],
@@ -934,6 +1073,30 @@ def run_gate(plan, phase):
                 "passed": code == 0,
             }
         )
+        # W12: after a successful build, stat every declared artifact. `fresh` = the file
+        # exists AND was (re)written at/after the build started — proof this build produced
+        # it, not a stale leftover. This is recorded for the gate to surface; it does not
+        # itself fail the gate (a build that exits 0 but emits nothing is caught upstream).
+        if command["kind"] == "build" and code == 0 and declared_artifacts:
+            for rel in declared_artifacts:
+                abs_path = os.path.join(workdir, rel)
+                try:
+                    st = os.stat(abs_path)
+                    exists, mtime, size = True, st.st_mtime, st.st_size
+                except OSError:
+                    exists, mtime, size = False, None, None
+                build_artifacts.append(
+                    {
+                        "commandId": command["id"],
+                        "path": rel,
+                        "absPath": abs_path,
+                        "exists": exists,
+                        "sizeBytes": size,
+                        "mtimeEpoch": mtime,
+                        "fresh": bool(exists and mtime is not None
+                                      and mtime >= wall_start - 1),
+                    }
+                )
     passed = all(value["passed"] for value in evidence)
     return {
         "planId": plan["id"],
@@ -942,6 +1105,7 @@ def run_gate(plan, phase):
         "phase": gate.get("phase"),
         "passed": passed,
         "commands": evidence,
+        "buildArtifacts": build_artifacts,
         "summary": (
             "Verification gate %s passed %d command(s)" % (gate["id"], len(evidence))
             if passed

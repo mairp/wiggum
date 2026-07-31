@@ -14,13 +14,54 @@ Locks in the dotfile / long-suffix grounding fix + the grounding-gap backstop:
 Run:  python3 lib/test_critic.py        (plain asserts, exit 0 = pass)
    or: pytest lib/test_critic.py
 """
+import json
 import os
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from critic import (extract_paths, grounding_gap, harness_probes,  # noqa: E402
-                    grounding_search_dirs, grounding_snapshot, _resolve_cited)
+                    grounding_search_dirs, grounding_snapshot, _resolve_cited,
+                    extract_anchor_tokens, anchored_excerpt,
+                    _workspace_members, _declared_build_exports, _member_hint,
+                    _WORKSPACE_CACHE, _anchor_cap, ANCHOR_MAX_BYTES,
+                    ANCHOR_MAX_BYTES_CEIL)
+
+
+def test_w14_anchor_cap_scales_with_file_size():
+    """W14: small files keep the 6 KB floor (no regression); large criterion-named files
+    scale their anchor budget up to the ceiling so late symbols aren't starved."""
+    assert _anchor_cap(500) == ANCHOR_MAX_BYTES          # tiny file -> floor
+    assert _anchor_cap(3000) == ANCHOR_MAX_BYTES         # below floor -> floor
+    assert _anchor_cap(12000) == 12000                   # mid file -> its own size
+    assert _anchor_cap(999999) == ANCHOR_MAX_BYTES_CEIL  # huge -> clamped to ceiling
+
+
+def test_w14_late_symbol_reachable_in_large_file():
+    """A symbol implemented LATE in a large file, behind dense early anchor matches, must
+    appear in the anchored excerpt — the exact failure that made phase-3 T024 ungroundable
+    at a fixed 6 KB cap. Mirrors real source structure: dense matches near the top
+    (schemas/comments), a large body of NON-matching implementation filler (which inflates
+    file size, and thus the W14 scaled cap, without consuming excerpt budget), then the
+    target symbol far below the old 6 KB cutline."""
+    with tempfile.NamedTemporaryFile("w", suffix=".ts", delete=False) as fh:
+        # ~120 dense early matches for the common anchor `run` (~4 KB excerpted) — enough
+        # to blow past a fixed 6 KB cap once context windows are added.
+        for i in range(120):
+            fh.write("// run run run run schema comment line %d\n" % i)
+        # large non-matching body: raises file size (=> raises the scaled cap) but is not
+        # excerpted, exactly like the implementation gap between a file's top and line 244.
+        for i in range(400):
+            fh.write("const filler_%d = %d + %d\n" % (i, i, i * 2))
+        fh.write("export class RunHandle { status() { return 'ok' } }\n")
+        path = fh.name
+    try:
+        # sanity: with the OLD fixed 6 KB cap the target is unreachable
+        assert _anchor_cap(os.path.getsize(path)) > ANCHOR_MAX_BYTES, "test file must scale the cap"
+        ex = anchored_excerpt(path, ["run", "RunHandle", "status"])
+        assert "export class RunHandle" in ex, "late symbol starved by early matches (W14 regression)"
+    finally:
+        os.unlink(path)
 
 
 def _probe(env_example_content):
@@ -156,6 +197,184 @@ def test_snapshot_keeps_missing_label_for_absent_citation():
         assert "- `reversed/nope.md` — **MISSING**" in snap, snap
 
 
+# ── W5: de-noise the path extractor ──────────────────────────────────────────
+def test_extractor_denoises_rpc_and_nonresolving_tokens():
+    """With a workdir, no-slash dotted tokens that don't resolve on disk (`jobs.run`,
+    `events.subscribe`, `.d.ts`) and `@vN` RPC method names must NOT be extracted —
+    they were becoming spurious MISSING lines that biased the critic (RC #3). A real
+    on-disk bare basename still resolves; a genuinely-missing SLASH path still shows."""
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "config.ts"), "w").write("export const x = 1\n")
+        text = ("The `jobs.run@v1` method calls `events.subscribe`; a `jobs.run` handler "
+                "emits `.d.ts` types. See `config.ts` and `src/missing/gone.ts`.")
+        got = set(extract_paths(text, d, grounding_search_dirs(
+            os.path.join(".wiggum", "features", "default", "gates"), d)))
+        for noise in ("jobs.run@v1", "jobs.run", "events.subscribe", ".d.ts",
+                      "subscribe", "run"):
+            assert noise not in got, "%r should be de-noised, got %r" % (noise, sorted(got))
+        assert "config.ts" in got, "real on-disk basename must survive: %r" % sorted(got)
+        # a genuinely-missing slash path SHOULD still be reported (shows MISSING)
+        assert "src/missing/gone.ts" in got, "missing slash path must stay: %r" % sorted(got)
+
+
+def test_extractor_without_workdir_is_unchanged():
+    """Text-only callers (no workdir) skip the disk filter — behavior is unchanged, so
+    the existing dotfile-grounding regressions still hold."""
+    got = set(extract_paths("Files: `.env.example`, `requirements.txt`."))
+    assert ".env.example" in got and "requirements.txt" in got
+
+
+# ── W2: anchored excerpts around criterion symbols ───────────────────────────
+def test_extract_anchor_tokens_symbols_not_paths():
+    section = ("- The `registerReconnector` hook races an `AbortSignal`; "
+               "`events.subscribe` resumes with `sinceEventId`. See `operations/index.ts`.")
+    toks = set(extract_anchor_tokens(section))
+    assert "registerReconnector" in toks
+    assert "AbortSignal" in toks
+    assert "sinceEventId" in toks
+    assert "subscribe" in toks          # last segment of a dotted call
+    assert "operations/index.ts" not in toks   # a path, not a symbol anchor
+
+
+def test_anchored_excerpt_reaches_mid_file_symbol():
+    """A symbol implemented in the MIDDLE of a large file must be quotable — the exact
+    failure head/tail excerpting caused (the T022 resume wiring buried mid-module)."""
+    with tempfile.TemporaryDirectory() as d:
+        body = (["// header line %d" % i for i in range(200)]
+                + ["  hub.registerReconnector(onReconnect);  // the wiring"]
+                + ["// footer line %d" % i for i in range(200)])
+        fp = os.path.join(d, "index.ts")
+        open(fp, "w").write("\n".join(body) + "\n")
+        exc = anchored_excerpt(fp, ["registerReconnector"])
+        assert "registerReconnector(onReconnect)" in exc, "mid-file symbol must appear"
+        assert "201:" in exc, "excerpt must carry line numbers, got:\n%s" % exc[:400]
+        # head/tail of the same file would NOT contain it (proves the point):
+        head = open(fp).read(1500)
+        assert "registerReconnector" not in head
+
+
+def test_anchored_excerpt_empty_when_no_match():
+    with tempfile.TemporaryDirectory() as d:
+        fp = os.path.join(d, "x.ts")
+        open(fp, "w").write("nothing relevant here\n")
+        assert anchored_excerpt(fp, ["registerReconnector"]) == ""
+
+
+# ── W1: criterion-named files get priority + never-elided content ─────────────
+def test_priority_file_content_never_elided_by_budget():
+    """A criterion-named (priority) file's excerpt is ALWAYS emitted, even when the byte
+    budget is exhausted by other files — a criterion must never be unverifiable because
+    budget was spent elsewhere (the evidence-lottery root cause)."""
+    with tempfile.TemporaryDirectory() as d:
+        # a big non-priority filler file that would exhaust a small budget
+        open(os.path.join(d, "filler.ts"), "w").write("x = 1\n" * 40000)
+        open(os.path.join(d, "target.ts"), "w").write(
+            "\n".join("line %d" % i for i in range(50)) + "\nmarkerSymbol_here\n")
+        snap = grounding_snapshot(
+            ["filler.ts", "target.ts"], d,
+            priority=["target.ts"], anchors=["markerSymbol_here"])
+        assert "markerSymbol_here" in snap, "priority file content must never be elided"
+        # priority file is ordered before the filler
+        assert snap.index("target.ts") < snap.index("filler.ts")
+
+
+# ── W10-W13: workspace-aware resolution in a pnpm monorepo ───────────────────
+def _monorepo(root, members=("sdk", "core"), exports_map=None,
+              workspace_glob="packages/*"):
+    """Build a throwaway pnpm monorepo: a pnpm-workspace.yaml naming `packages/*`, and
+    one `packages/<m>` per member with a package.json declaring `exports: './dist/
+    index.js'` (overridable per member via exports_map). Returns nothing; the caller
+    stats/reads. Clears the workspace cache so each fixture is resolved fresh."""
+    _WORKSPACE_CACHE.clear()
+    open(os.path.join(root, "pnpm-workspace.yaml"), "w").write(
+        "packages:\n  - '%s'\n" % workspace_glob)
+    for m in members:
+        pdir = os.path.join(root, "packages", m)
+        os.makedirs(pdir, exist_ok=True)
+        exports = (exports_map or {}).get(m, "./dist/index.js")
+        pkg = {"name": "@lisa/%s" % m, "version": "0.0.0", "exports": exports}
+        open(os.path.join(pdir, "package.json"), "w").write(json.dumps(pkg))
+
+
+def test_workspace_members_discovered_from_pnpm_yaml():
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d, members=("sdk", "core", "cli"))
+        got = set(_workspace_members(d))
+        assert got == {"packages/sdk", "packages/core", "packages/cli"}, got
+
+
+def test_package_relative_citation_resolves_to_member():
+    """The false-MISSING this whole plan fixes: bare `dist/index.js` (a package-relative
+    export path) must resolve to `packages/sdk/dist/index.js`, NOT read as MISSING."""
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d)
+        os.makedirs(os.path.join(d, "packages", "sdk", "dist"))
+        built = os.path.join(d, "packages", "sdk", "dist", "index.js")
+        open(built, "w").write("export const x = 1\n")
+        resolved = _resolve_cited("dist/index.js", d)
+        assert resolved == built, "expected %s, got %r" % (built, resolved)
+        # and it must NOT render as a MISSING line in the snapshot
+        snap = grounding_snapshot(["dist/index.js"], d)
+        assert "MISSING" not in snap, snap
+        assert "export const x = 1" in snap
+
+
+def test_namesake_artifact_prefers_hinted_member():
+    """`dist/index.js` exists in EVERY package; the criterion names `@lisa/core`, so it
+    must resolve to packages/core's copy, not packages/sdk's (first-match) one."""
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d, members=("sdk", "core"))
+        for m in ("sdk", "core"):
+            dd = os.path.join(d, "packages", m, "dist")
+            os.makedirs(dd)
+            open(os.path.join(dd, "index.js"), "w").write("// %s\n" % m)
+        members = _workspace_members(d)
+        hint = _member_hint("The `@lisa/core` package exports its bundle", members)
+        assert hint == "packages/core", hint
+        resolved = _resolve_cited("dist/index.js", d, members=members, hint=hint)
+        assert resolved == os.path.join(d, "packages", "core", "dist", "index.js")
+
+
+def test_unbuilt_declared_export_is_gap_not_missing():
+    """W11: a DECLARED build export that isn't on disk (build didn't run) renders as
+    NEEDS-GROUNDING, not MISSING — a build-output gap, never a false criterion."""
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d)  # declares dist/index.js but never creates it
+        members = _workspace_members(d)
+        exports = _declared_build_exports(d, members)
+        assert "dist/index.js" in exports and "packages/sdk/dist/index.js" in exports
+        snap = grounding_snapshot(["dist/index.js"], d,
+                                  members=members, export_targets=exports)
+        assert "NEEDS-GROUNDING" in snap, snap
+        assert "MISSING" not in snap, snap
+
+
+def test_genuinely_absent_member_file_still_missing():
+    """No over-resolution: a package-relative path that is NOT a declared export and
+    exists in no member must STILL render MISSING (the adversarial bar is preserved)."""
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d)
+        members = _workspace_members(d)
+        exports = _declared_build_exports(d, members)
+        snap = grounding_snapshot(["dist/nope.js"], d,
+                                  members=members, export_targets=exports)
+        assert "**MISSING**" in snap, snap
+        assert "NEEDS-GROUNDING" not in snap, snap
+
+
+def test_non_monorepo_resolution_is_unchanged_noop():
+    """No pnpm-workspace.yaml → members is empty and resolution behaves EXACTLY as before
+    (root + proof dirs only). Guards the required non-monorepo no-op."""
+    with tempfile.TemporaryDirectory() as d:
+        _WORKSPACE_CACHE.clear()
+        assert _workspace_members(d) == []
+        # a package-relative path with no root file and no workspace resolves to None
+        assert _resolve_cited("dist/index.js", d) is None
+        # a root-level file still resolves exactly as the legacy resolver did
+        open(os.path.join(d, "config.ts"), "w").write("x\n")
+        assert _resolve_cited("config.ts", d) == os.path.join(d, "config.ts")
+
+
 if __name__ == "__main__":
     test_config_dotfiles_and_long_suffixes_are_grounded()
     test_prose_fragments_are_not_grounded()
@@ -167,4 +386,16 @@ if __name__ == "__main__":
     test_bare_citation_in_gate_subdir_resolves()
     test_snapshot_labels_bare_gate_citation_by_resolved_path()
     test_snapshot_keeps_missing_label_for_absent_citation()
+    test_extractor_denoises_rpc_and_nonresolving_tokens()
+    test_extractor_without_workdir_is_unchanged()
+    test_extract_anchor_tokens_symbols_not_paths()
+    test_anchored_excerpt_reaches_mid_file_symbol()
+    test_anchored_excerpt_empty_when_no_match()
+    test_priority_file_content_never_elided_by_budget()
+    test_workspace_members_discovered_from_pnpm_yaml()
+    test_package_relative_citation_resolves_to_member()
+    test_namesake_artifact_prefers_hinted_member()
+    test_unbuilt_declared_export_is_gap_not_missing()
+    test_genuinely_absent_member_file_still_missing()
+    test_non_monorepo_resolution_is_unchanged_noop()
     print("OK: all critic grounding assertions pass")
