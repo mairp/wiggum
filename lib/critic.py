@@ -1015,12 +1015,17 @@ def call_bebop_shell(prompt, backend, timeout):
     bebop_sh = os.environ.get("BEBOP_SH", "/root/gpu_rtx_3090/bebop.sh")
     if not os.path.isfile(bebop_sh):
         raise RuntimeError("bebop.sh not found: %s (set BEBOP_SH)" % bebop_sh)
-    script = '. "$1"; shift; bb="$1"; shift; bebop "$bb" -p "$1" --dangerously-skip-permissions'
+    # The prompt is passed on STDIN, never as an argv: a large grounding snapshot
+    # (W14 scales per-file excerpts up to 24 KB) easily exceeds ARG_MAX and would
+    # fail the whole critic call with "[Errno 7] Argument list too long". `bebop -p`
+    # with no prompt arg reads the prompt from stdin.
+    script = '. "$1"; shift; bb="$1"; shift; bebop "$bb" -p --dangerously-skip-permissions'
     env = dict(os.environ)
     env.setdefault("IS_SANDBOX", "1")
     try:
-        out = subprocess.run(["bash", "-c", script, "_", bebop_sh, backend, prompt],
-                             capture_output=True, text=True, timeout=timeout, env=env)
+        out = subprocess.run(["bash", "-c", script, "_", bebop_sh, backend],
+                             input=prompt, capture_output=True, text=True,
+                             timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         raise RuntimeError("bebop critic timed out after %ss" % timeout)
     if out.returncode != 0:
