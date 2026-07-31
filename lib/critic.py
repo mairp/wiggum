@@ -1047,7 +1047,17 @@ def critic_call(provider, prompt, timeout):
             if base.endswith("/chat/completions"):
                 base = base[: -len("/chat/completions")]
             key = os.environ.get("WIGGUM_COMPASS_KEY", "")
-            model = os.environ.get("WIGGUM_BEBOP_CRITIC_MODEL", backend if backend != "compass" else "gpt-5")
+            # Provider-agnostic: the model is env-controlled, never hardcoded here.
+            # A bebop backend that IS a model id (e.g. `gpt`, `qwen`) can name itself;
+            # a gateway backend like `compass` has no intrinsic model, so the model MUST
+            # be supplied via WIGGUM_BEBOP_CRITIC_MODEL — fail loudly if it isn't rather
+            # than silently pick a provider's model.
+            model = os.environ.get("WIGGUM_BEBOP_CRITIC_MODEL") \
+                or (backend if backend != "compass" else "")
+            if not model:
+                raise RuntimeError(
+                    "critic model is unset: set WIGGUM_BEBOP_CRITIC_MODEL "
+                    "(no hardcoded default — the model is env-controlled)")
             return call_openai_chat(prompt, model, timeout, base, key, "WIGGUM_COMPASS_KEY")
         return call_bebop_shell(prompt, backend, timeout)
     raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (claude|codex|bebop)" % provider)
