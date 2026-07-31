@@ -59,6 +59,7 @@ the telemetry add-on (Loki when --loki-url is set, OTEL when --otel-url is set).
 EXIT
   0  evidence file appeared      4  max-iter reached without evidence
   6  stopped via stop.flag       1  bad usage
+  7  consecutive agent errors (WIGGUM_PROPOSER_MAX_ERRORS, default 2)
 EOF
 }
 
@@ -266,6 +267,15 @@ fi
 PIDFILE="$STATE_DIR/proposer.pid"
 trap 'rm -f "$PIDFILE"' EXIT
 
+# Consecutive-error circuit breaker. A pass can end `error_during_execution`
+# (e.g. the agent hitting --timeout) yet write no evidence — indistinguishable
+# from an ordinary no-evidence pass by file-presence alone, so without this the
+# loop would silently spawn up to MAX_ITER more full (often expensive) passes.
+# Reads the just-finished pass's result subtype from the event stream; N in a row
+# that are not `success` aborts with exit 7. A success resets the count.
+: "${WIGGUM_PROPOSER_MAX_ERRORS:=2}"
+consec_err=0
+
 for (( i=1; i<=MAX_ITER; i++ )); do
   if [[ -f "$STATE_DIR/stop.flag" ]]; then
     echo "proposer.sh: stop.flag detected — stopping before pass $i" >&2
@@ -284,10 +294,44 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   wait "$PASS_PID" || true
   rm -f "$PIDFILE"
 
+  # Evidence wins outright — a pass that produced the gate file is a success
+  # regardless of how the agent's result was labelled.
   if [[ -f "$EVIDENCE" ]]; then
     wiggum_emit evidence_written file "$(basename "$EVIDENCE")" iters "$i"
     echo "proposer.sh: evidence appeared after pass $i ($EVIDENCE)." >&2
     exit 0
+  fi
+
+  # No evidence yet: inspect the pass's result subtype. Count consecutive
+  # non-`success` results and break rather than burn another full pass. If the
+  # events file or subtype is unavailable, treat as non-error (unchanged behaviour).
+  last_subtype="$(python3 - "$WIGGUM_EVENTS" <<'PY' 2>/dev/null
+import sys, json
+sub = None
+try:
+    for line in open(sys.argv[1]):
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        if o.get("event") == "agent_result":
+            sub = o.get("subtype")
+except Exception:
+    pass
+print(sub or "")
+PY
+)"
+  if [[ -n "$last_subtype" && "$last_subtype" != "success" ]]; then
+    consec_err=$(( consec_err + 1 ))
+    echo "proposer.sh: pass $i ended '$last_subtype' (consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS)" >&2
+    wiggum_emit iter_error iter "$i" subtype "$last_subtype" consec "$consec_err"
+    if (( consec_err >= WIGGUM_PROPOSER_MAX_ERRORS )); then
+      echo "proposer.sh: $consec_err consecutive agent errors — aborting (exit 7). Raise --timeout or WIGGUM_PROPOSER_MAX_ERRORS, or fix the phase harness." >&2
+      wiggum_emit run_stop reason proposer_consecutive_errors iter "$i" subtype "$last_subtype"
+      exit 7
+    fi
+  else
+    consec_err=0
   fi
   if [[ -f "$STATE_DIR/stop.flag" ]]; then
     echo "proposer.sh: stop.flag detected — stopping after pass $i" >&2

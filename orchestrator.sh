@@ -962,6 +962,15 @@ run_phase() {
         wiggum_emit run_stop reason proposer_max_iter phase "$n"
         exit "$E_BUDGET"
       fi
+      if [[ "$prc" -eq 7 ]]; then
+        log ">>> proposer aborted on consecutive agent errors for phase $n — halting (exit $E_BUDGET)."
+        log "#   the agent pass repeatedly ended in error (often --timeout). Options:"
+        log "#     - raise the per-pass timeout:  WIGGUM_PROPOSER_TIMEOUT=3600 wiggum resume -w $WORKDIR"
+        log "#     - raise the error tolerance:    WIGGUM_PROPOSER_MAX_ERRORS=5 wiggum resume -w $WORKDIR"
+        log "#     - or fix the phase's live harness so a pass completes within the timeout."
+        wiggum_emit run_stop reason proposer_consecutive_errors phase "$n"
+        exit "$E_BUDGET"
+      fi
       log ">>> proposer exited ($prc) without writing evidence for phase $n — internal error."
       wiggum_emit run_stop reason proposer_no_evidence phase "$n" rc "$prc"
       exit "$E_INTERNAL"
