@@ -661,6 +661,22 @@ def render_phase_context(plan, phase):
         return ""
     gate = gates[0]
     by_id = {value["id"]: value for value in plan["obligations"]}
+    # The phase GATE carries a CUMULATIVE obligation set (phase N re-verifies phases
+    # 1..N as a regression guard). Rendering all of them in full prose bloats the
+    # proposer prompt — for an 8-phase feature the phase-8 prompt embedded 65 full VO
+    # blocks (~61KB), overflowing the agent's context ("Prompt is too long"). The
+    # proposer only needs the CURRENT phase's obligations in full; the inherited ones
+    # from already-approved phases are a compact regression reminder, not new work.
+    current = [
+        by_id[value]
+        for value in gate["obligationRefs"]
+        if by_id.get(value) and by_id[value].get("phase") == phase
+    ]
+    inherited = [
+        by_id[value]
+        for value in gate["obligationRefs"]
+        if by_id.get(value) and by_id[value].get("phase") != phase
+    ]
     lines = [
         "## Verification obligations",
         "Canonical verification plan: %s" % plan["id"],
@@ -668,10 +684,7 @@ def render_phase_context(plan, phase):
         "Source semantic hash: %s" % plan["source"]["contentHash"],
         "",
     ]
-    for obligation_id in gate["obligationRefs"]:
-        obligation = by_id.get(obligation_id)
-        if not obligation:
-            continue
+    for obligation in current:
         lines.extend(
             [
                 "### %s — %s" % (obligation["id"], obligation["title"]),
@@ -685,6 +698,14 @@ def render_phase_context(plan, phase):
         lines.extend(
             "- Negative case: %s" % value for value in obligation["negativeCases"]
         )
+        lines.append("")
+    if inherited:
+        lines.append(
+            "### Inherited obligations from earlier approved phases (regression "
+            "context — already gated, not new work; the cumulative gate still "
+            "re-checks them):"
+        )
+        lines.extend("- %s — %s" % (o["id"], o["title"]) for o in inherited)
         lines.append("")
     lines.append(
         "Create or update automated tests for these obligations. Generated TODO/skip "

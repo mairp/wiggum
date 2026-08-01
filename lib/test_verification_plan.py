@@ -51,6 +51,38 @@ def test_create_is_deterministic_and_effect_witnessed(tmp_path):
     assert len(plan1["source"]["bundleId"]) == 26
 
 
+def test_phase_context_shows_current_full_inherited_compact(tmp_path):
+    # The phase gate carries a cumulative obligation set, but the rendered proposer
+    # context must show only the CURRENT phase's obligations in full prose (with
+    # Oracle/Witness/Negative-case detail) and collapse earlier approved phases'
+    # obligations to compact one-liners — otherwise the prompt bloats and overflows
+    # the agent's context on late phases.
+    workdir, specs = project(tmp_path)
+    plan = verification_plan.create_plan(workdir, specs, required=False)
+
+    phase1_ob = [o for o in plan["obligations"] if o["phase"] == 1]
+    phase2_ob = [o for o in plan["obligations"] if o["phase"] == 2]
+    assert phase1_ob and phase2_ob
+
+    ctx2 = verification_plan.render_phase_context(plan, 2)
+    # Phase-2 obligations appear as full "### <id>" blocks with detail lines.
+    for o in phase2_ob:
+        assert "### %s" % o["id"] in ctx2
+    assert "- Witness:" in ctx2
+    # Phase-1 (inherited) obligations appear ONLY under the compact inherited list,
+    # never as a full "### <id>" block.
+    assert "Inherited obligations from earlier approved phases" in ctx2
+    for o in phase1_ob:
+        assert "### %s" % o["id"] not in ctx2
+        assert "- %s — %s" % (o["id"], o["title"]) in ctx2
+
+    # Phase 1 is the first phase: no inherited section at all.
+    ctx1 = verification_plan.render_phase_context(plan, 1)
+    assert "Inherited obligations" not in ctx1
+    for o in phase1_ob:
+        assert "### %s" % o["id"] in ctx1
+
+
 def test_persist_requires_absolute_confined_outputs(tmp_path):
     workdir, specs = project(tmp_path)
     plan = verification_plan.create_plan(workdir, specs)
