@@ -28,6 +28,13 @@ step manually, over and over, is exactly the toil Wiggum removes: it adds an
 the work is verified — and I only step back in for the phases the machines
 genuinely can't settle.
 
+> 📖 **Full documentation lives in the [`wiki/`](./wiki) folder** — start at
+> [`wiki/Home.md`](./wiki/Home.md). It covers the
+> [architecture](./wiki/Architecture.md), [getting started](./wiki/Getting-Started.md),
+> the [CLI](./wiki/CLI-Reference.md), [spec formats](./wiki/Spec-Formats.md), the
+> [on-disk contract](./wiki/On-Disk-Contract.md), [hardening](./wiki/Hardening.md),
+> [telemetry](./wiki/Telemetry.md), and [configuration](./wiki/Configuration.md).
+
 ## The cast
 
 <p align="center">
