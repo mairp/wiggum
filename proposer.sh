@@ -209,6 +209,17 @@ run_iteration() {
   local -a shared=()
   if [[ "$BACKEND" != codex ]]; then
     shared+=( --dangerously-skip-permissions --verbose )
+    # Disable skills for the proposer agent. The standing prompt tells it to read
+    # PROGRESS.md / GATE*-FEEDBACK.md FIRST every pass, and those files are full of
+    # Anthropic tokens (claude-opus-4.8, anthropic/…, ANTHROPIC_BASE_URL) that
+    # auto-trigger the large `claude-api` skill; loading it overflows a small
+    # proposer model's context ("Prompt is too long"), erroring pass 1 of every
+    # attempt and burning the consecutive-error budget. The proposer needs no
+    # slash-command skills to do phase work, so turn them off. Escape hatch:
+    # WIGGUM_PROPOSER_SKILLS=1 to re-enable.
+    if [[ "${WIGGUM_PROPOSER_SKILLS:-0}" != "1" ]]; then
+      shared+=( --disable-slash-commands )
+    fi
     if [[ "$AGENT_STREAM" == "true" || "$STREAM_JSON" == "true" ]]; then
       shared+=( --output-format stream-json )
     fi
