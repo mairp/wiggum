@@ -90,13 +90,22 @@ See .env.example for every knob and the README for the file contract.
 EOF
 }
 
-# ── config: built-in defaults < .env < flags ────────────────────────────────
+# ── config: built-in defaults < .env < caller env < flags ───────────────────
 # Source .env FIRST (set -a exports every WIGGUM_* it sets), so the defaults just
 # below read the already-populated environment in one pass — no second re-read.
 # Flags come last in the parse loop, so they win.
+#
+# .env is a *default* source, not an override: a var the caller already exported
+# (e.g. `WIGGUM_PROPOSER_TIMEOUT=5400 wiggum resume …`, exactly what the abort
+# remediation tells you to run) must win over .env. But `set -a; . .env` blindly
+# overwrites already-exported vars — so we snapshot the caller's environment and
+# re-assert it after sourcing. .env still fills in every var the caller left unset.
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  _caller_env="$(export -p)"
   set -a; # shellcheck source=/dev/null
   . "$SCRIPT_DIR/.env"; set +a
+  eval "$_caller_env"        # caller-exported vars beat .env; unset ones keep .env's value
+  unset _caller_env
 fi
 
 WORKDIR="$PWD"
