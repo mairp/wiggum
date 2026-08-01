@@ -267,12 +267,18 @@ fi
 PIDFILE="$STATE_DIR/proposer.pid"
 trap 'rm -f "$PIDFILE"' EXIT
 
-# Consecutive-error circuit breaker. A pass can end `error_during_execution`
-# (e.g. the agent hitting --timeout) yet write no evidence — indistinguishable
-# from an ordinary no-evidence pass by file-presence alone, so without this the
-# loop would silently spawn up to MAX_ITER more full (often expensive) passes.
-# Reads the just-finished pass's result subtype from the event stream; N in a row
-# that are not `success` aborts with exit 7. A success resets the count.
+# Consecutive-error circuit breaker. A pass can end in error (e.g. the agent
+# hitting --timeout, or rejecting an over-long prompt) yet write no evidence —
+# indistinguishable from an ordinary no-evidence pass by file-presence alone, so
+# without this the loop would spawn up to MAX_ITER more full (often expensive)
+# passes. Keys on the pass's `is_error` flag, NOT its subtype: a pass can report
+# subtype `success` while `is_error` is true (observed: a 3589s full-timeout burn
+# that hit "Prompt is too long", wrote nothing, yet was labelled success — which a
+# subtype-only check would treat as progress and reset the counter). Every genuine
+# working pass carries is_error=false; every timeout/overflow carries is_error=true.
+# N erroring passes in a row without evidence aborts with exit 7; a clean
+# (is_error=false) pass resets the count so legitimate multi-pass iteration is
+# untouched.
 : "${WIGGUM_PROPOSER_MAX_ERRORS:=2}"
 consec_err=0
 
@@ -302,12 +308,14 @@ for (( i=1; i<=MAX_ITER; i++ )); do
     exit 0
   fi
 
-  # No evidence yet: inspect the pass's result subtype. Count consecutive
-  # non-`success` results and break rather than burn another full pass. If the
-  # events file or subtype is unavailable, treat as non-error (unchanged behaviour).
-  last_subtype="$(python3 - "$WIGGUM_EVENTS" <<'PY' 2>/dev/null
+  # No evidence yet: inspect the pass's is_error flag from the last agent_result
+  # event. Count consecutive erroring passes and break rather than burn another
+  # full pass. Emits one of: "error" (is_error true), "ok" (is_error false), or ""
+  # (no events file / no agent_result — treated as non-error, unchanged behaviour).
+  # The subtype is carried alongside only for the human-readable log line.
+  read -r last_flag last_subtype < <(python3 - "$WIGGUM_EVENTS" <<'PY' 2>/dev/null
 import sys, json
-sub = None
+flag, sub = "", ""
 try:
     for line in open(sys.argv[1]):
         try:
@@ -315,18 +323,22 @@ try:
         except Exception:
             continue
         if o.get("event") == "agent_result":
-            sub = o.get("subtype")
+            sub = o.get("subtype") or ""
+            v = o.get("is_error")
+            # is_error may be a real bool or the string "True"/"False" (event stream
+            # serialises it as text); treat both truthy forms as an error.
+            flag = "error" if (v is True or str(v).lower() == "true") else "ok"
 except Exception:
     pass
-print(sub or "")
+print(flag, sub or "-")
 PY
-)"
-  if [[ -n "$last_subtype" && "$last_subtype" != "success" ]]; then
+)
+  if [[ "$last_flag" == "error" ]]; then
     consec_err=$(( consec_err + 1 ))
-    echo "proposer.sh: pass $i ended '$last_subtype' (consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS)" >&2
+    echo "proposer.sh: pass $i errored (subtype '$last_subtype', is_error) — consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS" >&2
     wiggum_emit iter_error iter "$i" subtype "$last_subtype" consec "$consec_err"
     if (( consec_err >= WIGGUM_PROPOSER_MAX_ERRORS )); then
-      echo "proposer.sh: $consec_err consecutive agent errors — aborting (exit 7). Raise --timeout or WIGGUM_PROPOSER_MAX_ERRORS, or fix the phase harness." >&2
+      echo "proposer.sh: $consec_err consecutive agent errors — aborting (exit 7). Raise --timeout or WIGGUM_PROPOSER_MAX_ERRORS, or fix the phase harness (e.g. an over-long prompt or a run that never reaches a verdict)." >&2
       wiggum_emit run_stop reason proposer_consecutive_errors iter "$i" subtype "$last_subtype"
       exit 7
     fi
