@@ -24,6 +24,7 @@ from critic import (extract_paths, grounding_gap, harness_probes,  # noqa: E402
                     grounding_search_dirs, grounding_snapshot, _resolve_cited,
                     extract_anchor_tokens, anchored_excerpt,
                     _workspace_members, _declared_build_exports, _member_hint,
+                    _strip_dot_slash,
                     _WORKSPACE_CACHE, _anchor_cap, ANCHOR_MAX_BYTES,
                     ANCHOR_MAX_BYTES_CEIL)
 
@@ -375,6 +376,77 @@ def test_non_monorepo_resolution_is_unchanged_noop():
         assert _resolve_cited("config.ts", d) == os.path.join(d, "config.ts")
 
 
+# ── W15: relative-path normalization (the recurrent false-MISSING class) ─────
+def test_dot_slash_package_relative_resolves_to_member():
+    """THE recurrent bug: a package.json declares its export as `./dist/index.js`
+    (the only correct form in a manifest) and the proposer cites it verbatim. The
+    old `not p.startswith("./")` guard shut that citation out of the workspace-member
+    search, so a real built artifact read as MISSING. It must now resolve exactly as
+    the bare `dist/index.js` form does."""
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d)
+        os.makedirs(os.path.join(d, "packages", "sdk", "dist"))
+        built = os.path.join(d, "packages", "sdk", "dist", "index.js")
+        open(built, "w").write("export const x = 1\n")
+        for cited in ("./dist/index.js", "dist/index.js", "dist//index.js",
+                      "packages/sdk/dist/index.js", "./packages/sdk/dist/index.js"):
+            assert _resolve_cited(cited, d) == built, \
+                "%r must resolve to the built artifact" % cited
+        snap = grounding_snapshot(["./dist/index.js"], d)
+        assert "MISSING" not in snap, snap
+
+
+def test_embedded_dotdot_and_double_slash_normalize():
+    """Equivalent spellings of one root file — `./config.ts`, `src/../config.ts`,
+    `a//config.ts` — all resolve to the same file (normpath collapses them)."""
+    with tempfile.TemporaryDirectory() as d:
+        _WORKSPACE_CACHE.clear()
+        open(os.path.join(d, "config.ts"), "w").write("x\n")
+        os.makedirs(os.path.join(d, "src"))
+        want = os.path.join(d, "config.ts")
+        for cited in ("./config.ts", "config.ts", "src/../config.ts"):
+            assert _resolve_cited(cited, d) == want, cited
+
+
+def test_relative_citation_escaping_workdir_never_resolves():
+    """Containment: a relative citation that normalizes to escape the workdir
+    (`../secret`, `a/../../secret`) must resolve to None even when the target exists
+    — the critic must never ground evidence against a file outside the sandbox."""
+    with tempfile.TemporaryDirectory() as parent:
+        d = os.path.join(parent, "repo")
+        os.makedirs(d)
+        _WORKSPACE_CACHE.clear()
+        open(os.path.join(parent, "secret.txt"), "w").write("outside\n")
+        assert _resolve_cited("../secret.txt", d) is None
+        assert _resolve_cited("a/../../secret.txt", d) is None
+        assert _resolve_cited("..", d) is None
+
+
+def test_dot_slash_dotfile_not_mangled():
+    """`_strip_dot_slash` strips only the `./` prefix, never a leading dotfile —
+    the char-set bug `"./.env".lstrip("./") == "env"` this replaces. And a cited
+    `./.env` resolves to the real `.env`, not a phantom `env`."""
+    assert _strip_dot_slash("./.env") == ".env"
+    assert _strip_dot_slash("./dist/index.js") == "dist/index.js"
+    assert _strip_dot_slash(".env") == ".env"
+    assert _strip_dot_slash("./.gitignore") == ".gitignore"
+    with tempfile.TemporaryDirectory() as d:
+        _WORKSPACE_CACHE.clear()
+        open(os.path.join(d, ".env"), "w").write("K=v\n")
+        assert _resolve_cited("./.env", d) == os.path.join(d, ".env")
+        assert _resolve_cited(".env", d) == os.path.join(d, ".env")
+
+
+def test_dotfile_export_target_survives_strip():
+    """A declared export whose target is a dotfile (`./.env.d.ts`) keeps its dots in
+    the declared-export set — so an unbuilt one renders NEEDS-GROUNDING, not garbled."""
+    with tempfile.TemporaryDirectory() as d:
+        _monorepo(d, members=("sdk",), exports_map={"sdk": "./.d.ts/index.d.ts"})
+        exports = _declared_build_exports(d, _workspace_members(d))
+        assert ".d.ts/index.d.ts" in exports, sorted(exports)
+        assert "packages/sdk/.d.ts/index.d.ts" in exports, sorted(exports)
+
+
 if __name__ == "__main__":
     test_config_dotfiles_and_long_suffixes_are_grounded()
     test_prose_fragments_are_not_grounded()
@@ -398,4 +470,9 @@ if __name__ == "__main__":
     test_unbuilt_declared_export_is_gap_not_missing()
     test_genuinely_absent_member_file_still_missing()
     test_non_monorepo_resolution_is_unchanged_noop()
+    test_dot_slash_package_relative_resolves_to_member()
+    test_embedded_dotdot_and_double_slash_normalize()
+    test_relative_citation_escaping_workdir_never_resolves()
+    test_dot_slash_dotfile_not_mangled()
+    test_dotfile_export_target_survives_strip()
     print("OK: all critic grounding assertions pass")

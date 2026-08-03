@@ -258,6 +258,16 @@ def test_workspace_export_artifacts_are_declared_paths(tmp_path):
     assert verification_plan._workspace_export_artifacts(str(tmp_path / "nope")) == []
 
 
+def test_workspace_export_artifact_dotfile_target_not_mangled(tmp_path):
+    """The `./` strip must preserve a leading dotfile in a declared export. The old
+    `str.lstrip("./")` was a char-set strip that turned `./.d.ts/index.d.ts` into
+    `d.ts/index.d.ts` (dots eaten) — a target that could never be found on disk. The
+    prefix-only strip keeps the dots, so the machine-checked artifact path is real."""
+    workdir = _monorepo(tmp_path, members=("sdk",), export="./.dist/index.js")
+    got = set(verification_plan._workspace_export_artifacts(workdir))
+    assert got == {"packages/sdk/.dist/index.js"}, got
+
+
 def test_gate_records_fresh_build_artifacts(tmp_path):
     """W12: after a build command runs, the gate records each declared export's on-disk
     state — existence, size, and `fresh` (written at/after the build started). This is

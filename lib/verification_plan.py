@@ -304,6 +304,16 @@ def discover_project(workdir, environ=None):
     }
 
 
+def _strip_dot_slash(path):
+    """Drop a leading `./` from a package-manifest path without mangling a dotfile.
+    `str.lstrip("./")` is a char-set strip (`"./.env"` -> `"env"`); this strips only
+    the `./` prefix and normalizes separators, leaving `.env`/`.d.ts` intact."""
+    path = (path or "").replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
 def _workspace_export_artifacts(workdir):
     """Return workdir-relative paths of every DECLARED build artifact across pnpm
     workspace members (each member's package.json `exports` targets + main/module/
@@ -385,7 +395,7 @@ def _workspace_export_artifacts(workdir):
             if isinstance(pkg.get(key), str):
                 targets.append(pkg[key])
         for target in targets:
-            target = target.lstrip("./")
+            target = _strip_dot_slash(target)
             if not target or "*" in target:
                 continue
             path = os.path.join(rel, target)

@@ -220,6 +220,17 @@ def grounding_search_dirs(gates_rel, workdir=None):
 _WORKSPACE_CACHE = {}
 
 
+def _strip_dot_slash(p):
+    """Drop a single leading `./` from a package-manifest path WITHOUT mangling a
+    dotfile. `str.lstrip("./")` is a char-set strip, so `"./.env"` -> `"env"` and
+    `"./..foo"` loses its dots — wrong. This strips exactly the `./` prefix and
+    normalizes separators, leaving `.env`, `.gitignore`, `.d.ts` intact."""
+    p = (p or "").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
 def _yaml_packages_globs(text):
     """Extract the `packages:` list globs from a pnpm-workspace.yaml WITHOUT a YAML
     dependency (stdlib only). Handles the two shapes pnpm actually writes:
@@ -336,7 +347,7 @@ def _declared_build_exports(workdir, members):
             if isinstance(pkg.get(key), str):
                 targets.append(pkg[key])
         for t in targets:
-            t = t.lstrip("./")
+            t = _strip_dot_slash(t)
             if not t or "*" in t:
                 continue
             out.add(t)                                   # package-relative
@@ -379,24 +390,51 @@ def _resolve_cited(p, workdir, search_dirs=None, members=None, hint=None):
         search_dirs = GROUNDING_SEARCH_DIRS
     if os.path.isabs(p):
         return p if os.path.exists(p) else None
+    # W15: normalize the cited RELATIVE form before any join. Collapse a leading
+    # `./`, embedded `..`/`.` segments, redundant `//`, and Windows `\` separators
+    # so every equivalent spelling of one file — `./dist/index.js`,
+    # `dist/index.js`, `pkg/../dist/index.js`, `dist//index.js` — resolves
+    # identically. This is the fix for the recurrent relative-path false-MISSING:
+    # a package.json declares its export as `./dist/index.js` (the ONLY correct
+    # form in a manifest), the proposer cites it verbatim, and the old code's
+    # `not p.startswith("./")` guard shut that citation out of the workspace-member
+    # search below — so a real, built artifact read as MISSING and the critic
+    # rejected a true criterion. os.path.normpath (NOT str.lstrip("./"), which is a
+    # char-set strip that mangles a leading dotfile: `./.env` -> `env`) preserves
+    # dotfiles: normpath("./.env") == ".env".
+    norm = os.path.normpath(p.replace("\\", "/"))
+    if norm in (".", ""):
+        return workdir if os.path.exists(workdir) else None
+    # A relative citation that normalizes to ESCAPE the workdir (`../secret`,
+    # `a/../../x`) must never resolve: grounding evidence against a file outside the
+    # sandbox is a containment hole (the critic would read an arbitrary on-disk file
+    # as proof). Such a token has no legitimate grounding meaning for a repo-scoped
+    # criterion, so treat it as unresolved (-> MISSING). Absolute paths are honored
+    # above by explicit design; this guard is only for the relative family.
+    if norm == ".." or norm.startswith(".." + os.sep):
+        return None
     # exact relative path (covers evidence that cites the full .wiggum/... path)
-    direct = os.path.join(workdir, p)
+    direct = os.path.join(workdir, norm)
     if os.path.exists(direct):
         return direct
     # W10: a package-relative path (kept whole, e.g. `dist/index.js`) tried against each
     # workspace member — the hinted member first so a namesake in the right package wins.
     if members is None:
         members = _workspace_members(workdir)
-    if members and "/" in p and not p.startswith(("../", "./")):
+    # A normalized path that ESCAPES the workdir (`../x`) is never a package-relative
+    # build artifact — don't resolve it against a member subdir. After normpath the
+    # only leading-dot form that survives is `../`, so this cleanly admits the whole
+    # `./`-prefixed family the old guard wrongly excluded.
+    if members and "/" in norm and not norm.startswith(".." + os.sep) and norm != "..":
         ordered = ([hint] + [m for m in members if m != hint]) if hint else members
         for m in ordered:
             if not m:
                 continue
-            cand = os.path.join(workdir, m, p)
+            cand = os.path.join(workdir, m, norm)
             if os.path.exists(cand):
                 return cand
     # bare/short reference: try the known proof dirs using just the basename
-    base = os.path.basename(p)
+    base = os.path.basename(norm)
     for d in search_dirs:
         cand = os.path.join(workdir, d, base)
         if os.path.exists(cand):
@@ -755,7 +793,7 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
             # does not resolve is a build that did not run — an actionable grounding gap,
             # not a false criterion. Render it as NEEDS-GROUNDING (W4 semantics) so the
             # critic never rejects it as "the artifact does not exist / criterion unmet".
-            norm = p.lstrip("./")
+            norm = _strip_dot_slash(p)
             if norm in export_targets or p in export_targets:
                 lines.append(
                     "- `%s` — **NEEDS-GROUNDING** (declared build export not found on "
