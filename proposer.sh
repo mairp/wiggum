@@ -37,11 +37,11 @@ REQUIRED
   -f, --prompt-file FILE  File whose contents are the standing prompt each pass.
 
 OPTIONS
-  --backend NAME          Provider backend: claude | codex | bebop:<name>
-                          (default: $WIGGUM_PROPOSER or "claude"). For bebop,
-                          the part after the colon is the bebop backend
-                          (e.g. bebop:compass); bare "bebop" uses $WIGGUM_BEBOP_BACKEND.
-  --model MODEL           Model id (claude/codex only; bebop picks its own).
+  --backend NAME          Provider backend: claude | codex | bebop:<name> |
+                          prime:<variant> (default: $WIGGUM_PROPOSER or "claude").
+                          Bare bebop/prime use WIGGUM_BEBOP_BACKEND and
+                          WIGGUM_PRIME_VARIANT respectively.
+  --model MODEL           Model id (claude/codex only; selectors pick their own).
   -n, --max-iter N        Max passes before giving up (default: 30).
   -s, --sleep SECONDS     Sleep between passes (default: 2).
   --timeout SECONDS       Hard timeout on a single agent pass (default: 1800).
@@ -53,7 +53,9 @@ OPTIONS
 
 Local agent-stream capture (tool calls, messages, cost -> events.jsonl) is ON by
 default for claude/bebop backends so the live view can narrate the agent working;
-set WIGGUM_AGENT_STREAM=false to restore the raw output path. -j only controls
+Prime Agent and Codex currently use their raw text output. Set
+WIGGUM_AGENT_STREAM=false to restore the raw output path for all backends.
+-j only controls
 the telemetry add-on (Loki when --loki-url is set, OTEL when --otel-url is set).
 
 EXIT
@@ -171,6 +173,18 @@ run_agent() {
       [[ -n "$MODEL" ]] && cargs+=( --model "$MODEL" )
       timeout "$TIMEOUT" codex exec "${cargs[@]}" "$prompt"
       ;;
+    prime|prime:*)
+      # The fleet launcher resolves the selected Prime Agent variant (model,
+      # provider, credentials and optional role persona). Feed the standing prompt
+      # on stdin so large specs never hit ARG_MAX. --no-session guarantees the
+      # Ralph invariant: every pass starts with a fresh agent context.
+      local pv="${BACKEND#prime}"; pv="${pv#:}"
+      pv="${pv:-${WIGGUM_PRIME_VARIANT:-sol}}"
+      local prime_bin="${WIGGUM_PRIME_BIN:-prime}"
+      command -v "$prime_bin" >/dev/null 2>&1 || { echo "proposer.sh: Prime launcher not found: $prime_bin (set \$WIGGUM_PRIME_BIN)" >&2; return 127; }
+      [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with Prime; select prime:<variant> instead" >&2; return 1; }
+      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_bin" "$pv" -p --mode text --no-session --cwd "$WORKDIR"
+      ;;
     bebop|bebop:*)
       # bebop is a shell FUNCTION (bebop.sh); a subprocess doesn't inherit it, so
       # source it and call in-process. Backend name = part after the colon, else
@@ -192,7 +206,7 @@ run_agent() {
       return "$rc"
       ;;
     *)
-      echo "proposer.sh: unknown backend '$BACKEND' (claude | codex | bebop[:name])" >&2
+      echo "proposer.sh: unknown backend '$BACKEND' (claude | codex | bebop[:name] | prime[:variant])" >&2
       return 127
       ;;
   esac
@@ -207,7 +221,7 @@ run_iteration() {
   # Shared agent args. Claude/bebop use --dangerously-skip-permissions --verbose;
   # codex has its own bypass flag inside run_agent.
   local -a shared=()
-  if [[ "$BACKEND" != codex ]]; then
+  if [[ "$BACKEND" == claude || "$BACKEND" == bebop || "$BACKEND" == bebop:* ]]; then
     shared+=( --dangerously-skip-permissions --verbose )
     # Disable skills for the proposer agent. The standing prompt tells it to read
     # PROGRESS.md / GATE*-FEEDBACK.md FIRST every pass, and those files are full of
@@ -224,7 +238,7 @@ run_iteration() {
       shared+=( --output-format stream-json )
     fi
   fi
-  if [[ "$AGENT_STREAM" == "true" && "$BACKEND" != codex ]]; then
+  if [[ "$AGENT_STREAM" == "true" && ( "$BACKEND" == claude || "$BACKEND" == bebop || "$BACKEND" == bebop:* ) ]]; then
     local -a tap_args=( --events "$WIGGUM_EVENTS" --run-id "$RUN_ID"
                         --task "$TASK_NAME" --backend "$BACKEND_LABEL" --iter "$iter" )
     # Dual-ship: the tap fans out to whichever sinks are enabled (either/both/neither).
@@ -233,7 +247,7 @@ run_iteration() {
     run_agent "$prompt" "${shared[@]}" 2>&1 | python3 "$TAP" "${tap_args[@]}"
     return 0
   fi
-  if [[ "$STREAM_JSON" == "true" && "$BACKEND" != codex ]]; then
+  if [[ "$STREAM_JSON" == "true" && ( "$BACKEND" == claude || "$BACKEND" == bebop || "$BACKEND" == bebop:* ) ]]; then
     # Tap disabled but telemetry on: legacy direct-shipper path. Run each enabled
     # shipper; tee when both are on so a single agent stream feeds both.
     if [[ "$LOKI_ENABLED" == "true" && "$OTEL_ENABLED" == "true" ]]; then

@@ -8,13 +8,20 @@ values), so `WIGGUM_PROPOSER_TIMEOUT=… wiggum run …` is honored.
 
 ## Backends (pick one per role)
 
-Choose `claude | codex | bebop` for the proposer and the critic independently:
+Choose `claude | codex | bebop | prime[:variant]` for the proposer and critic independently:
 
 - **`claude`** — Anthropic. Claude Code CLI (proposer) + Messages API (critic). The `main`
   default; a clone plus an Anthropic key runs out of the box.
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic). Ships, but
   **UNVERIFIED** (no Codex CLI on the author's host to test against).
 - **`bebop`** — a local selector → Compass/qwen via a shim (host-specific).
+- **`prime[:variant]`** — Prime Agent via `prime <variant>`. Bare `prime` selects
+  `WIGGUM_PRIME_VARIANT` for the proposer and `WIGGUM_PRIME_CRITIC_VARIANT` for
+  the critic (both default to `sol`). `WIGGUM_PRIME_BIN` overrides the launcher.
+
+Example: `wiggum run --proposer prime:sol --critic prime:judge`. Run `prime --list`
+to see the variants installed on your host. Prime text output is logged normally;
+the Claude-compatible `agent_*` stream tap is not applied to Prime Agent.
 
 ## Key knobs
 
@@ -23,6 +30,9 @@ See `.env.example` for the full set. The load-bearing ones:
 | Variable | Default | Meaning |
 |---|---|---|
 | `WIGGUM_PROPOSER` / `WIGGUM_CRITIC` | `claude` | backend per role |
+| `WIGGUM_PRIME_VARIANT` | `sol` | bare `prime` proposer variant |
+| `WIGGUM_PRIME_CRITIC_VARIANT` | `sol` | bare `prime` critic variant |
+| `WIGGUM_PRIME_BIN` | `prime` | Prime fleet launcher executable |
 | `WIGGUM_MAX_REJECTS` | `3` | reject attempts per phase before halt (exit 2) |
 | `WIGGUM_MAX_ITER` | — | max headless proposer iterations per pass |
 | `WIGGUM_PROPOSER_TIMEOUT` | `1800` | per-pass timeout (seconds) |

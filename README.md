@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Bash](https://img.shields.io/badge/Bash-orchestrator-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/deps-stdlib_only-2ea44f?style=for-the-badge&logo=gnu&logoColor=white)
-![LLM](https://img.shields.io/badge/LLM-Claude_·_Codex_·_bebop-8A3FFC?style=for-the-badge&logo=anthropic&logoColor=white)
+![LLM](https://img.shields.io/badge/LLM-Claude_·_Codex_·_bebop_·_Prime_Agent-8A3FFC?style=for-the-badge&logo=anthropic&logoColor=white)
 ![Ralph](https://img.shields.io/badge/Ralph-loop-F2A900?style=for-the-badge&logo=cycling&logoColor=white)
 ![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-OTLP-425CC7?style=for-the-badge&logo=opentelemetry&logoColor=white)
 ![Events](https://img.shields.io/badge/Events-JSONL_stream-000000?style=for-the-badge&logo=json&logoColor=white)
@@ -590,12 +590,16 @@ Wiggum never writes checkbox state back into `tasks.md`; approvals stay in
 Everything is set in `.env` (copy from `.env.example`; the real `.env` is
 gitignored). Precedence: **built-in defaults < `.env` < CLI flags**.
 
-Pick a backend per role — `claude | codex | bebop`:
+Pick a backend per role — `claude | codex | bebop | prime[:variant]`:
 
 - **`claude`** — Anthropic. Claude Code CLI (proposer) + Messages API (critic).
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic).
   Ships, but **UNVERIFIED** (no Codex CLI on the author's host to test against).
 - **`bebop`** — a local selector → Compass/qwen via a shim (host-specific).
+- **`prime[:variant]`** — Prime Agent through a `prime <variant>` fleet launcher.
+  For example, use `--proposer prime:sol --critic prime:judge`, or bare `prime`
+  with `WIGGUM_PRIME_VARIANT` / `WIGGUM_PRIME_CRITIC_VARIANT`. Prime proposer
+  passes are fresh (`--no-session`); Prime critics run without tools.
 
 Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `WIGGUM_MAX_ITER`, `WIGGUM_PROPOSER_TIMEOUT` (1800s),

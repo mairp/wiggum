@@ -14,8 +14,8 @@ in the evidence can never approve the gate. Missing / duplicated / wrong-nonce /
 absent verdict all fail SAFE (counted as REJECTED, recorded malformed): an
 unattended approve-your-own-work loop must never auto-approve on ambiguity.
 
-Provider is chosen by WIGGUM_CRITIC = claude | codex | bebop. All HTTP is stdlib
-urllib. No pip installs.
+Provider is chosen by WIGGUM_CRITIC = claude | codex | bebop |
+prime[:variant]. HTTP paths use stdlib urllib. No pip installs.
 
 Exit codes:  0 APPROVED · 10 REJECTED · 3 bad config/usage · 1 internal error.
 The orchestrator maps these onto phase advancement; the marker files are the
@@ -1071,7 +1071,31 @@ def call_bebop_shell(prompt, backend, timeout):
     return out.stdout
 
 
-def critic_call(provider, prompt, timeout):
+def call_prime_shell(prompt, variant, timeout, workdir=None):
+    """Run a fresh, isolated, tool-free Prime Agent critic turn."""
+    import subprocess
+    launcher = os.environ.get("WIGGUM_PRIME_BIN", "prime")
+    argv = [launcher, variant, "-p", "--mode", "text", "--no-session",
+            "--no-tools", "--no-skills", "--no-context-files"]
+    if workdir:
+        argv += ["--cwd", workdir]
+    try:
+        out = subprocess.run(
+            argv, input=prompt, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Prime Agent critic timed out after %ss" % timeout)
+    except OSError as exc:
+        raise RuntimeError("Prime launcher failed: %s" % exc)
+    if out.returncode != 0:
+        raise RuntimeError("Prime Agent critic exit %d: %s" %
+                           (out.returncode, (out.stderr or "")[:300]))
+    if not out.stdout.strip():
+        raise RuntimeError("Prime Agent critic returned empty stdout")
+    return out.stdout
+
+
+def critic_call(provider, prompt, timeout, workdir=None):
     if provider == "claude":
         model = os.environ.get("WIGGUM_CLAUDE_CRITIC_MODEL", "claude-opus-4-8")
         return call_claude(prompt, model, timeout)
@@ -1080,6 +1104,12 @@ def critic_call(provider, prompt, timeout):
         base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         key = os.environ.get("OPENAI_API_KEY", "")
         return call_openai_chat(prompt, model, timeout, base, key, "OPENAI_API_KEY")
+    if provider == "prime" or provider.startswith("prime:"):
+        variant = provider.partition(":")[2] or os.environ.get(
+            "WIGGUM_PRIME_CRITIC_VARIANT",
+            os.environ.get("WIGGUM_PRIME_VARIANT", "sol"),
+        )
+        return call_prime_shell(prompt, variant, timeout, workdir)
     if provider == "bebop":
         via = os.environ.get("WIGGUM_CRITIC_VIA", "bebop")
         backend = os.environ.get("WIGGUM_BEBOP_BACKEND", "compass")
@@ -1103,7 +1133,7 @@ def critic_call(provider, prompt, timeout):
                     "(no hardcoded default — the model is env-controlled)")
             return call_openai_chat(prompt, model, timeout, base, key, "WIGGUM_COMPASS_KEY")
         return call_bebop_shell(prompt, backend, timeout)
-    raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (claude|codex|bebop)" % provider)
+    raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (claude|codex|bebop|prime[:variant])" % provider)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1306,7 +1336,7 @@ def main():
     transcript = os.path.join(verdicts_dir, "phase%d.attempt%d.%s.txt" % (n, args.attempt, ts))
 
     try:
-        reply = critic_call(args.provider, prompt, args.timeout)
+        reply = critic_call(args.provider, prompt, args.timeout, workdir)
     except (urllib.error.URLError, urllib.error.HTTPError) as e:
         # Transport/HTTP failure — fail SAFE as a malformed REJECT so the run never
         # auto-approves because the critic couldn't be reached, but record it.
