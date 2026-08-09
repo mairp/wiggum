@@ -39,8 +39,8 @@ REQUIRED
 OPTIONS
   --backend NAME          Provider backend: claude | codex | bebop:<name> |
                           prime:<variant> (default: $WIGGUM_PROPOSER or "claude").
-                          Bare bebop/prime use WIGGUM_BEBOP_BACKEND and
-                          WIGGUM_PRIME_VARIANT respectively.
+                          Bare bebop uses WIGGUM_BEBOP_BACKEND; bare prime uses
+                          stock prime-agent with its configured default model.
   --model MODEL           Model id (claude/codex only; selectors pick their own).
   -n, --max-iter N        Max passes before giving up (default: 30).
   -s, --sleep SECONDS     Sleep between passes (default: 2).
@@ -173,17 +173,23 @@ run_agent() {
       [[ -n "$MODEL" ]] && cargs+=( --model "$MODEL" )
       timeout "$TIMEOUT" codex exec "${cargs[@]}" "$prompt"
       ;;
-    prime|prime:*)
-      # The fleet launcher resolves the selected Prime Agent variant (model,
-      # provider, credentials and optional role persona). Feed the standing prompt
-      # on stdin so large specs never hit ARG_MAX. --no-session guarantees the
-      # Ralph invariant: every pass starts with a fresh agent context.
-      local pv="${BACKEND#prime}"; pv="${pv#:}"
-      pv="${pv:-${WIGGUM_PRIME_VARIANT:-sol}}"
-      local prime_bin="${WIGGUM_PRIME_BIN:-prime}"
-      command -v "$prime_bin" >/dev/null 2>&1 || { echo "proposer.sh: Prime launcher not found: $prime_bin (set \$WIGGUM_PRIME_BIN)" >&2; return 127; }
-      [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with Prime; select prime:<variant> instead" >&2; return 1; }
-      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_bin" "$pv" -p --mode text --no-session --cwd "$WORKDIR"
+    prime)
+      # Out-of-the-box Prime Agent: use its configured default provider/model.
+      # Prompt stdin avoids ARG_MAX; --no-session preserves fresh Ralph passes.
+      local prime_agent_bin="${WIGGUM_PRIME_AGENT_BIN:-prime-agent}"
+      command -v "$prime_agent_bin" >/dev/null 2>&1 || { echo "proposer.sh: Prime Agent not found: $prime_agent_bin (set \$WIGGUM_PRIME_AGENT_BIN)" >&2; return 127; }
+      local -a pargs=( -p --mode text --no-session --cwd "$WORKDIR" )
+      [[ -n "$MODEL" ]] && pargs+=( --model "$MODEL" )
+      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_agent_bin" "${pargs[@]}"
+      ;;
+    prime:*)
+      # Optional fleet launcher resolves a named variant's model/provider/persona.
+      local pv="${BACKEND#prime:}"
+      [[ -n "$pv" ]] || { echo "proposer.sh: empty Prime variant; use 'prime' or 'prime:<variant>'" >&2; return 1; }
+      local prime_fleet_bin="${WIGGUM_PRIME_FLEET_BIN:-${WIGGUM_PRIME_BIN:-prime}}"
+      command -v "$prime_fleet_bin" >/dev/null 2>&1 || { echo "proposer.sh: Prime fleet launcher not found: $prime_fleet_bin (set \$WIGGUM_PRIME_FLEET_BIN)" >&2; return 127; }
+      [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with prime:<variant>; the variant selects its model" >&2; return 1; }
+      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_fleet_bin" "$pv" -p --mode text --no-session --cwd "$WORKDIR"
       ;;
     bebop|bebop:*)
       # bebop is a shell FUNCTION (bebop.sh); a subprocess doesn't inherit it, so

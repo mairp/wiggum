@@ -15,13 +15,14 @@ Choose `claude | codex | bebop | prime[:variant]` for the proposer and critic in
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic). Ships, but
   **UNVERIFIED** (no Codex CLI on the author's host to test against).
 - **`bebop`** — a local selector → Compass/qwen via a shim (host-specific).
-- **`prime[:variant]`** — Prime Agent via `prime <variant>`. Bare `prime` selects
-  `WIGGUM_PRIME_VARIANT` for the proposer and `WIGGUM_PRIME_CRITIC_VARIANT` for
-  the critic (both default to `sol`). `WIGGUM_PRIME_BIN` overrides the launcher.
+- **`prime[:variant]`** — bare `prime` invokes the out-of-the-box `prime-agent`
+  executable and lets its normal configuration select the default provider/model.
+  No custom variants are required. `prime:<variant>` invokes the optional
+  `prime <variant>` fleet launcher instead.
 
-Example: `wiggum run --proposer prime:sol --critic prime:judge`. Run `prime --list`
-to see the variants installed on your host. Prime text output is logged normally;
-the Claude-compatible `agent_*` stream tap is not applied to Prime Agent.
+Portable example: `wiggum run --proposer prime --critic prime`. Fleet example:
+`wiggum run --proposer prime:sol --critic prime:judge`. Prime text output is logged
+normally; the Claude-compatible `agent_*` stream tap is not applied to Prime Agent.
 
 ## Key knobs
 
@@ -30,9 +31,9 @@ See `.env.example` for the full set. The load-bearing ones:
 | Variable | Default | Meaning |
 |---|---|---|
 | `WIGGUM_PROPOSER` / `WIGGUM_CRITIC` | `claude` | backend per role |
-| `WIGGUM_PRIME_VARIANT` | `sol` | bare `prime` proposer variant |
-| `WIGGUM_PRIME_CRITIC_VARIANT` | `sol` | bare `prime` critic variant |
-| `WIGGUM_PRIME_BIN` | `prime` | Prime fleet launcher executable |
+| `WIGGUM_PRIME_AGENT_BIN` | `prime-agent` | standard Prime Agent executable used by bare `prime` |
+| `WIGGUM_PRIME_FLEET_BIN` | `prime` | optional fleet launcher used by `prime:<variant>` |
+| `WIGGUM_PRIME_BIN` | — | legacy alias for the fleet launcher override |
 | `WIGGUM_MAX_REJECTS` | `3` | reject attempts per phase before halt (exit 2) |
 | `WIGGUM_MAX_ITER` | — | max headless proposer iterations per pass |
 | `WIGGUM_PROPOSER_TIMEOUT` | `1800` | per-pass timeout (seconds) |

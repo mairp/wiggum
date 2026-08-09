@@ -596,10 +596,10 @@ Pick a backend per role — `claude | codex | bebop | prime[:variant]`:
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic).
   Ships, but **UNVERIFIED** (no Codex CLI on the author's host to test against).
 - **`bebop`** — a local selector → Compass/qwen via a shim (host-specific).
-- **`prime[:variant]`** — Prime Agent through a `prime <variant>` fleet launcher.
-  For example, use `--proposer prime:sol --critic prime:judge`, or bare `prime`
-  with `WIGGUM_PRIME_VARIANT` / `WIGGUM_PRIME_CRITIC_VARIANT`. Prime proposer
-  passes are fresh (`--no-session`); Prime critics run without tools.
+- **`prime[:variant]`** — bare `prime` uses the standard `prime-agent` CLI and
+  its configured default model, so no custom variants are required. If an optional
+  `prime <variant>` fleet launcher is installed, select it with `prime:sol`,
+  `prime:judge`, etc. Proposer passes are fresh; Prime critics run without tools.
 
 Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `WIGGUM_MAX_ITER`, `WIGGUM_PROPOSER_TIMEOUT` (1800s),

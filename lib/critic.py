@@ -1072,11 +1072,21 @@ def call_bebop_shell(prompt, backend, timeout):
 
 
 def call_prime_shell(prompt, variant, timeout, workdir=None):
-    """Run a fresh, isolated, tool-free Prime Agent critic turn."""
+    """Run a fresh, isolated, tool-free Prime Agent critic turn.
+
+    A missing variant uses the standard ``prime-agent`` executable and its
+    configured default model. A named variant uses the optional fleet launcher.
+    """
     import subprocess
-    launcher = os.environ.get("WIGGUM_PRIME_BIN", "prime")
-    argv = [launcher, variant, "-p", "--mode", "text", "--no-session",
-            "--no-tools", "--no-skills", "--no-context-files"]
+    if variant:
+        launcher = os.environ.get("WIGGUM_PRIME_FLEET_BIN",
+                                  os.environ.get("WIGGUM_PRIME_BIN", "prime"))
+        argv = [launcher, variant]
+    else:
+        launcher = os.environ.get("WIGGUM_PRIME_AGENT_BIN", "prime-agent")
+        argv = [launcher]
+    argv += ["-p", "--mode", "text", "--no-session", "--no-tools",
+             "--no-skills", "--no-context-files"]
     if workdir:
         argv += ["--cwd", workdir]
     try:
@@ -1104,11 +1114,12 @@ def critic_call(provider, prompt, timeout, workdir=None):
         base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         key = os.environ.get("OPENAI_API_KEY", "")
         return call_openai_chat(prompt, model, timeout, base, key, "OPENAI_API_KEY")
-    if provider == "prime" or provider.startswith("prime:"):
-        variant = provider.partition(":")[2] or os.environ.get(
-            "WIGGUM_PRIME_CRITIC_VARIANT",
-            os.environ.get("WIGGUM_PRIME_VARIANT", "sol"),
-        )
+    if provider == "prime":
+        return call_prime_shell(prompt, None, timeout, workdir)
+    if provider.startswith("prime:"):
+        variant = provider.partition(":")[2]
+        if not variant:
+            raise RuntimeError("empty Prime variant; use prime or prime:<variant>")
         return call_prime_shell(prompt, variant, timeout, workdir)
     if provider == "bebop":
         via = os.environ.get("WIGGUM_CRITIC_VIA", "bebop")
