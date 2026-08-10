@@ -108,6 +108,8 @@ class Otel:
         # metric accumulators keyed by (name, unit, is_double, frozenset(attrs))
         self._sums = {}                          # key -> value
         self._hists = {}                         # key -> {"count","sum","buckets"}
+        self._event_count = 0                    # events buffered since last flush
+        self._batch_seq = 0                      # monotonic per-instance batch counter
 
     # -- ingest -------------------------------------------------------------
     def add(self, event, line, attrs=None, fields=None):
@@ -127,8 +129,24 @@ class Otel:
                 if v is not None and k != "event":
                     rec[k] = v
         self._logs.append((ts, line, rec))
+        self._event_count += 1
         if fields is not None:
             self._accumulate(event, attrs or {}, fields)
+
+    def add_prime(self, event, fields):
+        """Map a normalized Prime event (agent_init/text/tool/evidence_writing/
+        diagnostic/result) onto an OTLP log record + additive metrics.
+
+        The event class and every correlation/typed field become log-record
+        attributes, keeping numeric usage/duration/cost values TYPED (int/double)
+        via _any_value so a metrics backend can `unwrap` them without parsing the
+        logfmt body. The logfmt body stays byte-identical to the Loki line for
+        cross-sink parity. Result-class numeric fields also drive the same
+        additive metrics as api_request (contract telemetry-v1 §OTLP Mapping).
+        """
+        model = fields.get("model")
+        self.add(event, logfmt(fields),
+                 attrs={"model": model} if model else None, fields=fields)
 
     def _add_sum(self, name, value, attrs, is_double, unit=""):
         if value is None:
@@ -156,7 +174,7 @@ class Otel:
     def _accumulate(self, event, attrs, fields):
         model = fields.get("model") or attrs.get("model")
         ma = {"model": model} if model else {}
-        if event == "api_request":
+        if event in ("api_request", "agent_result"):
             # No OTLP unit on cost: the Prometheus exporter appends the unit to the
             # metric name (ralph_cost_usd_USD_total), which is ugly and redundant with
             # the _usd suffix already in the name. Keep it clean: ralph_cost_usd_total.
@@ -237,13 +255,17 @@ class Otel:
         }]}
 
     def _post(self, url, payload):
+        """POST one signal. Returns (http_status, reason_code); reason_code is
+        None on success. Never raises (best-effort)."""
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
-                if resp.status not in (200, 202, 204):
-                    warn("OTLP push HTTP %s to %s" % (resp.status, url))
+                if resp.status in (200, 202, 204):
+                    return resp.status, None
+                warn("OTLP push HTTP %s to %s" % (resp.status, url))
+                return resp.status, "http_%s" % resp.status
         except urllib.error.HTTPError as e:
             body = ""
             try:
@@ -251,19 +273,46 @@ class Otel:
             except Exception:
                 pass
             warn("OTLP push failed HTTP %s %s" % (e.code, body))
+            return e.code, "http_%s" % e.code
         except Exception as e:  # noqa: BLE001 — best-effort, never propagate
             warn("OTLP push error: %s" % e)
+            return None, "transport_error"
 
     def flush(self):
+        """Push buffered logs + metrics. Returns a delivery record dict
+        (sink/batch_id/event_count/status/http_status/reason_code) so callers can
+        persist local telemetry_delivery evidence, or None when nothing was
+        buffered. A failure on either signal marks the batch failed. Never
+        raises (best-effort)."""
+        if not (self._logs or self._sums or self._hists):
+            return None
+        event_count = self._event_count
+        self._batch_seq += 1
+        batch_id = "otlp-%d-%d" % (time.time_ns(), self._batch_seq)
+        rec = {"sink": "otlp", "batch_id": batch_id, "event_count": event_count,
+               "status": "accepted", "http_status": None, "reason_code": None}
         try:
             if self._logs:
-                self._post(self.logs_url, self._logs_payload())
+                status, reason = self._post(self.logs_url, self._logs_payload())
+                rec["http_status"] = status
+                if reason:
+                    rec["status"] = "failed"
+                    rec["reason_code"] = reason
             if self._sums or self._hists:
-                self._post(self.metrics_url, self._metrics_payload())
+                status, reason = self._post(self.metrics_url, self._metrics_payload())
+                if rec["http_status"] is None:
+                    rec["http_status"] = status
+                if reason and rec["status"] != "failed":
+                    rec["status"] = "failed"
+                    rec["reason_code"] = reason
+                    if status is not None:
+                        rec["http_status"] = status
         finally:
             self._logs = []
             self._sums = {}
             self._hists = {}
+            self._event_count = 0
+        return rec
 
 
 # ---- stream mode (mirrors ralph_loki_ship.run_stream) ---------------------

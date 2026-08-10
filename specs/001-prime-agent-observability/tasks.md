@@ -117,8 +117,8 @@
 ### Implementation for User Story 3
 
 - [x] T040 [US3] Extend Loki event mapping and batch outcomes for normalized Prime init/text/tool/evidence/diagnostic/result events in `lib/ralph_loki_ship.py`
-- [ ] T041 [US3] Extend OTLP log/metric mapping and batch outcomes for normalized Prime events and typed result usage in `lib/ralph_otel_ship.py`
-- [ ] T042 [US3] Fan out sanitized normalized events local-first to independently configured sinks and emit recursion-safe local `telemetry_delivery` records in `lib/agent_stream.py`
+- [x] T041 [US3] Extend OTLP log/metric mapping and batch outcomes for normalized Prime events and typed result usage in `lib/ralph_otel_ship.py`
+- [x] T042 [US3] Fan out sanitized normalized events local-first to independently configured sinks and emit recursion-safe local `telemetry_delivery` records in `lib/agent_stream.py`
 - [ ] T043 [US3] Propagate feature, role, phase, attempt, iteration, invocation, and optional trace correlation through lifecycle and agent exports in `wiggum-lib.sh` and `orchestrator.sh`
 - [ ] T044 [US3] Make startup/status output distinguish configured, reachable, request-accepted, and query-verified telemetry states in `orchestrator.sh` and `wiggum`
 - [ ] T045 [US3] Make dashboard panels and queries provider-neutral and queryable by Prime run/invocation identifiers in `telemetry/dashboards/ralph-loops.json`

@@ -13,6 +13,7 @@ import time
 from invocation_result import EventEnvelope, InvocationContext, atomic_write_json
 from observability_policy import ObservabilityPolicy
 from prime_stream import PrimeAdapter
+from telemetry_delivery import LocalFirstFanout
 
 
 TARGET_MAX = 120
@@ -327,11 +328,33 @@ def main():
         expected_evidence=context.expected_evidence if context else args.expected_evidence or None,
     )
     loki, otel, logfmt = _telemetry(args)
+    # Fan every normalized event out local-first (authoritative JSONL), then to each
+    # independently configured remote sink, persisting recursion-safe local
+    # telemetry_delivery records on flush (T042). The local writer is the same
+    # sanitizing EventSink.emit, so sinks only ever see sanitized fields.
+    remote_sinks = {}
+    if loki:
+        remote_sinks["loki"] = loki
+    if otel:
+        remote_sinks["otel"] = otel
+    fanout = (
+        LocalFirstFanout(sink.emit, remote_sinks, sanitize=lambda f: policy.sanitize(f).value)
+        if remote_sinks else None
+    )
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
     common = {"iter": args.iteration} if args.iteration is not None and not context else {}
     last_terminal = {"value": None}
     malformed = {"flag": False}
+
+    def emit_event(event, **fields):
+        # Fan-out writes locally (via sink.emit) AND ships to each configured sink;
+        # with no sinks it degrades to a plain local write. Never double-writes.
+        merged = {**fields, **common}
+        if fanout:
+            fanout.emit(event, merged)
+        else:
+            sink.emit(event, **merged)
 
     try:
         for raw in sys.stdin:
@@ -351,14 +374,14 @@ def main():
             else:
                 outcome = adapter.consume(record)
             for event, fields in outcome.events:
-                sink.emit(event, **fields, **common)
+                emit_event(event, **fields)
                 if event == "agent_diagnostic" and fields.get("code") == "malformed_json":
                     malformed["flag"] = True
             if outcome.terminal:
                 last_terminal["value"] = outcome.terminal
             if outcome.terminal and not context:
                 terminal = outcome.terminal
-                sink.emit(
+                emit_event(
                     "agent_result",
                     model=terminal.get("model"),
                     is_error=terminal.get("status") != "success",
@@ -370,35 +393,24 @@ def main():
                     output_tokens=terminal.get("output_tokens"),
                     cache_read_tokens=terminal.get("cache_read_tokens"),
                     cache_creation_tokens=terminal.get("cache_creation_tokens"),
-                    **common,
                 )
             for line in outcome.output:
                 print(line)
-            if outcome.telemetry and (loki or otel):
-                event, fields = outcome.telemetry
-                safe = policy.sanitize(fields).value
-                line = logfmt(safe)
-                labels = {"model": safe["model"]} if safe.get("model") else None
-                if loki:
-                    loki.add(event, line, labels=labels)
-                if otel:
-                    otel.add(event, line, attrs=labels, fields=safe)
-                if event == "api_request":
-                    if loki:
-                        loki.flush()
-                    if otel:
-                        otel.flush()
+            # A terminal is the invocation-completion barrier: flush every sink and
+            # persist recursion-safe local telemetry_delivery records (SC-006).
+            if outcome.terminal and fanout:
+                fanout.flush()
             sys.stdout.flush()
         finish = getattr(adapter, "finish", None)
         if finish:
             outcome = finish()
             for event, fields in outcome.events:
-                sink.emit(event, **fields, **common)
+                emit_event(event, **fields)
             if outcome.terminal:
                 last_terminal["value"] = outcome.terminal
             if outcome.terminal and not context:
                 terminal = outcome.terminal
-                sink.emit(
+                emit_event(
                     "agent_result",
                     model=terminal.get("model"),
                     is_error=terminal.get("status") != "success",
@@ -412,7 +424,6 @@ def main():
                     output_tokens=terminal.get("output_tokens"),
                     cache_read_tokens=terminal.get("cache_read_tokens"),
                     cache_creation_tokens=terminal.get("cache_creation_tokens"),
-                    **common,
                 )
             for line in outcome.output:
                 print(line)
@@ -420,12 +431,12 @@ def main():
     except BrokenPipeError:
         pass
     finally:
-        for telemetry_sink in (loki, otel):
-            if telemetry_sink:
-                try:
-                    telemetry_sink.flush()
-                except Exception:  # noqa: BLE001
-                    pass
+        # Final barrier: flush residual batches and persist their delivery records.
+        if fanout:
+            try:
+                fanout.flush()
+            except Exception:  # noqa: BLE001
+                pass
         if args.terminal_sidecar:
             # Persist exactly what the tap observed of the provider terminal, plus
             # the malformed-stream signal. The controller reconciles this with the

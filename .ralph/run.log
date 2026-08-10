@@ -747,3 +747,44 @@ GATE FAIL: 43 task(s) still unchecked in tasks.md
 
 ===== ITER 32 / 120  2026-08-10T12:26:01+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T041**: extended `lib/ralph_otel_ship.py` with normalized Prime event support.
+
+**What changed:**
+- Added `Otel.add_prime(event, fields)` — mirrors the Loki shipper's method. It maps every normalized Prime event class (`agent_init`/`agent_text`/`agent_tool`/`evidence_writing`/`agent_diagnostic`/`agent_result`) to an OTLP log record where correlation counters (phase, attempt, iteration, sequence) stay typed integers and result usage (cost_usd as double; input/output tokens as int) stays typed via `_any_value`, while the logfmt body stays byte-identical to the Loki line for cross-sink parity.
+- Extended `_accumulate` so `agent_result` drives the same additive cost/token/duration/error metrics as `api_request`.
+- Rewrote `flush()` to return a delivery record (`{sink: "otlp", batch_id, event_count, status, http_status, reason_code}`) or `None` for an empty batch — matching the Loki contract so `agent_stream` (T042) can persist local `telemetry_delivery` evidence. `_post` now reports per-signal outcome instead of silently swallowing it; the batch is marked `failed` on any HTTP non-2xx or transport error.
+
+**Verification:** `python3 -m pytest -q lib/test_ralph_otel_ship.py` → 19 passed (the 7 previously-failing T037 prime tests now pass, existing tests unchanged); `py_compile` clean. Flipped T041's checkbox to `[x]`.
+
+The next unchecked task is T042 (fan-out in `lib/agent_stream.py`), for a future iteration.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 42 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 33 / 120  2026-08-10T12:29:53+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+All 279 lib tests pass and everything compiles. T042 is complete.
+
+## Summary
+
+Implemented **T042** — local-first telemetry fan-out with recursion-safe delivery records in `lib/agent_stream.py`.
+
+**What I did:**
+
+1. **Created `lib/telemetry_delivery.py`** — the shared source of truth the T039 tests import (mirroring how `wiggum_spec.py` owns spec grammar for bash + critic). It holds:
+   - `LocalFirstFanout` — writes each normalized event to the authoritative local sink *first*, then fans it out to each independently configured remote sink, isolating a broken sink so it can't stall its peers. On `flush()` it persists one local `telemetry_delivery` record per sink. The recursion guard keeps delivery evidence local-only (shipping evidence about a sink back to that sink would recurse forever).
+   - `ReceiverState` and `DELIVERY_STATUSES` — the T044 vocabulary, defined here so the module imports cleanly; the bash-side T044 wiring in `orchestrator.sh`/`wiggum` remains for that task.
+
+2. **Wired the fan-out into `agent_stream.py`'s `main()`** — replaced the ad-hoc per-sink `.add()`/`.flush()` block (superseded by T040/T041's `add_prime` mapping) with an `emit_event` helper that routes every normalized event through the fan-out. Remote sinks get a sanitized view via a `sanitize` hook while the local JSONL stays byte-identical. Flush happens at the terminal barrier and in `finally`, so a sink outage surfaces as a local `telemetry_delivery status=failed` record by invocation completion (SC-006).
+
+**Verification:**
+- All 10 T039 delivery tests pass; agent_stream, parity, and both shipper test suites pass (76 together); full `lib` suite is 279 passing; `py_compile lib/*.py` clean.
+- End-to-end smoke test against a dead Loki port: local events retained, a `telemetry_delivery` record persisted with `status=failed sink=loki reason_code=transport_error`, elapsed 0.36s (well under the 10s bound). No-sink path degrades to plain local writes with no spurious delivery records.
+
+Flipped T042's checkbox to `- [x]`. Next unchecked task is T043 (correlation-field propagation in `wiggum-lib.sh` and `orchestrator.sh`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 41 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 34 / 120  2026-08-10T12:44:22+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
