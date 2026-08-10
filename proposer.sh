@@ -295,6 +295,16 @@ PY
 # when telemetry is on — also ships to Loki. Codex stays raw (CLI unverified).
 run_iteration() {
   local iter="$1" prompt="$2"
+  # Announce the observability capability at invocation start (T060). The
+  # structured Prime/claude paths emit this from the stream tap (agent_stream.py),
+  # which sees the live schema; here we cover only the explicit Prime raw-text
+  # fallback (--mode text), where no tap runs — so an operator still sees WHY
+  # fine-grained signals are absent. Legacy claude/bebop behavior is untouched.
+  if [[ ( "$BACKEND" == prime || "$BACKEND" == prime:* ) && "$PRIME_STRUCTURED" != "true" ]]; then
+    wiggum_emit agent_observability mode raw-text \
+      reason "structured schema unavailable — parsing plain output" \
+      role "$ROLE" supported_signals "text,result"
+  fi
   # Shared agent args. Claude/bebop use --dangerously-skip-permissions --verbose;
   # codex has its own bypass flag inside run_agent.
   local -a shared=()

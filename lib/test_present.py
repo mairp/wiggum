@@ -196,6 +196,50 @@ def test_sc012_five_facts_are_explicit_labeled_fields():
     assert "sink otel" in sink and "failed" in sink
 
 
+def _clean(line):
+    return ANSI.sub("", line or "")
+
+
+def _seven_phase_timeline(phase):
+    """Timeline line for one phase of a controlled seven-phase (1..7) run."""
+    return _clean(present.narrate({
+        "time": "2026-08-10T12:34:56+0000", "event": "phase_start",
+        "phase": phase, "total": 7, "title": "wire",
+    }))
+
+
+def _seven_phase_card_header(phase):
+    """Card header line for one phase of a controlled seven-phase (1..7) run."""
+    st = present.State()
+    st.update({"time": "2026-08-10T12:34:56+0000", "event": "run_start",
+               "phases": 7, "proposer": "prime", "critic": "prime"})
+    st.update({"time": "2026-08-10T12:34:56+0000", "event": "phase_start",
+               "phase": phase, "total": 7, "title": "wire"})
+    return _clean(st._header_lines(".")[0])
+
+
+def test_seven_phase_timeline_reports_numerator_of_seven_through_final_phase():
+    """SC-013/FR-022: a seven-phase run reports 1/7 through 7/7 in the timeline,
+    never 7/6 on the final phase."""
+    for phase in range(1, 8):
+        line = _seven_phase_timeline(phase)
+        assert f"phase {phase}/7" in line, line
+    final = _seven_phase_timeline(7)
+    assert "phase 7/7" in final
+    assert "7/6" not in final
+
+
+def test_seven_phase_card_header_reports_numerator_of_seven_through_final_phase():
+    """SC-013/FR-022: the card header denominator equals the executable phase
+    count (7) for every phase 1..7, including 7/7 on the final phase."""
+    for phase in range(1, 8):
+        header = _seven_phase_card_header(phase)
+        assert f"phase {phase}/7" in header, header
+    final = _seven_phase_card_header(7)
+    assert "phase 7/7" in final
+    assert "7/6" not in final
+
+
 def test_follow_renders_received_activity_within_two_seconds_without_terminal(tmp_path):
     """T018 latency proof: no run_end is needed to flush live activity."""
     path = tmp_path / "events.jsonl"

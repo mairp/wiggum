@@ -1273,6 +1273,22 @@ def critic_call(provider, prompt, timeout, workdir=None):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Event emit (append to events.jsonl; best-effort; mirrors wiggum-lib.sh shape).
 # ─────────────────────────────────────────────────────────────────────────────
+def critic_observability(provider):
+    """Describe the critic's capability for an ``agent_observability`` event (T060).
+
+    Only the Prime provider has a structured (JSON-mode) capture surface whose mode
+    can degrade to raw text; every other critic provider is plain-text throughout.
+    Returns (mode, reason, supported_signals) or ``None`` when there is no distinct
+    capability to announce (a text-only provider needs no capability line)."""
+    if provider != "prime" and not provider.startswith("prime:"):
+        return None
+    structured = os.environ.get("WIGGUM_AGENT_STREAM", "true") == "true"
+    if structured:
+        return ("structured", "Prime JSON schema v3 selected", "text,result")
+    return ("raw-text",
+            "structured schema unavailable — parsing plain output", "text,result")
+
+
 def emit(events_path, event, **fields):
     if not events_path:
         return
@@ -1459,6 +1475,14 @@ def main():
         warn("[debug] nonce=%s provider=%s prompt bytes=%d" % (nonce, args.provider, len(prompt)))
 
     emit(events_path, "critic_start", phase=n, attempt=args.attempt, provider=args.provider)
+    # Announce the critic's capability mode so an operator can distinguish a
+    # structured (JSON-mode) Prime critic from a raw-text fallback (T060/SC-012).
+    capability = critic_observability(args.provider)
+    if capability:
+        mode, reason, signals = capability
+        emit(events_path, "agent_observability", mode=mode, reason=reason,
+             provider_format=("prime-v3" if mode == "structured" else None),
+             role="critic", supported_signals=signals)
     if gap:
         # Stable machine signal the orchestrator keys on to detect a non-converging
         # loop (same blind spot rejected repeatedly). Cap the payload so a pathological

@@ -259,6 +259,44 @@ def select_provider_adapter(provider_format, policy, **kwargs):
     raise ValueError("unsupported provider format: %s" % provider_format)
 
 
+# The five fine-grained signals a structured adapter can surface. Emitted verbatim
+# on the invocation-start observability event so an operator sees WHAT capture is
+# available, not just that "some" capture happened (SC-012).
+_STRUCTURED_SIGNALS = "init,text,tool,evidence,result"
+
+
+def observability_start(provider_format):
+    """Describe the capability an invocation begins with (T060).
+
+    Returns (mode, reason, supported_signals) for the invocation-start
+    ``agent_observability`` event. A recognized structured schema starts fully
+    structured; any other format degrades to raw-text parsing up front so the
+    absence of fine-grained signals is explicit rather than silent."""
+    if provider_format == "prime-v3":
+        return "structured", "Prime JSON schema v3 selected", _STRUCTURED_SIGNALS
+    if provider_format in {"claude", "claude-stream-json"}:
+        return "structured", "Claude stream-json schema selected", _STRUCTURED_SIGNALS
+    return ("raw-text",
+            "structured schema unavailable — parsing plain output", "text,result")
+
+
+# Adapter diagnostics that mean the structured schema itself could not be parsed:
+# the capability mode degrades from `structured` to `degraded`, and only the
+# coarse terminal result remains trustworthy.
+_DEGRADE_CODES = {"unsupported_schema", "absent_schema"}
+
+
+def observability_degrade(code, message):
+    """Map a fatal schema diagnostic to a capability transition (T060).
+
+    Returns (mode, reason, supported_signals) or ``None`` when the diagnostic is
+    not a schema-level degradation (e.g. a bounded malformed-line warning)."""
+    if code not in _DEGRADE_CODES:
+        return None
+    reason = message or "structured schema rejected — degraded parsing"
+    return "degraded", reason, "result"
+
+
 def _invocation_context(args):
     values = (args.run_id, args.feature, args.role, args.backend, args.phase,
               args.attempt, args.iteration)
@@ -356,6 +394,19 @@ def main():
         else:
             sink.emit(event, **merged)
 
+    # Announce the capability this invocation begins with (T060). Gated on the
+    # correlated (invocation-context) path: the legacy claude CLI stream must keep
+    # emitting exactly [agent_init, agent_result] (US6 backend-parity guarantee).
+    observed_mode = {"value": None}
+    if context:
+        start_mode, start_reason, start_signals = observability_start(args.provider_format)
+        observed_mode["value"] = start_mode
+        emit_event(
+            "agent_observability", mode=start_mode, reason=start_reason,
+            provider_format=args.provider_format, role=context.role,
+            supported_signals=start_signals,
+        )
+
     try:
         for raw in sys.stdin:
             if stop["flag"]:
@@ -377,6 +428,19 @@ def main():
                 emit_event(event, **fields)
                 if event == "agent_diagnostic" and fields.get("code") == "malformed_json":
                     malformed["flag"] = True
+                # A fatal schema diagnostic is a capability transition, not just a
+                # log line: surface the structured→degraded change once (T060).
+                if context and event == "agent_diagnostic":
+                    transition = observability_degrade(
+                        fields.get("code"), fields.get("message"))
+                    if transition and transition[0] != observed_mode["value"]:
+                        mode, reason, signals = transition
+                        observed_mode["value"] = mode
+                        emit_event(
+                            "agent_observability", mode=mode, reason=reason,
+                            provider_format=args.provider_format, role=context.role,
+                            supported_signals=signals,
+                        )
             if outcome.terminal:
                 last_terminal["value"] = outcome.terminal
             if outcome.terminal and not context:

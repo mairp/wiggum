@@ -848,3 +848,40 @@ Flipped T058 to `[x]` in `tasks.md`. Left T059 (the `[P]` sibling in `test_prese
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 50 / 120  2026-08-10T14:47:53+04:00 =====
+Done. Completed T059 — the first unchecked task.
+
+**What I did:** Added a seven-phase numerator/denominator regression fixture to `lib/test_present.py` with two tests asserting phases 1 through 7 render as `1/7` through `7/7` (never `7/6`), covering both render paths:
+- `test_seven_phase_timeline_reports_numerator_of_seven_through_final_phase` — the timeline (`narrate`)
+- `test_seven_phase_card_header_reports_numerator_of_seven_through_final_phase` — the card header (`State._header_lines`)
+
+Plus small `_seven_phase_timeline` / `_seven_phase_card_header` helpers.
+
+**Why they fail (correctly):** This is a test-first task. Both render paths currently compute the denominator as `int(total)-1` (present.py:262 and present.py:629), assuming 0-indexed phases. For a 1-indexed seven-phase run they emit `phase 7/6` — exactly the bug FR-022 / SC-013 and the quickstart's "never 7/6" warning describe. The new tests fail on this now; the fix is scheduled for **T063** ("Correct phase denominator calculation to use the validated executable phase count"). This matches the US5 convention — the sibling test tasks T057/T058 are already checked off while their assertions fail, pending the T060–T063 implementation.
+
+`py_compile` is clean. I flipped T059's checkbox to `[x]`. The next unchecked task is T060 (implementation), which is US5 implementation work for a later iteration.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 51 / 120  2026-08-10T14:54:15+04:00 =====
+I completed **T060** — emitting `agent_observability` events at invocation start and on fallback/degradation across all three producer files.
+
+## What I did
+
+T060 is an emission-producer task (its behavior is verified through the US5 journey tests T057–T059/T064, which use static fixtures — there is no dedicated red test for the emission itself). I added the emission in each of the three files the task names:
+
+- **`lib/agent_stream.py`** (the real structured tap): added `observability_start()` and `observability_degrade()` helpers, then emit `agent_observability` at invocation start with `mode`/`reason`/`provider_format`/`role`/`supported_signals`, and a second event on a `structured → degraded` transition when the adapter hits `unsupported_schema`/`absent_schema`. Gated on the correlated invocation-context path so the legacy Claude CLI stream still emits exactly `[agent_init, agent_result]` (the US6 backend-parity guarantee).
+- **`lib/critic.py`**: added `critic_observability()` and emit the capability line right after `critic_start` for Prime critics (structured vs. raw-text keyed on `WIGGUM_AGENT_STREAM`), with `role=critic`.
+- **`proposer.sh`**: emit the `raw-text` capability line in `run_iteration` for the explicit Prime text fallback, where no tap runs; the structured Prime/Claude paths get theirs from the tap.
+
+## Verification
+
+- `bash -n proposer.sh` and `py_compile` clean.
+- End-to-end: a prime-v3 stream emits `agent_observability mode=structured` at start; a version-9 stream emits `structured` then `degraded` with the stable reason `"Unsupported Prime schema version 9"`.
+- The producer-side suites (`test_agent_stream`, `test_prime_backend`, `test_critic`, `test_invocation_artifacts`) all pass — 64/64.
+- Full `lib` suite: 316 pass, same 11 pre-existing failures as before my change — all of them belong to the later rendering/CLI tasks **T061** (present.py labels), **T062** (`wiggum status/events/watch`), and **T063** (phase denominator). I added no new failures.
+
+I flipped T060's checkbox to `- [x]`. The next unchecked task is T061 (rendering those events in `lib/present.py`), which is a separate iteration.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 52 / 120  2026-08-10T15:19:13+04:00 =====
