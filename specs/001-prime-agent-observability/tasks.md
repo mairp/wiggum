@@ -59,12 +59,12 @@
 - [x] T015 [P] [US1] Add failing tool tests for `toolcall_*`, `tool_execution_start/update/end`, shared tool IDs, error outcomes, bounded IPython argument/result summaries, abandoned tools, and no thinking leakage in `lib/test_prime_stream_tools.py`
 - [x] T016 [P] [US1] Add failing exact evidence-target tests covering absolute/relative target normalization, near matches, prose-only mentions, unrelated gates, and multiple path candidates in `lib/test_prime_evidence.py`
 - [x] T017 [P] [US1] Extend stock and fleet proposer argv tests to require JSON mode, provider-format selection, invocation correlation, expected evidence path, and explicit text fallback in `lib/test_prime_backend.py`
-- [ ] T018 [P] [US1] Add failing live rendering tests for Prime init, partial/final coherent text, tool start/end, evidence writing, and one terminal result, including timestamped injection that fails unless at least 95% of received activity renders within 2 seconds in `lib/test_present.py`
+- [x] T018 [P] [US1] Add failing live rendering tests for Prime init, partial/final coherent text, tool start/end, evidence writing, and one terminal result, including timestamped injection that fails unless at least 95% of received activity renders within 2 seconds in `lib/test_present.py`
 
 ### Implementation for User Story 1
 
-- [ ] T019 [US1] Implement Prime session/message/turn/retry/error/usage schema-v3 parsing and text coalescing in `lib/prime_stream.py`
-- [ ] T020 [US1] Implement Prime tool proposal/execution correlation, bounded progress/result summaries, abandoned-tool diagnostics, and exact expected-evidence detection in `lib/prime_stream.py`
+- [x] T019 [US1] Implement Prime session/message/turn/retry/error/usage schema-v3 parsing and text coalescing in `lib/prime_stream.py`
+- [x] T020 [US1] Implement Prime tool proposal/execution correlation, bounded progress/result summaries, abandoned-tool diagnostics, and exact expected-evidence detection in `lib/prime_stream.py`
 - [ ] T021 [US1] Register `prime-v3` adapter selection and normalized `agent_init`, `agent_text`, `agent_tool`, `evidence_writing`, `agent_diagnostic`, and terminal-observation output in `lib/agent_stream.py`
 - [ ] T022 [US1] Route stock `prime-agent` and fleet `prime <variant>` proposers through `--mode json` and the Prime adapter when structured capture is requested, while preserving prompt stdin and text fallback in `proposer.sh`
 - [ ] T023 [US1] Pass run, feature, proposer role, phase, attempt, iteration, invocation ID, and exact evidence path from `orchestrator.sh` through `proposer.sh` into normalized events and invocation artifacts

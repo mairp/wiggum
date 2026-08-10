@@ -334,3 +334,48 @@ GATE FAIL: 66 task(s) still unchecked in tasks.md
 
 ===== ITER 9 / 120  2026-08-10T09:35:45+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T018 is complete. Done this iteration.
+
+**What I found:** T018 asked for failing live-rendering tests in `lib/test_present.py` — Prime init, partial/final text, tool lifecycle, evidence writing, a terminal result, and a timestamped-injection latency proof (≥95% of activity rendered within 2s without waiting for a terminal event). Those six tests were already written and committed in a prior iteration (`192e08b`), and they exercise real `present.py` behavior (`narrate` + `iter_events(..., follow=True)`), not stubs.
+
+**What I did:**
+- Ran `lib/test_present.py` — all 6 pass (0.04s), including the load-bearing `test_follow_renders_received_activity_within_two_seconds_without_terminal` latency proof.
+- Confirmed the file is tracked, clean against HEAD, and the tests aren't trivially green.
+- Flipped only the T018 checkbox to `- [x]` in `tasks.md`.
+
+The prior pass had done the work but left the box unchecked; this iteration reconciled that. The next unchecked task is T019 (implement Prime schema-v3 parsing in `lib/prime_stream.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 65 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 10 / 120  2026-08-10T09:37:23+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed T019 — Prime schema-v3 parsing and text coalescing in `lib/prime_stream.py`.
+
+**What I verified:**
+- T019 was the first unchecked task; Foundational (T009–T013) and all US1 tests (T014–T018) were already done.
+- `lib/prime_stream.py` (`PrimeAdapter`) is a real, complete implementation covering everything in T019's scope: session/model init with additive-field tolerance, `message_start`/`update`/`end` text-delta coalescing with snapshot dedup, `turn_end` usage aggregation (not double-counting the terminal snapshot), internal `auto_retry_start` as a diagnostic, provider `error` records as terminal observations, and schema-version gating (absent/unsupported not treated as v3).
+- All 9 tests in `lib/test_prime_stream.py` pass, `python3 -m py_compile lib/prime_stream.py` is clean, and the referenced `prime-v3` fixtures exist.
+
+No tests were weakened and the change is a single checkbox flip in `tasks.md`, leaving the tree consistent. Next up would be **T020** (Prime tool proposal/execution correlation and evidence detection in the same file).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 64 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 11 / 120  2026-08-10T09:38:52+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T020 complete.
+
+**What T020 required** (all four in `lib/prime_stream.py`), and where each lives:
+- **Tool proposal/execution correlation** — shared `tool_id` threads `toolcall_*` → `tool_execution_*` records into one `start`/`progress`/`end` lifecycle (`_tool`, lines 223-268).
+- **Bounded progress/result summaries** — `policy.sanitize_text` caps argument and result payloads, emitting `retained_bytes`/`truncated` and redacting secrets (lines 251-266, 270-282).
+- **Abandoned-tool diagnostics** — `_abandon_tools` emits one `abandoned_tool` diagnostic per started-but-unfinished tool at `finish()`, idempotently (lines 368-376).
+- **Exact expected-evidence detection** — `_is_evidence_write` normalizes absolute/relative write targets against the expected path and rejects near-matches/prose-only mentions (lines 284-305).
+
+The implementation already existed on disk (T019 and T020 both target `prime_stream.py` and were built in one pass, but only T019's checkbox had been flipped). I verified all 17 tests across `test_prime_stream.py`, `test_prime_stream_tools.py`, and `test_prime_evidence.py` pass and `py_compile` is clean, then checked T020's box in `tasks.md`. The next unchecked task is T021 (register the `prime-v3` adapter in `lib/agent_stream.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 63 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 12 / 120  2026-08-10T09:40:18+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
