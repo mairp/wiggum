@@ -1009,3 +1009,35 @@ The implementation already satisfied the contract, so no code change was needed 
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 60 / 120  2026-08-10T16:13:01+04:00 =====
+Done. This iteration completed **T071** (Phase 8 / User Story 6).
+
+**What T071 required and where it's satisfied in `orchestrator.sh`:**
+- **Lifecycle ordering** — proposer_start → proposer run → deterministic verification → critic → phase_done, preserved around the new invocation plumbing.
+- **Stop/resume exit semantics** — proposer exit 6 (stop.flag seen) is treated as a clean stop: it logs, emits `run_stop reason stop_flag`, removes the flag so a rerun resumes, and exits `E_STOP` (lines 984–989).
+- **Critic rejection handling** — config error (exit 3 → halt), the oscillation breaker, and the MAX_REJECTS ceiling with the rejection-trail diagnostics are all intact (lines 1097–1154).
+- **Phase advancement** — APPROVED archives leftover feedback, emits `phase_done`, checkpoints, and returns 0 (lines 1085–1094).
+- **Propagating invocation context** — the proposer call passes `--invocation-id "${WIGGUM_RUN_ID}-proposer-phase-${n}-attempt-${attempt}"` (line 971) and the critic call exports `WIGGUM_INVOCATION_ID`/`WIGGUM_INVOCATION_DIR` with a deterministic per-(run,phase,attempt) artifact path (lines 1072–1079).
+
+**Verification:**
+- `python3 -m pytest -q lib/test_orchestrator_verification.py` → 5 passed (the T068 regressions covering exactly these behaviors).
+- `bash -n orchestrator.sh proposer.sh wiggum wiggum-lib.sh` → clean.
+
+The implementation was already in place from prior iterations; this pass confirmed it against the T068 tests and syntax checks and flipped the checkbox. The next unchecked task is **T072** (run the full suite and record regression evidence in `quickstart.md`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 61 / 120  2026-08-10T16:15:03+04:00 =====
+Done. Completed **T072** (the first unchecked task, in Phase 8 / US6).
+
+What I did this iteration:
+- Ran `bash -n orchestrator.sh proposer.sh wiggum wiggum-lib.sh` → exit 0.
+- Ran `python3 -m py_compile lib/*.py` → exit 0.
+- Ran `python3 -m pytest -q lib` → **348 passed** in 71s, no failures/errors/skips.
+- Recorded that evidence as a new "Recorded Regression Evidence (T072)" block under section 2 of `quickstart.md`, with the actual command output.
+- Flipped T072's checkbox to `- [x]` in `tasks.md`.
+
+This completes Phase 8's checkpoint (Prime parity is additive; existing providers and modes remain correct). The next unchecked task is T073 (Phase 9 polish: document new controls in `.env.example`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 62 / 120  2026-08-10T16:17:24+04:00 =====

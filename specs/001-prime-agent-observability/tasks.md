@@ -195,8 +195,8 @@
 
 - [x] T069 [US6] Resolve adapter selection and event-envelope regressions while preserving legacy Claude/Bebop event semantics in `lib/agent_stream.py`
 - [x] T070 [US6] Preserve explicit raw execution and existing non-Prime launch argument behavior while sharing status reconciliation in `proposer.sh`
-- [ ] T071 [US6] Preserve lifecycle ordering, stop/resume exit semantics, critic rejection handling, and phase advancement while propagating invocation context in `orchestrator.sh`
-- [ ] T072 [US6] Run the complete `python3 -m pytest -q lib` suite plus Bash/Python syntax checks and record regression evidence in `specs/001-prime-agent-observability/quickstart.md`
+- [x] T071 [US6] Preserve lifecycle ordering, stop/resume exit semantics, critic rejection handling, and phase advancement while propagating invocation context in `orchestrator.sh`
+- [x] T072 [US6] Run the complete `python3 -m pytest -q lib` suite plus Bash/Python syntax checks and record regression evidence in `specs/001-prime-agent-observability/quickstart.md`
 
 **Checkpoint**: Prime parity is additive; existing supported providers and operating modes remain correct.
 

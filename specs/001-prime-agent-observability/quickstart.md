@@ -44,6 +44,30 @@ Expected:
 - Prime adapter fixture tests cover stock/fleet success, tool execution, evidence targeting, provider/auth error, internal retry, empty/truncated/malformed input, and unknown records;
 - existing Claude/Bebop, critic, Loki, OTLP, specification, and orchestrator tests remain green.
 
+### Recorded Regression Evidence (T072)
+
+Latest full-suite run on this repository:
+
+```
+$ bash -n orchestrator.sh proposer.sh wiggum wiggum-lib.sh
+(no output — exit 0)
+
+$ python3 -m py_compile lib/*.py
+(no output — exit 0)
+
+$ python3 -m pytest -q lib
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 82%]
+............................................................             [100%]
+348 passed in 71.26s (0:01:11)
+```
+
+Result: Bash syntax, Python byte-compile, and all 348 `lib` tests pass with no
+failures, errors, or skips. No existing Claude/Bebop, critic, Loki, OTLP,
+specification, or orchestrator coverage regressed.
+
 ## 3. Fixture Contract Validation
 
 Run the focused contract tests (final filenames may be introduced by implementation tasks):
