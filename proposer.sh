@@ -238,6 +238,56 @@ run_agent() {
   esac
 }
 
+# Persist one invocation's producer + adapter exit observations as an atomic
+# producer.json sidecar. This is the controller's SEPARATE record of the process
+# and pipeline stages (invocation-v1: "The controller observes producer and
+# adapter separately. It MUST NOT discard either status with an unconditional
+# success conversion."). It preserves the raw producer exit code, signal, timeout
+# and launch-failure classification alongside the adapter/parser exit — never
+# synthesising a terminal here. The finalizer reconciles these with the provider
+# terminal into exactly one result. A producer that exits 0 stays
+# producer_exit_code=0; the reconciler, not this layer, decides success.
+preserve_producer_status() {
+  local dir="$1" producer_rc="$2" parser_rc="$3" duration_ms="$4"
+  [[ -n "$dir" ]] || return 0
+  python3 - "$dir/producer.json" "$producer_rc" "$parser_rc" "$duration_ms" <<'PY' 2>/dev/null || true
+import json, os, sys, tempfile
+path, producer_rc, parser_rc, duration_ms = sys.argv[1:]
+producer_rc, parser_rc = int(producer_rc), int(parser_rc)
+duration_ms = max(0, int(duration_ms))
+# `timeout` reports 124 on a hard timeout; a child killed by signal N surfaces as
+# 128+N; run_agent returns 127 when the provider executable is absent. In each of
+# those cases no clean process exit code exists, so producer_exit_code is null and
+# the specific dimension (timed_out / producer_signal / launch_failed) carries the
+# observation instead — exactly what reconcile_result consumes.
+launch_failed = producer_rc == 127
+timed_out = producer_rc == 124
+producer_signal = producer_rc - 128 if producer_rc > 128 else None
+producer_exit_code = None if (launch_failed or timed_out or producer_signal is not None) else producer_rc
+value = {
+    "contract": "wiggum-producer-status/v1",
+    "producer_exit_code": producer_exit_code,
+    "producer_signal": producer_signal,
+    "parser_exit_code": parser_rc,
+    "timed_out": timed_out,
+    "launch_failed": launch_failed,
+    "duration_ms": duration_ms,
+}
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(prefix=".producer.", suffix=".tmp", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+finally:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+PY
+}
+
 # One iteration. For claude/bebop the agent's stream-json is piped through the
 # local tap (agent_stream.py), which appends fine-grained events to events.jsonl
 # for the live presenter, prints a clean human summary for the log, and — only
@@ -278,8 +328,8 @@ PY
     fi
     local stream_backend="$BACKEND_LABEL"
     [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] && stream_backend="$BACKEND"
+    local invocation_dir="$WORKDIR/.wiggum/features/$FEATURE/debug/invocations/$RUN_ID/$ROLE/phase-$PHASE/attempt-$ATTEMPT/iter-$iter/$invocation_id"
     if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
-      local invocation_dir="$WORKDIR/.wiggum/features/$FEATURE/debug/invocations/$RUN_ID/proposer/phase-$PHASE/attempt-$ATTEMPT/iter-$iter/$invocation_id"
       python3 - "$invocation_dir/metadata.json" "$RUN_ID" "$FEATURE" "$stream_backend" \
         "$PHASE" "$ATTEMPT" "$iter" "$invocation_id" "$EVIDENCE" <<'PY'
 import json, os, sys, tempfile
@@ -316,7 +366,26 @@ PY
     # Dual-ship: the tap fans out to whichever sinks are enabled (either/both/neither).
     [[ "$LOKI_ENABLED" == "true" ]] && tap_args+=( --loki "$LOKI_URL" )
     [[ "$OTEL_ENABLED" == "true" ]] && tap_args+=( --otel "$OTEL_URL" )
-    run_agent "$prompt" "${shared[@]}" 2>&1 | python3 "$TAP" "${tap_args[@]}"
+    # Producer and adapter are observed as SEPARATE pipeline stages. PIPESTATUS
+    # captures both exits atomically: [0] is run_agent (the provider process,
+    # including timeout/launch/signal encodings) and [1] is the tap (the parser).
+    # We persist both — never converting a nonzero producer or a failed parser
+    # into success — for the finalizer to reconcile with the provider terminal.
+    local start_ms end_ms
+    start_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+    # The adapter is normally the stdlib tap; WIGGUM_AGENT_TAP lets an operator
+    # (or a pipeline test) substitute an executable parser so a fatal adapter
+    # fault is a first-class, observable pipeline status rather than a hidden one.
+    local -a tap_cmd
+    if [[ -n "${WIGGUM_AGENT_TAP:-}" ]]; then
+      tap_cmd=( "$WIGGUM_AGENT_TAP" "${tap_args[@]}" )
+    else
+      tap_cmd=( python3 "$TAP" "${tap_args[@]}" )
+    fi
+    run_agent "$prompt" "${shared[@]}" 2>&1 | "${tap_cmd[@]}"
+    local producer_rc="${PIPESTATUS[0]}" parser_rc="${PIPESTATUS[1]}"
+    end_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+    preserve_producer_status "$invocation_dir" "$producer_rc" "$parser_rc" "$(( end_ms - start_ms ))"
     return 0
   fi
   if [[ "$STREAM_JSON" == "true" && ( "$BACKEND" == claude || "$BACKEND" == bebop || "$BACKEND" == bebop:* ) ]]; then

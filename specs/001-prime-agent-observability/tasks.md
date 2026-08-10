@@ -86,11 +86,11 @@
 - [x] T026 [P] [US2] Add failing end-to-end pipeline tests for launch failure, producer nonzero, signal, timeout, provider auth/model error with exit 0, empty stream, malformed/truncated stream, and parser failure in `lib/test_prime_pipeline.py`
 - [x] T027 [P] [US2] Add failing result-handoff tests for atomicity, event/result equivalence, exactly-one final result, duplicate-finalization rejection, and partial-artifact recovery in `lib/test_agent_result.py`
 - [x] T028 [P] [US2] Add failing breaker tests for exact invocation lookup, single increment, success reset, historical-result isolation, concurrent-feature isolation, and stop-before-N+1 behavior in `lib/test_prime_error_breaker.py`
-- [ ] T029 [P] [US2] Add early-termination result-synthesis regression cases for Claude/Bebop-compatible streams in `lib/test_agent_stream_result.py`
+- [x] T029 [P] [US2] Add early-termination result-synthesis regression cases for Claude/Bebop-compatible streams in `lib/test_agent_stream_result.py`
 
 ### Implementation for User Story 2
 
-- [ ] T030 [US2] Preserve producer, adapter, timeout, and signal statuses through the background pipeline without unconditional success conversion in `proposer.sh`
+- [x] T030 [US2] Preserve producer, adapter, timeout, and signal statuses through the background pipeline without unconditional success conversion in `proposer.sh`
 - [ ] T031 [US2] Reconcile provider observations with producer/parser status, write atomic invocation `result.json`, and emit exactly one equivalent `agent_result` in `lib/invocation_result.py` and `lib/agent_stream.py`
 - [ ] T032 [US2] Replace historical tail scanning with exact current invocation result consumption, count each failure once, reset on success, and halt before the next pass at the configured threshold in `proposer.sh`
 - [ ] T033 [US2] Emit visible durable launch, authentication, provider, timeout, nonzero, signal, malformed, parser, missing-terminal, unsupported-schema, and conflict reasons from `proposer.sh` through `wiggum-lib.sh`

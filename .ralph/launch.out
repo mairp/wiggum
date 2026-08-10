@@ -302,3 +302,39 @@ I left T029 unchecked: it's a `[P]` sibling but targets a different file and sub
 
 ===== ITER 20 / 120  2026-08-10T10:06:51+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T029** — a test-first task.
+
+**What I did:** Created `lib/test_agent_stream_result.py` with early-termination result-synthesis regression cases for the Claude/Bebop-compatible (`claude` and `claude-stream-json`) adapter path, then flipped the T029 checkbox in `tasks.md`.
+
+**What the tests pin (the contract T034 will implement):**
+- An early EOF — stream ends after `init`/text but before the `result` record — must synthesize exactly one failing terminal with `status="error"`, `reason_code="missing_terminal"`, a durable reason, and the observed `model` preserved.
+- `finish()` must be idempotent (never emit a second terminal).
+- A provider-emitted `success` or `error` result stays authoritative and is *not* re-synthesized on `finish()`.
+- At the CLI level, both a truncated stream (one synthesized `is_error` result) and a normal successful stream (one unchanged result) end with exactly one `agent_result`.
+
+**State:** 7 of 8 tests fail as expected — `ClaudeAdapter` has no `finish()`/synthesis yet (that's T034's job). The one passing test guards existing success semantics, confirming I'm pinning new behavior without breaking current behavior. This matches the repo's established convention: the sibling "Tests for US2" tasks (T026–T028) are already checked while their implementation tasks are still open, and their modules (`error_breaker`) don't yet exist. The tree is left consistent; the file compiles cleanly.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 21 / 120  2026-08-10T10:17:05+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T030** — the `proposer.sh` half of the US2 terminal-status mechanism.
+
+## What T030 required
+The invocation-v1 contract states the controller "observes producer and adapter separately" and "MUST NOT discard either status with an unconditional success conversion." The structured-pipeline path in `proposer.sh` violated this: after piping the provider process into the tap, it did an unconditional `return 0`, throwing away the producer's real exit code, timeout, signal, and the parser's exit status.
+
+## What I changed (`proposer.sh` only)
+- Added `preserve_producer_status()`, which writes an atomic `producer.json` sidecar (`wiggum-producer-status/v1`) into the invocation debug directory, recording `producer_exit_code`, `producer_signal`, `parser_exit_code`, `timed_out`, `launch_failed`, and `duration_ms` — without synthesizing any terminal or converting anything to success.
+- Captured both pipeline stages atomically via `PIPESTATUS` (`[0]` = provider process, `[1]` = parser) right after the tap pipe, decoding `timeout`'s 124, signal's 128+N, and the 127 launch-failure encodings into the correct dimensions.
+- Hoisted `invocation_dir` so it's defined for the sidecar, and made the tap command honor `WIGGUM_AGENT_TAP` so a fatal adapter fault is an observable pipeline status rather than a hidden one.
+
+## Verification
+All six failure classes now persist correctly: nonzero exit keeps exit 3; provider-auth-with-exit-0 keeps `producer_exit_code=0` (no success conversion); timeout sets `timed_out`; signal captures signal 15; a missing executable sets `launch_failed`; a failing tap records `parser_exit_code=3`. Existing tests stay green (`test_prime_backend`, `test_agent_result`: 20 passed), and `bash -n` + `py_compile` gates pass.
+
+## Scope note
+The T035 pipeline tests still fail, but only on `result.json` / terminal `agent_result` assertions — those are produced by the **T031** finalizer wiring (`invocation_result.py` + `agent_stream.py`), a separate non-[P] task on different files. Its reconciliation core (`reconcile_result`/`ResultFinalizer`) already exists and passes; T031 is what consumes the `producer.json` this task now emits. I kept the change scoped to `proposer.sh` as the task specifies. T030's checkbox is flipped to `[x]`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 22 / 120  2026-08-10T10:48:33+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
