@@ -71,7 +71,16 @@ This reproduces the shape of the reviewed run:
 WIGGUM_AGENT_STREAM=true WIGGUM_LIVE_DETAIL=full /root/wiggum/wiggum run   --workdir /root/lisa   --specs /root/lisa/specs/001-prime-agent-sdk/tasks.md   --spec-format speckit-tasks   --feature 001-prime-agent-sdk   --proposer prime:sol   --critic prime:compass   --live   --debug
 ```
 
-**Current limitation:** `WIGGUM_LIVE_DETAIL=full` does not yet produce Prime tool/message/usage events. It gives the fullest rendering of events that exist, but Prime currently contributes lifecycle and final-text output only. See [the observability roadmap](prime-agent-observability.md).
+**Live verbosity:** `WIGGUM_LIVE_DETAIL` selects how much of the structured stream is
+narrated — `milestones` (lifecycle + evidence only), `tools` (also each agent tool
+call; the default), or `full` (also assistant text blocks). With
+`WIGGUM_AGENT_STREAM=true` (the default), a Prime pass now emits normalized
+`agent_init`, `agent_text`, `agent_tool`, evidence-write, `agent_diagnostic`, and a
+terminal `agent_result` event (with token usage), so the timeline populates during
+the pass rather than only at the end. Setting `WIGGUM_AGENT_STREAM=false` selects
+Prime's explicit `--mode text` fallback: no per-tool events and the redaction/limit
+policy does not apply, so use it only when you accept raw provider text in `run.log`.
+See [the observability roadmap](prime-agent-observability.md).
 
 ## 5. Add Loki and OpenTelemetry
 
@@ -87,7 +96,20 @@ Then run:
 WIGGUM_AGENT_STREAM=true WIGGUM_LIVE_DETAIL=full /root/wiggum/wiggum run   --workdir /absolute/path/to/project   --specs /absolute/path/to/project/SPECS.md   --spec-format native   --feature my-feature   --proposer prime:sol   --critic prime:compass   --live   --debug   --telemetry   --loki-url http://127.0.0.1:13011   --otel   --otel-url http://127.0.0.1:13018
 ```
 
-Today these options export Wiggum lifecycle telemetry for Prime, but not the complete internal Prime agent stream. Do not interpret the startup line `telemetry: true` as proof that a receiver accepted events; check receiver health and query by run ID.
+With structured capture on (the default), these options export the full normalized
+Prime event stream — lifecycle, tool calls, evidence writes, diagnostics, and terminal
+results with usage — not just coarse lifecycle events. Every record passes through the
+redaction and payload-limit policy before it leaves the host.
+
+Do not interpret the startup line `telemetry: true` as proof that a receiver accepted
+events; it only means a sink was configured. Wiggum distinguishes configured, reachable,
+request-accepted, and query-verified states, and a sink that rejects a batch records a
+local `telemetry_delivery` failure. Confirm end-to-end delivery by checking receiver
+health and querying each sink by run ID (see the query recipes in
+[quickstart.md](../specs/001-prime-agent-observability/quickstart.md)). The stock and
+named-fleet real dual-role receiver-acceptance runs are still being recorded there;
+until they are, treat remote parity as verified by the automated fixture suite rather
+than a live end-to-end capture.
 
 ## 6. Use Prime for only one role
 
@@ -172,19 +194,36 @@ Also review or set:
 
 - `WIGGUM_PROPOSER_TIMEOUT` — timeout for one proposer pass;
 - `WIGGUM_CRITIC_TIMEOUT` — timeout for one critic call;
-- `WIGGUM_PROPOSER_MAX_ERRORS` — intended consecutive-error threshold.
+- `WIGGUM_PROPOSER_MAX_ERRORS` — consecutive-error threshold (default 2).
 
-Until Prime pass-result handling is fixed, launcher failures may not reliably trip the consecutive-error threshold. Monitor `run.log`, use a conservative `--max-iter`, and stop the run if repeated identical failures appear.
+With structured capture on, a Prime pass that ends in a terminal `agent_result` error
+(provider/auth error, unsupported schema, or a run that reaches no verdict) now counts
+toward `WIGGUM_PROPOSER_MAX_ERRORS`; the proposer aborts with exit 7 once the streak is
+reached, and the orchestrator halts the phase with clear remediation guidance. Under the
+explicit `WIGGUM_AGENT_STREAM=false` raw-text fallback there is no structured terminal
+event, so the breaker cannot see per-pass error subtypes — in that mode still monitor
+`run.log`, use a conservative `--max-iter`, and stop the run if identical failures
+repeat.
 
 ## 10. Troubleshooting
 
 ### The live display appears idle during a Prime pass
 
-This is expected with the current implementation. Prime runs in text mode and does not feed Wiggum's Claude-shaped agent stream adapter. Watch `run.log`; implement the observability roadmap for true parity.
+With structured capture on (`WIGGUM_AGENT_STREAM=true`, the default) the timeline should
+populate as Prime works. If it stays idle, confirm you did not set
+`WIGGUM_AGENT_STREAM=false` (the explicit raw-text fallback, which emits no per-tool
+events), that `python3` is on `PATH` (the stream tap degrades silently to raw output
+without it), and that `WIGGUM_LIVE_DETAIL` is not set to `milestones` when you expected
+tool-level narration. Raw provider output is always available in `run.log`.
 
 ### Telemetry is configured but Grafana shows no agent tools
 
-Current Prime telemetry contains lifecycle events, not normalized Prime tools/messages/results. Also verify Loki/OTLP health and port mappings.
+Structured Prime telemetry now includes normalized tool, message, evidence, and terminal
+result events, so an empty dashboard usually means the sink was configured but the batch
+was never accepted. Check for a local `telemetry_delivery` failure, verify Loki/OTLP
+health and port mappings, and query the sink by run ID rather than trusting the startup
+`telemetry: true` line. If `WIGGUM_AGENT_STREAM=false`, no per-tool events are produced
+in the first place.
 
 ### `Prime Agent not found`
 
@@ -206,4 +245,9 @@ Test it directly with `prime <variant> --help` or use bare `prime`, which relies
 
 ### A failed pass repeats
 
-Stop the loop, inspect `run.log`, validate the Prime command and credentials directly, and rerun with a low `--max-iter`. This behavior is a known roadmap item because Prime currently lacks normalized `agent_result` events.
+With structured capture on, repeated erroring passes now trip the consecutive-error
+breaker (`WIGGUM_PROPOSER_MAX_ERRORS`, default 2) and the proposer aborts with exit 7.
+If passes still repeat, inspect `run.log` and the terminal `agent_result` reason code,
+validate the Prime command and credentials directly, and rerun with a low `--max-iter`.
+Under the `WIGGUM_AGENT_STREAM=false` raw-text fallback the breaker has no structured
+terminal event to count, so stop the loop manually if failures repeat.

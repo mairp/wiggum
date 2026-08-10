@@ -210,8 +210,8 @@
 - [x] T074 [P] Update supported signal classes, fallback/degradation meaning, failure breaker behavior, invocation artifacts, and telemetry state language in `README.md`
 - [x] T075 [P] Update event fields, result reason codes, artifact layout, atomicity, and retention rules in `wiki/On-Disk-Contract.md`
 - [x] T076 [P] Update Prime configuration, schema compatibility, privacy controls, and raw fallback instructions in `wiki/Configuration.md`
-- [ ] T077 [P] Update local/Loki/OTLP parity, receiver status semantics, queries, sink-failure diagnostics, and provider-neutral dashboard guidance in `wiki/Telemetry.md`
-- [ ] T078 [P] Update verified capabilities, commands, failure troubleshooting, safety caveats, and resume guidance in `roadmap/running-prime-ralph-loop.md`
+- [x] T077 [P] Update local/Loki/OTLP parity, receiver status semantics, queries, sink-failure diagnostics, and provider-neutral dashboard guidance in `wiki/Telemetry.md`
+- [x] T078 [P] Update verified capabilities, commands, failure troubleshooting, safety caveats, and resume guidance in `roadmap/running-prime-ralph-loop.md`
 - [ ] T079 Update roadmap R1-R7 status only for gates proven by automated and real-run evidence, retaining explicit caveats for anything unverified in `roadmap/prime-agent-observability.md`
 - [ ] T080 Add or update CLI help for structured/raw/degraded capture, Prime fallback, debug retention, and telemetry status in `proposer.sh`, `orchestrator.sh`, and `wiggum`
 - [ ] T081 Run the canary-secret and oversized-payload matrix across live output, local JSONL, invocation artifacts, Loki capture, and OTLP capture, recording results in `specs/001-prime-agent-observability/quickstart.md`
