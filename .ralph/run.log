@@ -600,3 +600,48 @@ GATE FAIL: 51 task(s) still unchecked in tasks.md
 
 ===== ITER 24 / 120  2026-08-10T11:45:37+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+All checks pass. Here's what I did this iteration.
+
+## T033 complete — visible durable Prime failure reasons
+
+**The task:** Emit visible durable reasons (launch, authentication, provider, timeout, nonzero, signal, malformed, parser, missing-terminal, unsupported-schema, conflict) from `proposer.sh` through `wiggum-lib.sh`.
+
+**The gap I found (a real bug):** The finalizer `lib/finalize_invocation.py` prints its result as **four newline-separated lines** (decision, reason_code, is_error, count), but `proposer.sh:504` consumed it with a single `read -r fin_decision fin_reason fin_iserror fin_count`. A single `read` splits one line on whitespace — so it captured only `fin_decision` from line 1 and left `fin_reason`, `fin_iserror`, and `fin_count` empty. The consequence: the `wiggum_emit iter_error ... subtype "$fin_reason"` call at line 510 was gated on `fin_iserror == "true"`, which was never true, so **no `iter_error` event ever fired for the structured Prime path**. The durable reason landed in `result.json` (T031's work) but was never surfaced visibly through the loop — exactly what T033 requires. The breaker itself still worked because it reads its own persisted state file, which masked the bug.
+
+**The fix** (`proposer.sh`): replaced the single `read` with `mapfile -t` to capture all four lines, then indexed each value out. I confirmed pre-fix produced zero `iter_error` events and post-fix emits `iter_error` carrying `subtype: <reason_code>` and `consec: <count>`.
+
+**Regression test** (`lib/test_prime_pipeline.py`): added `test_failure_class_emits_visible_reason_through_the_loop`, parametrized across all 9 failure modes, asserting exactly one `iter_error` event per failing pass with the correct reason code. Verified it fails on the pre-fix tree (9 failures) and passes with the fix.
+
+**Verification:**
+- `lib/test_prime_pipeline.py`: 22 passed (was 13)
+- Full T035 set (pipeline + error_breaker + agent_stream_result): 44 passed
+- `bash -n` on all four scripts: clean
+- `py_compile lib/*.py`: clean
+
+Checkbox T033 flipped to `[x]`. The next unchecked task is T034 (provider-neutral early-termination synthesis in `lib/agent_stream.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 50 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 25 / 120  2026-08-10T11:52:47+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. T034 completed this iteration.
+
+**What T034 required:** provider-neutral early-termination result synthesis on the Claude/Bebop adapter paths in `lib/agent_stream.py`, without changing successful-result semantics.
+
+**State on disk:** the implementation was already fully present and correct (built alongside T029/T031 in a prior pass) but its checkbox had not been flipped. I verified it against the T034 spec:
+
+- `ClaudeAdapter.finish()` (lib/agent_stream.py:233) synthesizes exactly one failing terminal with `reason_code=missing_terminal` when the stream ends before a `result` record, preserving the observed model.
+- `select_provider_adapter` (lib/agent_stream.py:254) routes both `claude` and the Bebop-compatible `claude-stream-json` formats to the same `ClaudeAdapter`, so synthesis is provider-neutral.
+- The `_terminal_exposed`/`_finished` guards ensure a provider-emitted success or error result is authoritative and never re-synthesized or overwritten — successful semantics unchanged.
+- The CLI loop (lib/agent_stream.py:392) calls `finish()` after EOF and emits exactly one `agent_result`.
+
+**Verification:** the 8 regression cases in `test_agent_stream_result.py` pass, and the broader T035 matrix (`test_prime_pipeline.py`, `test_prime_error_breaker.py`, `test_agent_stream_result.py`) is 44/44 green. `py_compile` and `bash -n` are clean.
+
+I flipped T034 to `- [x]`. The next unchecked task is T035 (validate the full failure matrix + breaker threshold), left for the next pass per the one-task-per-iteration rule.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 49 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 26 / 120  2026-08-10T11:54:49+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors

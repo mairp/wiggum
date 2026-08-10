@@ -123,6 +123,10 @@ def _terminals(records):
     return [r for r in records if r.get("event") == "agent_result"]
 
 
+def _iter_errors(records):
+    return [r for r in records if r.get("event") == "iter_error"]
+
+
 # mode -> (expected reason_code, expected status)
 FAILURE_MATRIX = {
     "launch": ("launch_failed", "error"),
@@ -163,6 +167,26 @@ def test_failure_class_writes_one_durable_result(tmp_path, mode):
     assert terminals[0]["reason_code"] == reason_code
     assert bool(terminals[0]["is_error"]) is True
     assert terminals[0]["invocation_id"] == "inv-test-iter-1"
+
+
+@pytest.mark.parametrize("mode", sorted(FAILURE_MATRIX))
+def test_failure_class_emits_visible_reason_through_the_loop(tmp_path, mode):
+    # T033: the durable reason must not only land in result.json — the controller
+    # must surface it visibly through wiggum-lib.sh as one iter_error event carrying
+    # the reason code. A regression previously read only the first of the finalizer's
+    # four output lines, leaving is_error/reason empty so no iter_error ever fired.
+    reason_code, _status = FAILURE_MATRIX[mode]
+    kwargs = {}
+    if mode == "timeout":
+        kwargs["timeout"] = 1
+    if mode == "launch":
+        kwargs["bin_path"] = str(tmp_path / "does-not-exist-prime")
+    _proc, records, _results, _ = _run(tmp_path, mode, **kwargs)
+
+    errors = _iter_errors(records)
+    assert len(errors) == 1, f"{mode}: expected one iter_error, got {errors}"
+    assert errors[0]["subtype"] == reason_code
+    assert errors[0].get("consec") == "1"
 
 
 def test_timeout_records_timeout_reason_not_success(tmp_path):

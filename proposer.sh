@@ -501,9 +501,17 @@ for (( i=1; i<=MAX_ITER; i++ )); do
     last_invocation_dir=""
     [[ -f "$STATE_DIR/.last-invocation-dir" ]] && last_invocation_dir="$(cat "$STATE_DIR/.last-invocation-dir" 2>/dev/null)"
     if [[ -n "$last_invocation_dir" && -f "$last_invocation_dir/metadata.json" ]]; then
-      read -r fin_decision fin_reason fin_iserror fin_count < <(
+      # The finalizer prints four lines: decision, reason_code, is_error, count.
+      # Read all four (a single `read` would capture only the first line and leave
+      # the durable reason/is_error/count empty — the visible iter_error emission
+      # below depends on them).
+      mapfile -t fin_lines < <(
         python3 "$FINALIZER" "$last_invocation_dir" "$WIGGUM_EVENTS" \
           "$BREAKER_STATE" "$WIGGUM_PROPOSER_MAX_ERRORS" 2>/dev/null)
+      fin_decision="${fin_lines[0]:-}"
+      fin_reason="${fin_lines[1]:-}"
+      fin_iserror="${fin_lines[2]:-}"
+      fin_count="${fin_lines[3]:-}"
       consec_err="${fin_count:-$consec_err}"
       if [[ "$fin_iserror" == "true" ]]; then
         echo "proposer.sh: pass $i errored (reason '$fin_reason') — consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS" >&2
