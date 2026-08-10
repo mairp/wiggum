@@ -1,6 +1,6 @@
 # Contract: Normalized Agent Event JSONL v2
 
-**Status**: Proposed  
+**Status**: Proposed — foundational contract suite green (`lib/test_agent_event_contract.py`, `lib/test_observability_policy.py`) as of T013; no behavioral changes recorded here.  
 **Transport**: UTF-8 JSON Lines in the authoritative Wiggum event file; equivalent bounded fields may be exported remotely.  
 **Compatibility**: Additive to existing lifecycle and Claude agent events.
 

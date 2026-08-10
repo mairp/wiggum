@@ -1,16 +1,16 @@
 Launching ralph loop:
-  backend : bebop sol  (prime sol == Compass gpt-5.6-sol via shim)
+  backend : bebop compass  (prime sol == Compass gpt-5.6-sol via shim)
   prompt  : /root/wiggum/specs/001-prime-agent-observability/RALPH.md
   gate    : /root/wiggum/specs/001-prime-agent-observability/check-done.sh  (stops when all stages complete)
   taskdir : /root/wiggum
   max-iter: 120
 
 ############################################################
-# ralph_loop start 2026-08-10T09:03:28+04:00
+# ralph_loop start 2026-08-10T09:21:24+04:00
 #   task dir : /root/wiggum
 #   prompt   : /root/wiggum/specs/001-prime-agent-observability/RALPH.md
 #   gate     : /root/wiggum/specs/001-prime-agent-observability/check-done.sh
-#   backend  : bebop sol   (model set by backend)
+#   backend  : bebop compass   (model set by backend)
 #   max-iter : 120   continue-session: false
 #   telemetry: off (pass -j/--stream-json to ship to Loki/Grafana)
 #   log      : /root/wiggum/.ralph/run.log
@@ -18,63 +18,69 @@ Launching ralph loop:
 #   note     : root + IS_SANDBOX unset -> auto-set IS_SANDBOX=1 (needed for --dangerously-skip-permissions)
 ############################################################
 
-===== ITER 1 / 120  2026-08-10T09:03:28+04:00 =====
+===== ITER 1 / 120  2026-08-10T09:21:24+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
-Prompt is too long
+Done. T009 completed this iteration.
+
+**What happened:** T009 (implement invocation context creation, path-safe invocation IDs, normalized event envelopes, and atomic JSON writes in `lib/invocation_result.py`) was the first unchecked task. Its implementation already existed on disk — `InvocationContext.create`, `safe_path_component`, `EventEnvelope`, and `atomic_write_json` — from a prior pass that wrote the code but never flipped the checkbox. I verified all four requirements are satisfied by running its contract tests (T008's `test_agent_event_contract.py`): **5 passed**, and `py_compile` is clean. Flipped the checkbox to `- [x]`.
+
+The next unchecked task is T010 (failing reconciliation tests in `lib/test_agent_result.py`) for the next iteration.
 ----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
 ----- gate not satisfied (continuing) -----
 
-===== ITER 2 / 120  2026-08-10T09:03:46+04:00 =====
+===== ITER 2 / 120  2026-08-10T09:22:40+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
-Completed **T006**.
+Done. This iteration's task was **T010** (add failing reconciliation tests in `lib/test_agent_result.py`).
 
-- Verified `lib/test_observability_policy.py` covers all requested policy contracts:
-  - credential key/value redaction
-  - redaction before UTF-8 truncation
-  - byte caps and truncation metadata
-  - recursive thinking exclusion
-  - bounded, non-executing path extraction
-- Relevant test result: **5 passed**
-- Marked T006 complete in `specs/001-prime-agent-observability/tasks.md:37`.
+**What I found:** T010's tests and T011's implementation were both already written on disk by a prior session but their checkboxes were never flipped. The 11 tests in `test_agent_result.py` cover every case T010 enumerates — provider-error-with-exit-0, producer-nonzero conflict, timeout, signal, parser failure, missing terminal, malformed stream, unsupported schema, and one-result cardinality — and all pass against the `reconcile_result` / `ResultFinalizer` logic in `invocation_result.py`.
 
-The tests and supporting implementation were already present; this iteration reconciled the stale task checkbox after verification.
+**What I did:**
+- Verified `test_agent_result.py`: 11/11 pass.
+- Verified the T011 implementation satisfies its contract (terminal precedence, `status_conflict` conflict preservation, stable reason codes, atomic non-overwriting finalization).
+- Confirmed `py_compile invocation_result.py` is clean and the T009 envelope contract tests (`test_agent_event_contract.py`) still pass (16/16 together).
+- Flipped **T010** and **T011** to `- [x]` — both target the same reconciliation logic and are jointly verified.
+
+I left **T012** unchecked: it's a broader refactor of `lib/agent_stream.py` (adapter selection has been started — `ClaudeAdapter`/`AdapterOutcome` exist) that needs its own dedicated iteration to verify against its full contract.
 ----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
 ----- gate not satisfied (continuing) -----
 
-===== ITER 3 / 120  2026-08-10T09:04:30+04:00 =====
+===== ITER 3 / 120  2026-08-10T09:25:20+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
-Completed **T007**.
+T012 complete. The `lib/agent_stream.py` refactor was already implemented in a prior iteration but its checkbox was never flipped — I verified it satisfies every clause of the task and flipped it.
 
-- Verified `lib/observability_policy.py` implements configurable redaction and byte limits, UTF-8-safe truncation metadata, target summarization, thinking exclusion, and non-executing path extraction.
-- Ran `python3 -m pytest -q lib/test_observability_policy.py`
-- Result: **5 passed**
-- Marked T007 complete in `specs/001-prime-agent-observability/tasks.md:38`.
+**What T012 required, and where it's met:**
+- **Explicit provider adapters** — `select_provider_adapter()` maps `claude` → `ClaudeAdapter`, `prime-v3` → `PrimeAdapter`, and raises `ValueError` on anything else.
+- **Shared policy/envelope APIs** — `EventSink` composes `ObservabilityPolicy` for sanitization and `EventEnvelope` (from `invocation_result`) for correlated event normalization.
+- **Preserves Claude parsing** — `ClaudeAdapter` handles the established `system/init`, `assistant`, and `result` records, including tool targets and exact evidence detection.
+- **Exposes terminal without duplicate final results** — the adapter returns its terminal observation inside `AdapterOutcome.terminal` but emits no result event of its own; the CLI emits a single `agent_result` only in the legacy (non-correlated) path, so a correlated run leaves finalization to the pass controller.
+
+I verified `python3 -m py_compile agent_stream.py` passes, both `agent_stream` and `prime_stream` import at runtime, and `python3 -m pytest -q lib/test_agent_stream.py` is green (6 passed). Then I flipped T012 to `- [x]` in `tasks.md`. The next unchecked task is T013 (run the foundational contract suite and record wording clarifications), which is a fresh task for the next iteration.
 ----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
 ----- gate not satisfied (continuing) -----
 
-===== ITER 4 / 120  2026-08-10T09:05:11+04:00 =====
+===== ITER 4 / 120  2026-08-10T09:26:53+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
-Prompt is too long
+Done. This iteration completed **T013**, the Phase 2 (Foundational) checkpoint task.
+
+What I did:
+- Ran the foundational contract suite — all green: `test_observability_policy.py`, `test_agent_event_contract.py`, `test_agent_result.py` (21 passed), plus `test_agent_stream.py` (6 passed, the T012 refactor target).
+- Verified the two contract docs against the implementation: contract strings (`wiggum-invocation/v1`, `wiggum-invocation-result/v1`), reason codes (`launch_failed`, `producer_signaled`, `parser_failed`, `provider_auth`, `malformed_stream`, `missing_terminal`, etc.), and the reconciliation table all match `lib/invocation_result.py` exactly. No behavioral drift, so nothing needed routing back through spec/plan.
+- Recorded the only surfaced clarification — a non-normative status note in each contract doc marking the suite green as of T013 — per the task's "record wording clarifications only" instruction.
+- Flipped T013 to `- [x]`.
+
+The tree is consistent: the foundational phase now passes its contract tests, unblocking Phase 3 (User Story 1, starting at T014). Next unchecked task is **T014** (failing schema-v3 tests in `lib/test_prime_stream.py`).
 ----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
 ----- gate not satisfied (continuing) -----
 
-===== ITER 5 / 120  2026-08-10T09:05:30+04:00 =====
+===== ITER 5 / 120  2026-08-10T09:28:52+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
-Completed **T008** and checked it off in `specs/001-prime-agent-observability/tasks.md:39`.
+T014 complete.
 
-Verified the envelope contract tests cover:
+The T014 tests already existed in `lib/test_prime_stream.py` from a prior iteration — all 9 tests pass and collectively cover every schema-v3 contract point the task enumerates (session/model init with additive fields, text delta/end coalescing, snapshot deduplication, usage aggregation, internal retries, unknown records, unknown optional fields, malformed input, absent schema, and unsupported versions). The prior pass wrote both the tests and the implementation but never flipped the checkbox.
 
-- Required invocation correlation
-- Numeric phase, attempt, iteration, and sequence fields
-- Monotonic per-invocation sequencing
-- Valid one-line JSON serialization
-- Additive-field tolerance
-- Atomic JSON writes
+I verified completeness by mapping each requirement to a test, confirmed `python3 -m pytest -q lib/test_prime_stream.py` is green (9 passed), and checked the box in `tasks.md`. No production code needed to change this iteration — the increment is marking T014 done, leaving the tree consistent with T015 as the next unchecked task.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
 
-Test result:
-
-```text
-5 passed in 0.07s
-```
-
-No other tasks were changed.
+===== ITER 6 / 120  2026-08-10T09:30:46+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors

@@ -1,6 +1,6 @@
 # Contract: Invocation Execution and Artifact Layout v1
 
-**Status**: Proposed  
+**Status**: Proposed — foundational contract suite green (`lib/test_agent_result.py`; reason codes and reconciliation table verified against `lib/invocation_result.py`) as of T013; no behavioral changes recorded here.  
 **Scope**: Proposer and critic process invocation, terminal status handoff, and collision-free debug retention.
 
 ## Invocation Context

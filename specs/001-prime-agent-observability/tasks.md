@@ -37,11 +37,11 @@
 - [x] T006 [P] Add failing policy tests for credential-key/value redaction, redaction-before-truncation, UTF-8 byte caps, truncation metadata, bounded path extraction, and thinking exclusion in `lib/test_observability_policy.py`
 - [x] T007 Implement configurable redaction, byte limits, explicit `original_bytes`/`retained_bytes` metadata, safe target summarization, and non-executing path extraction in `lib/observability_policy.py`
 - [x] T008 [P] Add failing envelope tests for required invocation correlation, numeric phase/attempt/iteration fields, monotonic per-invocation sequence, valid one-line JSON, and additive-field tolerance in `lib/test_agent_event_contract.py`
-- [ ] T009 Implement invocation context creation, path-safe invocation IDs, normalized event envelopes, and atomic JSON writes in `lib/invocation_result.py`
-- [ ] T010 [P] Add failing reconciliation tests for provider error with process exit 0, producer nonzero after provider success, timeout, signal, parser failure, missing terminal, malformed stream, unsupported schema, and exactly-one-result cardinality in `lib/test_agent_result.py`
-- [ ] T011 Implement terminal precedence, stable reason codes, provider/process/parser conflict preservation, and atomic `result.json` finalization in `lib/invocation_result.py`
-- [ ] T012 Refactor `lib/agent_stream.py` to select explicit provider adapters, consume the shared policy/envelope APIs, preserve current Claude parsing behavior, and expose provider terminal observations without emitting duplicate final results
-- [ ] T013 Run the foundational contract suite and record non-normative wording clarifications only in `specs/001-prime-agent-observability/contracts/agent-events-v2.md` and `specs/001-prime-agent-observability/contracts/invocation-v1.md`; route any behavioral contract change back through `spec.md`, `plan.md`, and a repeated `/speckit-analyze` before implementation continues
+- [x] T009 Implement invocation context creation, path-safe invocation IDs, normalized event envelopes, and atomic JSON writes in `lib/invocation_result.py`
+- [x] T010 [P] Add failing reconciliation tests for provider error with process exit 0, producer nonzero after provider success, timeout, signal, parser failure, missing terminal, malformed stream, unsupported schema, and exactly-one-result cardinality in `lib/test_agent_result.py`
+- [x] T011 Implement terminal precedence, stable reason codes, provider/process/parser conflict preservation, and atomic `result.json` finalization in `lib/invocation_result.py`
+- [x] T012 Refactor `lib/agent_stream.py` to select explicit provider adapters, consume the shared policy/envelope APIs, preserve current Claude parsing behavior, and expose provider terminal observations without emitting duplicate final results
+- [x] T013 Run the foundational contract suite and record non-normative wording clarifications only in `specs/001-prime-agent-observability/contracts/agent-events-v2.md` and `specs/001-prime-agent-observability/contracts/invocation-v1.md`; route any behavioral contract change back through `spec.md`, `plan.md`, and a repeated `/speckit-analyze` before implementation continues
 
 **Checkpoint**: Provider adapters can emit safe correlated events and the pass controller can create one authoritative result from conflicting observations.
 
@@ -55,7 +55,7 @@
 
 ### Tests for User Story 1
 
-- [ ] T014 [P] [US1] Add failing schema-v3 tests for session/model initialization, text start/delta/end coalescing, snapshot deduplication, usage aggregation, internal retries, unknown records, known records with unknown optional fields, malformed input, absent schema declarations, and unsupported versions in `lib/test_prime_stream.py`
+- [x] T014 [P] [US1] Add failing schema-v3 tests for session/model initialization, text start/delta/end coalescing, snapshot deduplication, usage aggregation, internal retries, unknown records, known records with unknown optional fields, malformed input, absent schema declarations, and unsupported versions in `lib/test_prime_stream.py`
 - [ ] T015 [P] [US1] Add failing tool tests for `toolcall_*`, `tool_execution_start/update/end`, shared tool IDs, error outcomes, bounded IPython argument/result summaries, abandoned tools, and no thinking leakage in `lib/test_prime_stream_tools.py`
 - [ ] T016 [P] [US1] Add failing exact evidence-target tests covering absolute/relative target normalization, near matches, prose-only mentions, unrelated gates, and multiple path candidates in `lib/test_prime_evidence.py`
 - [ ] T017 [P] [US1] Extend stock and fleet proposer argv tests to require JSON mode, provider-format selection, invocation correlation, expected evidence path, and explicit text fallback in `lib/test_prime_backend.py`
