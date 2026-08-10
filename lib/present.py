@@ -119,6 +119,30 @@ def fmt_ms(ms):
         return "?"
 
 
+def _present(value):
+    return value not in (None, "")
+
+
+def _event_bool(value):
+    """Read booleans from both typed normalized events and legacy shell events."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "error", "failed", "failure")
+
+
+def _summary(ev, *keys):
+    """Return the first bounded display summary supplied by an event."""
+    for key in keys:
+        value = ev.get(key)
+        if _present(value):
+            if isinstance(value, list):
+                return ", ".join(str(item) for item in value)
+            if isinstance(value, dict):
+                return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            return str(value)
+    return ""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Run totals + current activity — shared by the timeline heartbeat, the final
 #  summary, and the card.
@@ -161,22 +185,28 @@ class Totals:
             self._set_activity("proposer pass %s/%s" % (self.itr, self.max_iter))
         elif e == "agent_tool":
             tool = ev.get("tool", "?")
-            target = ev.get("target", "")
-            self._set_activity("⚒ %s %s" % (tool, target[:40]) if target else "⚒ %s" % tool)
+            status = ev.get("status")
+            target = _summary(ev, "target", "summary", "targets")
+            action = " %s" % status if status else ""
+            self._set_activity("⚒ %s%s %s" % (tool, action, target[:40]) if target
+                               else "⚒ %s%s" % (tool, action))
         elif e == "agent_text":
-            self._set_activity("agent thinking")
+            self._set_activity("agent responding")
         elif e == "evidence_writing":
             self._set_activity("writing evidence")
+        elif e == "agent_diagnostic":
+            self._set_activity("agent diagnostic: %s" % ev.get("code", "unknown"))
         elif e == "agent_result":
             self.passes += 1
+            cost = ev.get("cost") if _present(ev.get("cost")) else ev.get("cost_usd")
             try:
-                self.cost += float(ev.get("cost_usd") or 0)
-            except ValueError:
+                self.cost += float(cost or 0)
+            except (ValueError, TypeError):
                 pass
             for src, attr in (("output_tokens", "out_tokens"), ("input_tokens", "in_tokens")):
                 try:
                     setattr(self, attr, getattr(self, attr) + int(float(ev.get(src) or 0)))
-                except ValueError:
+                except (ValueError, TypeError):
                     pass
         elif e == "critic_start":
             self._set_activity("critic judging phase %s" % ev.get("phase", self.phase))
@@ -243,40 +273,93 @@ def narrate(ev, detail="tools", debug=False):
     if e == "agent_init":
         if lvl < 1:
             return None
-        return f"{stamp}  {GREEN}●{RESET} {DIM}agent up —{RESET} {CYAN}{ev.get('model','?')}{RESET} " \
-               f"{DIM}({ev.get('tools','?')} tools){RESET}"
+        identity = []
+        if _present(ev.get("provider")):
+            identity.append(str(ev["provider"]))
+        if _present(ev.get("model")):
+            identity.append(str(ev["model"]))
+        if not identity:
+            identity.append(str(ev.get("backend", "?")))
+        meta = []
+        if _present(ev.get("session_id")):
+            meta.append("session %s" % ev["session_id"])
+        if _present(ev.get("schema_version")):
+            meta.append("schema v%s" % ev["schema_version"])
+        if _present(ev.get("tools")):
+            meta.append("%s tools" % ev["tools"])
+        if ev.get("update"):
+            meta.append("updated")
+        suffix = f" {DIM}({', '.join(meta)}){RESET}" if meta else ""
+        return f"{stamp}  {GREEN}●{RESET} {DIM}agent up —{RESET} {CYAN}{' / '.join(identity)}{RESET}{suffix}"
     if e == "agent_tool":
         if lvl < 1:
             return None
-        target = ev.get("target", "")
-        accent, glyph = tool_style(ev.get("tool"))
-        tname = f"{accent}{glyph} {ev.get('tool','?')}{RESET}"
-        return f"{stamp}  {tname}" \
-               f"{(' ' + GRAY + target + RESET) if target else ''}"
+        name = ev.get("tool", "?")
+        status = ev.get("status")
+        target = _summary(ev, "target", "summary", "targets")
+        accent, glyph = tool_style(name)
+        if status == "progress":
+            lead = f"{accent}… {name}{RESET} {DIM}progress{RESET}"
+        elif status == "end":
+            failed = _event_bool(ev.get("is_error"))
+            lead = (f"{BRED}✗ {name} failed{RESET}" if failed
+                    else f"{BGREEN}✓ {name} done{RESET}")
+            target = _summary(ev, "result_summary", "summary", "target")
+        else:
+            lifecycle = f" {DIM}start{RESET}" if status == "start" else ""
+            lead = f"{accent}{glyph} {name}{RESET}{lifecycle}"
+        extras = []
+        if target:
+            extras.append(f"{GRAY}{target}{RESET}")
+        if status == "end" and _present(ev.get("duration_ms")):
+            extras.append(f"{DIM}{fmt_ms(ev['duration_ms'])}{RESET}")
+        return f"{stamp}  {lead}" + ((" " + f"{DIM}·{RESET} ".join(extras)) if extras else "")
     if e == "agent_text":
         if lvl < 2:
             return None
-        return f"{stamp}  {BWHITE}💬{RESET} {ITALIC}{GRAY}{ev.get('text','')}{RESET}"
+        fragment = "final" if _event_bool(ev.get("final_fragment")) else "partial"
+        return f"{stamp}  {BWHITE}💬{RESET} {DIM}{fragment}{RESET} {ITALIC}{GRAY}{ev.get('text','')}{RESET}"
     if e == "evidence_writing":
+        exact = ev.get("match") or ev.get("detection_reason")
+        suffix = f" {DIM}· {exact}{RESET}" if exact else ""
         return f"{stamp}  {BOLD}{BMAGENTA}⬆ evidence being written{RESET} " \
-               f"{DIM}({ev.get('tool','?')} {ev.get('target','')}){RESET}"
+               f"{DIM}({ev.get('tool','?')} {ev.get('target','')}){RESET}{suffix}"
+    if e == "agent_diagnostic":
+        if lvl < 1:
+            return None
+        severity = str(ev.get("severity", "warning")).lower()
+        col = BRED if severity in ("error", "fatal") else BYELLOW
+        return f"{stamp}  {col}! {ev.get('code','diagnostic')}{RESET} {DIM}—{RESET} " \
+               f"{YELLOW}{ev.get('message','')}{RESET}"
     if e == "agent_result":
         if lvl < 1:
             return None
-        cost = ev.get("cost_usd")
-        try:
-            cost = "$%.2f" % float(cost)
-        except (ValueError, TypeError):
-            cost = "$?"
-        err = ev.get("is_error", "False") not in ("False", "false", "", None)
-        if err:
-            mark = f"{BRED}⏺ pass errored{RESET}"
-        else:
-            mark = f"{GREEN}⏺ pass done{RESET}"
-        return f"{stamp}  {mark} {DIM}·{RESET} {BGREEN}{cost}{RESET} {DIM}·{RESET} " \
-               f"{BCYAN}{fmt_tokens(ev.get('output_tokens','?'))}{RESET}{DIM} tok ·{RESET} " \
-               f"{BYELLOW}{fmt_ms(ev.get('duration_ms'))}{RESET} {DIM}·{RESET} " \
-               f"{BBLUE}{ev.get('num_turns','?')}{RESET}{DIM} turns{RESET}"
+        status = ev.get("status")
+        err = _event_bool(ev.get("is_error")) or status in ("error", "timeout", "cancelled", "degraded")
+        label = status or ("error" if err else "success")
+        mark = f"{BRED}⏺ pass {label}{RESET}" if err else f"{GREEN}⏺ pass done{RESET}"
+        bits = []
+        cost_value = ev.get("cost") if _present(ev.get("cost")) else ev.get("cost_usd")
+        if _present(cost_value):
+            try:
+                bits.append(f"{BGREEN}$%.2f{RESET}" % float(cost_value))
+            except (ValueError, TypeError):
+                bits.append(f"{BGREEN}${cost_value}{RESET}")
+        if _present(ev.get("output_tokens")):
+            bits.append(f"{BCYAN}{fmt_tokens(ev['output_tokens'])}{RESET}{DIM} tok out{RESET}")
+        if _present(ev.get("input_tokens")):
+            bits.append(f"{BCYAN}{fmt_tokens(ev['input_tokens'])}{RESET}{DIM} tok in{RESET}")
+        if _present(ev.get("duration_ms")):
+            bits.append(f"{BYELLOW}{fmt_ms(ev['duration_ms'])}{RESET}")
+        turns = ev.get("turns") if _present(ev.get("turns")) else ev.get("num_turns")
+        if _present(turns):
+            bits.append(f"{BBLUE}{turns}{RESET}{DIM} turns{RESET}")
+        reason = ev.get("reason") or ev.get("reason_code")
+        if reason:
+            bits.append(f"{YELLOW}{reason}{RESET}")
+        if _present(ev.get("source")):
+            bits.append(f"{DIM}{ev['source']}{RESET}")
+        return f"{stamp}  {mark}" + ((f" {DIM}·{RESET} " + f" {DIM}·{RESET} ".join(bits)) if bits else "")
     if e == "evidence_written":
         return f"{stamp}  {BOLD}{BGREEN}✓ evidence{RESET} {DIM}→{RESET} {GREEN}{ev.get('file','?')}{RESET}  " \
                f"{DIM}({ev.get('iters','?')} iter){RESET}"

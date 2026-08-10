@@ -12,6 +12,7 @@ import time
 
 from invocation_result import EventEnvelope, InvocationContext
 from observability_policy import ObservabilityPolicy
+from prime_stream import PrimeAdapter
 
 
 TARGET_MAX = 120
@@ -230,6 +231,8 @@ class ClaudeAdapter:
 def select_provider_adapter(provider_format, policy, **kwargs):
     if provider_format in {"claude", "claude-stream-json"}:
         return ClaudeAdapter(policy, **kwargs)
+    if provider_format == "prime-v3":
+        return PrimeAdapter(policy, **kwargs)
     raise ValueError("unsupported provider format: %s" % provider_format)
 
 
@@ -310,9 +313,13 @@ def main():
             try:
                 record = json.loads(raw)
             except ValueError:
-                print(raw)
-                continue
-            outcome = adapter.consume(record)
+                if isinstance(adapter, PrimeAdapter):
+                    outcome = adapter.consume_raw(raw)
+                else:
+                    print(raw)
+                    continue
+            else:
+                outcome = adapter.consume(record)
             for event, fields in outcome.events:
                 sink.emit(event, **fields, **common)
             if outcome.terminal and not context:
@@ -347,6 +354,14 @@ def main():
                         loki.flush()
                     if otel:
                         otel.flush()
+            sys.stdout.flush()
+        finish = getattr(adapter, "finish", None)
+        if finish:
+            outcome = finish()
+            for event, fields in outcome.events:
+                sink.emit(event, **fields, **common)
+            for line in outcome.output:
+                print(line)
             sys.stdout.flush()
     except BrokenPipeError:
         pass

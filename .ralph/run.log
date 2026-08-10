@@ -1,0 +1,126 @@
+############################################################
+# ralph_loop start 2026-08-10T08:49:51+04:00
+#   task dir : /root/wiggum
+#   prompt   : /root/wiggum/specs/001-prime-agent-observability/RALPH.md
+#   gate     : /root/wiggum/specs/001-prime-agent-observability/check-done.sh
+#   backend  : bebop sol   (model set by backend)
+#   max-iter : 40   continue-session: false
+#   telemetry: off (pass -j/--stream-json to ship to Loki/Grafana)
+#   log      : /root/wiggum/.ralph/run.log
+#   stop with: touch /root/wiggum/.ralph/stop.flag
+#   note     : root + IS_SANDBOX unset -> auto-set IS_SANDBOX=1 (needed for --dangerously-skip-permissions)
+############################################################
+
+===== ITER 1 / 40  2026-08-10T08:49:51+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed **T001** in `specs/001-prime-agent-observability/tasks.md:21`.
+
+- Verified `lib/fixtures/prime-v3/README.md` documents Prime Agent 0.7.1, schema v3, provenance, sanitization, invented identifiers, and secret/thinking-content restrictions.
+- No trivially coupled `[P]` sibling touches the same file.
+- Marked only T001 as complete.
+- Tests: `python3 -m pytest -q lib/test_prime_fixtures.py` — **7 passed**.
+- `git diff --check` passed.
+
+The next unchecked task is **T002**.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 82 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 2 / 40  2026-08-10T08:52:17+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed **T002** and marked it checked in `specs/001-prime-agent-observability/tasks.md:22`.
+
+Validated the five stock fixtures:
+
+- `lib/fixtures/prime-v3/stock-success.jsonl`
+- `lib/fixtures/prime-v3/stock-auth-error.jsonl`
+- `lib/fixtures/prime-v3/stock-retry.jsonl`
+- `lib/fixtures/prime-v3/empty.jsonl`
+- `lib/fixtures/prime-v3/truncated.jsonl`
+
+Checks performed:
+
+- Prime stream contract suite: **9 passed**
+- Focused retry/auth tests: **2 passed**
+- All complete JSONL records parse successfully
+- Truncated fixture ends with invalid/incomplete JSON as intended
+- Empty fixture is exactly zero bytes
+- Fixture and line byte limits pass
+- Session IDs use `fixture-session-`
+- No thinking content or host-specific `/root/` paths
+- Adapter replay produced the expected success, authentication failure, retry, empty-stream, and malformed-record observations
+- `git diff --check` passed
+
+No T003 or later work was started.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 81 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 3 / 40  2026-08-10T08:54:33+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Prompt is too long
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 81 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 4 / 40  2026-08-10T08:54:48+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed **T003**.
+
+- Verified all five sanitized fleet/edge-case fixtures already exist and match the schema-v3 contracts.
+- Ran `python3 -m pytest -q lib/test_prime_fixtures.py`
+- Result: **7 passed**
+- Marked T003 complete in `specs/001-prime-agent-observability/tasks.md:23`
+
+No fixture content needed modification. The next unchecked task is **T004**.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 80 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 5 / 40  2026-08-10T08:56:59+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Prompt is too long
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 80 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 6 / 40  2026-08-10T08:57:16+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Background exploration was intentionally stopped after the implementation had already been independently verified. No additional action is needed.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 79 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 7 / 40  2026-08-10T08:59:08+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Prompt is too long
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 79 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 8 / 40  2026-08-10T08:59:25+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Prompt is too long
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 79 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 9 / 40  2026-08-10T08:59:43+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Implemented and validated **T005**.
+
+- Confirmed the existing hygiene tests cover:
+  - credential keys and credential-like values
+  - host-specific paths
+  - live-probe session IDs
+  - per-line and per-fixture UTF-8 byte limits
+  - thinking/reasoning content
+  - intentional malformed/truncated fixture exceptions  
+  See `lib/test_prime_fixtures.py:78`, `lib/test_prime_fixtures.py:87`, and `lib/test_prime_fixtures.py:98`.
+- Inspected all Prime v3 fixture payloads; they satisfy the documented hygiene contract.
+- Marked T005 complete in `specs/001-prime-agent-observability/tasks.md:25`.
+- Validation: `python3 -m pytest -q lib/test_prime_fixtures.py` → **7 passed in 0.13s**.
+- `git diff --check` passed.
+- No `.specify/extensions.yml` post-implementation hooks exist.
+
+No Phase 2 work was started.

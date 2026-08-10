@@ -18,11 +18,11 @@
 
 **Purpose**: Establish sanitized fixtures and test helpers without changing production routing
 
-- [ ] T001 Create `lib/fixtures/prime-v3/README.md` documenting Prime Agent 0.7.1, session schema v3, fixture provenance, sanitization rules, invented identifiers, and the no-real-secrets/no-thinking-content policy
-- [ ] T002 [P] Add sanitized stock success, provider-auth-error-with-exit-0, internal-retry, empty-stream, and truncated-record fixtures in `lib/fixtures/prime-v3/stock-success.jsonl`, `lib/fixtures/prime-v3/stock-auth-error.jsonl`, `lib/fixtures/prime-v3/stock-retry.jsonl`, `lib/fixtures/prime-v3/empty.jsonl`, and `lib/fixtures/prime-v3/truncated.jsonl`
-- [ ] T003 [P] Add sanitized fleet text-delta, IPython tool lifecycle, exact evidence-write, unknown-record, and malformed-line fixtures in `lib/fixtures/prime-v3/fleet-text.jsonl`, `lib/fixtures/prime-v3/fleet-ipython.jsonl`, `lib/fixtures/prime-v3/fleet-evidence.jsonl`, `lib/fixtures/prime-v3/unknown-record.jsonl`, and `lib/fixtures/prime-v3/malformed.jsonl`
-- [ ] T004 [P] Add reusable fake stock/fleet launcher, timeout, signal, and exit-status helpers in `lib/fixtures/fake_prime.py` and `lib/fixtures/fake-prime-launcher.sh`
-- [ ] T005 Add fixture hygiene tests that reject credentials, host-specific paths, session IDs from live probes, unbounded payloads, and thinking content in `lib/test_prime_fixtures.py`
+- [x] T001 Create `lib/fixtures/prime-v3/README.md` documenting Prime Agent 0.7.1, session schema v3, fixture provenance, sanitization rules, invented identifiers, and the no-real-secrets/no-thinking-content policy
+- [x] T002 [P] Add sanitized stock success, provider-auth-error-with-exit-0, internal-retry, empty-stream, and truncated-record fixtures in `lib/fixtures/prime-v3/stock-success.jsonl`, `lib/fixtures/prime-v3/stock-auth-error.jsonl`, `lib/fixtures/prime-v3/stock-retry.jsonl`, `lib/fixtures/prime-v3/empty.jsonl`, and `lib/fixtures/prime-v3/truncated.jsonl`
+- [x] T003 [P] Add sanitized fleet text-delta, IPython tool lifecycle, exact evidence-write, unknown-record, and malformed-line fixtures in `lib/fixtures/prime-v3/fleet-text.jsonl`, `lib/fixtures/prime-v3/fleet-ipython.jsonl`, `lib/fixtures/prime-v3/fleet-evidence.jsonl`, `lib/fixtures/prime-v3/unknown-record.jsonl`, and `lib/fixtures/prime-v3/malformed.jsonl`
+- [x] T004 [P] Add reusable fake stock/fleet launcher, timeout, signal, and exit-status helpers in `lib/fixtures/fake_prime.py` and `lib/fixtures/fake-prime-launcher.sh`
+- [x] T005 Add fixture hygiene tests that reject credentials, host-specific paths, session IDs from live probes, unbounded payloads, and thinking content in `lib/test_prime_fixtures.py`
 
 **Checkpoint**: Sanitized schema-v3 inputs and deterministic launch/process controls are available for contract-first development.
 

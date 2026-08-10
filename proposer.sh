@@ -53,8 +53,9 @@ OPTIONS
 
 Local agent-stream capture (tool calls, messages, cost -> events.jsonl) is ON by
 default for claude/bebop backends so the live view can narrate the agent working;
-Prime Agent and Codex currently use their raw text output. Set
-WIGGUM_AGENT_STREAM=false to restore the raw output path for all backends.
+Prime Agent uses schema-v3 JSON through agent_stream when local capture or telemetry
+is enabled; Codex currently uses raw text output. Set WIGGUM_AGENT_STREAM=false
+(without -j) to select Prime's explicit text fallback and restore raw output.
 -j only controls
 the telemetry add-on (Loki when --loki-url is set, OTEL when --otel-url is set).
 
@@ -95,6 +96,11 @@ while [[ $# -gt 0 ]]; do
     -s|--sleep)       SLEEP_SECS="${2:?}"; shift 2 ;;
     --timeout)        TIMEOUT="${2:?}"; shift 2 ;;
     -j|--stream-json) STREAM_JSON="true"; shift ;;
+    --feature)        WIGGUM_FEATURE="${2:?}"; shift 2 ;;
+    --role)           WIGGUM_ROLE="${2:?}"; shift 2 ;;
+    --phase)          WIGGUM_PHASE="${2:?}"; shift 2 ;;
+    --attempt)        WIGGUM_ATTEMPT="${2:?}"; shift 2 ;;
+    --invocation-id)  WIGGUM_INVOCATION_ID="${2:?}"; shift 2 ;;
     --loki-url)       LOKI_URL="${2:?}"; LOKI_ENABLED="true"; shift 2 ;;
     --otel-url)       OTEL_URL="${2:?}"; OTEL_ENABLED="true"; shift 2 ;;
     --debug)          DEBUG="true"; shift ;;
@@ -152,6 +158,16 @@ fi
 BACKEND_LABEL="${WIGGUM_BACKEND_LABEL:-$BACKEND}"
 TASK_NAME="${WIGGUM_TASK:-$(basename "$WORKDIR")}"
 RUN_ID="${WIGGUM_RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
+FEATURE="${WIGGUM_FEATURE:-default}"
+ROLE="${WIGGUM_ROLE:-proposer}"
+PHASE="${WIGGUM_PHASE:-0}"
+ATTEMPT="${WIGGUM_ATTEMPT:-1}"
+INVOCATION_ID_BASE="${WIGGUM_INVOCATION_ID:-}"
+PRIME_STRUCTURED="false"
+if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] \
+   && [[ "$AGENT_STREAM" == "true" || "$STREAM_JSON" == "true" ]]; then
+  PRIME_STRUCTURED="true"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  run_agent — the ONE place provider differences live. Adding a provider is a
@@ -178,7 +194,9 @@ run_agent() {
       # Prompt stdin avoids ARG_MAX; --no-session preserves fresh Ralph passes.
       local prime_agent_bin="${WIGGUM_PRIME_AGENT_BIN:-prime-agent}"
       command -v "$prime_agent_bin" >/dev/null 2>&1 || { echo "proposer.sh: Prime Agent not found: $prime_agent_bin (set \$WIGGUM_PRIME_AGENT_BIN)" >&2; return 127; }
-      local -a pargs=( -p --mode text --no-session --cwd "$WORKDIR" )
+      local prime_mode="text"
+      [[ "$PRIME_STRUCTURED" == "true" ]] && prime_mode="json"
+      local -a pargs=( -p --mode "$prime_mode" --no-session --cwd "$WORKDIR" )
       [[ -n "$MODEL" ]] && pargs+=( --model "$MODEL" )
       printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_agent_bin" "${pargs[@]}"
       ;;
@@ -189,7 +207,9 @@ run_agent() {
       local prime_fleet_bin="${WIGGUM_PRIME_FLEET_BIN:-${WIGGUM_PRIME_BIN:-prime}}"
       command -v "$prime_fleet_bin" >/dev/null 2>&1 || { echo "proposer.sh: Prime fleet launcher not found: $prime_fleet_bin (set \$WIGGUM_PRIME_FLEET_BIN)" >&2; return 127; }
       [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with prime:<variant>; the variant selects its model" >&2; return 1; }
-      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_fleet_bin" "$pv" -p --mode text --no-session --cwd "$WORKDIR"
+      local prime_mode="text"
+      [[ "$PRIME_STRUCTURED" == "true" ]] && prime_mode="json"
+      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_fleet_bin" "$pv" -p --mode "$prime_mode" --no-session --cwd "$WORKDIR"
       ;;
     bebop|bebop:*)
       # bebop is a shell FUNCTION (bebop.sh); a subprocess doesn't inherit it, so
@@ -244,9 +264,55 @@ run_iteration() {
       shared+=( --output-format stream-json )
     fi
   fi
-  if [[ "$AGENT_STREAM" == "true" && ( "$BACKEND" == claude || "$BACKEND" == bebop || "$BACKEND" == bebop:* ) ]]; then
+  if [[ ( "$AGENT_STREAM" == "true" && ( "$BACKEND" == claude || "$BACKEND" == bebop || "$BACKEND" == bebop:* ) ) \
+        || "$PRIME_STRUCTURED" == "true" ]]; then
+    local invocation_id
+    if [[ -n "$INVOCATION_ID_BASE" ]]; then
+      invocation_id="${INVOCATION_ID_BASE}-iter-${iter}"
+    else
+      invocation_id="$(python3 - "$iter" <<'PY'
+import secrets, sys
+print(f"inv-{int(sys.argv[1]):06d}-{secrets.token_hex(4)}")
+PY
+)"
+    fi
+    local stream_backend="$BACKEND_LABEL"
+    [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] && stream_backend="$BACKEND"
+    if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
+      local invocation_dir="$WORKDIR/.wiggum/features/$FEATURE/debug/invocations/$RUN_ID/proposer/phase-$PHASE/attempt-$ATTEMPT/iter-$iter/$invocation_id"
+      python3 - "$invocation_dir/metadata.json" "$RUN_ID" "$FEATURE" "$stream_backend" \
+        "$PHASE" "$ATTEMPT" "$iter" "$invocation_id" "$EVIDENCE" <<'PY'
+import json, os, sys, tempfile
+(path, run_id, feature, backend, phase, attempt, iteration,
+ invocation_id, evidence) = sys.argv[1:]
+value = {
+    "contract": "wiggum-invocation/v1", "run_id": run_id, "feature": feature,
+    "role": "proposer", "backend": backend, "phase": int(phase),
+    "attempt": int(attempt), "iteration": int(iteration),
+    "invocation_id": invocation_id, "observability_mode": "structured",
+    "provider_format": "prime-v3", "expected_evidence": os.path.abspath(evidence),
+}
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=".metadata.", suffix=".tmp", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+finally:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+PY
+    fi
     local -a tap_args=( --events "$WIGGUM_EVENTS" --run-id "$RUN_ID"
-                        --task "$TASK_NAME" --backend "$BACKEND_LABEL" --iter "$iter" )
+                        --task "$TASK_NAME" --backend "$stream_backend" --iteration "$iter" )
+    if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
+      tap_args+=( --feature "$FEATURE" --role "$ROLE" --phase "$PHASE"
+                  --attempt "$ATTEMPT" --invocation-id "$invocation_id"
+                  --expected-evidence "$EVIDENCE" --provider-format prime-v3 )
+    fi
     # Dual-ship: the tap fans out to whichever sinks are enabled (either/both/neither).
     [[ "$LOKI_ENABLED" == "true" ]] && tap_args+=( --loki "$LOKI_URL" )
     [[ "$OTEL_ENABLED" == "true" ]] && tap_args+=( --otel "$OTEL_URL" )

@@ -6,16 +6,17 @@ import sys
 
 import pytest
 
-from agent_stream import ClaudeAdapter, EventSink, select_provider_adapter
+from agent_stream import ClaudeAdapter, EventSink, PrimeAdapter, select_provider_adapter
 from invocation_result import InvocationContext
 from observability_policy import ObservabilityPolicy
 
 
 def test_provider_adapter_selection_is_explicit():
-    adapter = select_provider_adapter("claude", ObservabilityPolicy())
-    assert isinstance(adapter, ClaudeAdapter)
+    policy = ObservabilityPolicy()
+    assert isinstance(select_provider_adapter("claude", policy), ClaudeAdapter)
+    assert isinstance(select_provider_adapter("prime-v3", policy), PrimeAdapter)
     with pytest.raises(ValueError, match="unsupported provider format"):
-        select_provider_adapter("prime-v3", ObservabilityPolicy())
+        select_provider_adapter("future-format", policy)
 
 
 def test_claude_adapter_exposes_terminal_without_result_event():

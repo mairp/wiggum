@@ -946,6 +946,11 @@ run_phase() {
       --backend "$PROPOSER_BACKEND"
       --max-iter "$MAX_ITER"
       --timeout "$PROPOSER_TIMEOUT"
+      --feature "$SLUG"
+      --role proposer
+      --phase "$n"
+      --attempt "$attempt"
+      --invocation-id "${WIGGUM_RUN_ID}-proposer-phase-${n}-attempt-${attempt}"
     )
     [[ "$TELEMETRY" == "true" ]] && prop_args+=( --stream-json --loki-url "$LOKI_URL" )
     # OTEL is independent of --telemetry; --stream-json is idempotent if both add it.
