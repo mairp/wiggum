@@ -34,9 +34,9 @@
 
 **⚠️ CRITICAL**: No user story implementation begins until this phase passes its contract tests.
 
-- [ ] T006 [P] Add failing policy tests for credential-key/value redaction, redaction-before-truncation, UTF-8 byte caps, truncation metadata, bounded path extraction, and thinking exclusion in `lib/test_observability_policy.py`
-- [ ] T007 Implement configurable redaction, byte limits, explicit `original_bytes`/`retained_bytes` metadata, safe target summarization, and non-executing path extraction in `lib/observability_policy.py`
-- [ ] T008 [P] Add failing envelope tests for required invocation correlation, numeric phase/attempt/iteration fields, monotonic per-invocation sequence, valid one-line JSON, and additive-field tolerance in `lib/test_agent_event_contract.py`
+- [x] T006 [P] Add failing policy tests for credential-key/value redaction, redaction-before-truncation, UTF-8 byte caps, truncation metadata, bounded path extraction, and thinking exclusion in `lib/test_observability_policy.py`
+- [x] T007 Implement configurable redaction, byte limits, explicit `original_bytes`/`retained_bytes` metadata, safe target summarization, and non-executing path extraction in `lib/observability_policy.py`
+- [x] T008 [P] Add failing envelope tests for required invocation correlation, numeric phase/attempt/iteration fields, monotonic per-invocation sequence, valid one-line JSON, and additive-field tolerance in `lib/test_agent_event_contract.py`
 - [ ] T009 Implement invocation context creation, path-safe invocation IDs, normalized event envelopes, and atomic JSON writes in `lib/invocation_result.py`
 - [ ] T010 [P] Add failing reconciliation tests for provider error with process exit 0, producer nonzero after provider success, timeout, signal, parser failure, missing terminal, malformed stream, unsupported schema, and exactly-one-result cardinality in `lib/test_agent_result.py`
 - [ ] T011 Implement terminal precedence, stable reason codes, provider/process/parser conflict preservation, and atomic `result.json` finalization in `lib/invocation_result.py`

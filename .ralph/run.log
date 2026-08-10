@@ -124,3 +124,80 @@ Implemented and validated **T005**.
 - No `.specify/extensions.yml` post-implementation hooks exist.
 
 No Phase 2 work was started.
+############################################################
+# ralph_loop start 2026-08-10T09:03:28+04:00
+#   task dir : /root/wiggum
+#   prompt   : /root/wiggum/specs/001-prime-agent-observability/RALPH.md
+#   gate     : /root/wiggum/specs/001-prime-agent-observability/check-done.sh
+#   backend  : bebop sol   (model set by backend)
+#   max-iter : 120   continue-session: false
+#   telemetry: off (pass -j/--stream-json to ship to Loki/Grafana)
+#   log      : /root/wiggum/.ralph/run.log
+#   stop with: touch /root/wiggum/.ralph/stop.flag
+#   note     : root + IS_SANDBOX unset -> auto-set IS_SANDBOX=1 (needed for --dangerously-skip-permissions)
+############################################################
+
+===== ITER 1 / 120  2026-08-10T09:03:28+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Prompt is too long
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 78 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 2 / 120  2026-08-10T09:03:46+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed **T006**.
+
+- Verified `lib/test_observability_policy.py` covers all requested policy contracts:
+  - credential key/value redaction
+  - redaction before UTF-8 truncation
+  - byte caps and truncation metadata
+  - recursive thinking exclusion
+  - bounded, non-executing path extraction
+- Relevant test result: **5 passed**
+- Marked T006 complete in `specs/001-prime-agent-observability/tasks.md:37`.
+
+The tests and supporting implementation were already present; this iteration reconciled the stale task checkbox after verification.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 77 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 3 / 120  2026-08-10T09:04:30+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed **T007**.
+
+- Verified `lib/observability_policy.py` implements configurable redaction and byte limits, UTF-8-safe truncation metadata, target summarization, thinking exclusion, and non-executing path extraction.
+- Ran `python3 -m pytest -q lib/test_observability_policy.py`
+- Result: **5 passed**
+- Marked T007 complete in `specs/001-prime-agent-observability/tasks.md:38`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 76 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 4 / 120  2026-08-10T09:05:11+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Prompt is too long
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 76 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 5 / 120  2026-08-10T09:05:30+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed **T008** and checked it off in `specs/001-prime-agent-observability/tasks.md:39`.
+
+Verified the envelope contract tests cover:
+
+- Required invocation correlation
+- Numeric phase, attempt, iteration, and sequence fields
+- Monotonic per-invocation sequencing
+- Valid one-line JSON serialization
+- Additive-field tolerance
+- Atomic JSON writes
+
+Test result:
+
+```text
+5 passed in 0.07s
+```
+
+No other tasks were changed.
