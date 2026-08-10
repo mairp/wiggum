@@ -95,7 +95,7 @@
 - [x] T032 [US2] Replace historical tail scanning with exact current invocation result consumption, count each failure once, reset on success, and halt before the next pass at the configured threshold in `proposer.sh`
 - [x] T033 [US2] Emit visible durable launch, authentication, provider, timeout, nonzero, signal, malformed, parser, missing-terminal, unsupported-schema, and conflict reasons from `proposer.sh` through `wiggum-lib.sh`
 - [x] T034 [US2] Apply provider-neutral early-termination result synthesis to supported Claude/Bebop adapter paths without changing successful result semantics in `lib/agent_stream.py`
-- [ ] T035 [US2] Validate the complete failure matrix and breaker threshold using `lib/test_prime_pipeline.py`, `lib/test_prime_error_breaker.py`, and `lib/test_agent_stream_result.py`
+- [x] T035 [US2] Validate the complete failure matrix and breaker threshold using `lib/test_prime_pipeline.py`, `lib/test_prime_error_breaker.py`, and `lib/test_agent_stream_result.py`
 
 **Checkpoint**: Every proposer invocation has one trustworthy status, and repeated Prime failures stop at the configured bound.
 
@@ -109,7 +109,7 @@
 
 ### Tests for User Story 3
 
-- [ ] T036 [P] [US3] Extend Loki capture tests with every normalized Prime event class, required correlation fields, low-cardinality labels, receiver success/failure, and local delivery evidence in `lib/test_ralph_loki_ship.py`
+- [x] T036 [P] [US3] Extend Loki capture tests with every normalized Prime event class, required correlation fields, low-cardinality labels, receiver success/failure, and local delivery evidence in `lib/test_ralph_loki_ship.py`
 - [ ] T037 [P] [US3] Extend OTLP capture tests with every normalized Prime event class, typed usage/duration/cost values, correlation fields, receiver success/failure, and local delivery evidence in `lib/test_ralph_otel_ship.py`
 - [ ] T038 [P] [US3] Add failing four-mode parity, semantic field comparison, terminal-result presence, and asymmetric sink-outage tests in `lib/test_telemetry_parity.py`
 - [ ] T039 [P] [US3] Add failing recursion-guard and configured/reachable/accepted/query-verified state tests, including a forced outage that fails unless local delivery failure appears within 10 seconds or invocation completion, in `lib/test_telemetry_delivery.py`

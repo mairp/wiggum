@@ -214,6 +214,118 @@ def test_cli_event_json_stdin_ships_to_loki():
         assert "iter=3" in line and "max_iter=30" in line and "run_id=cli-r1" in line
 
 
+# ── normalized Prime events (T036 → drives T040) ─────────────────────────────
+# The Prime adapter emits provider-neutral events (agent_init/text/tool/
+# evidence_writing/diagnostic/result). Loki must map every class with the required
+# correlation fields in the logfmt BODY, keep labels low-cardinality (contract
+# telemetry-v1 §Loki Mapping), and report per-batch delivery evidence from flush()
+# so agent_stream can persist a local telemetry_delivery record.
+PRIME_CORRELATION = {
+    "run_id": "r1", "feature": "obs-parity", "role": "proposer",
+    "phase": 2, "attempt": 1, "iteration": 3, "invocation_id": "inv-1", "sequence": 5,
+}
+PRIME_EVENT_CLASSES = {
+    "agent_init": {"session_id": "s1", "provider": "prime", "model": "m1", "schema_version": 3},
+    "agent_text": {"text": "hi", "message_id": "msg1", "content_index": 0, "final_fragment": True},
+    "agent_tool": {"tool_id": "t1", "tool": "Read", "status": "end", "is_error": False, "duration_ms": 12},
+    "evidence_writing": {"tool_id": "t1", "tool": "Write", "target": "/x", "match": "exact-expected-target"},
+    "agent_diagnostic": {"code": "provider_retry", "severity": "warning", "message": "retry", "record_type": "session"},
+    "agent_result": {"model": "m1", "is_error": False, "subtype": "success",
+                     "cost_usd": 0.5, "duration_ms": 4200, "num_turns": 3,
+                     "input_tokens": 100, "output_tokens": 50},
+}
+
+
+def _prime_fields(extra):
+    f = dict(PRIME_CORRELATION)
+    f.update(extra)
+    return f
+
+
+def test_prime_add_maps_every_event_class():
+    with CaptureServer() as srv:
+        lk = ship.Loki(srv.url, {"job": "ralph", "task": "demo", "backend": "prime"})
+        for ev, extra in PRIME_EVENT_CLASSES.items():
+            lk.add_prime(ev, _prime_fields(extra))
+        lk.flush()
+        body = srv.json_at("/loki/api/v1/push")
+        by_event = {s["stream"]["event"]: s for s in body["streams"]}
+        assert set(by_event) == set(PRIME_EVENT_CLASSES), list(by_event)
+
+
+def test_prime_correlation_fields_stay_in_body():
+    with CaptureServer() as srv:
+        lk = ship.Loki(srv.url, {"job": "ralph", "task": "demo", "backend": "prime"})
+        lk.add_prime("agent_tool", _prime_fields(PRIME_EVENT_CLASSES["agent_tool"]))
+        lk.flush()
+        line = srv.json_at("/loki/api/v1/push")["streams"][0]["values"][0][1]
+    for want in ("run_id=r1", "feature=obs-parity", "phase=2", "attempt=1",
+                 "iteration=3", "invocation_id=inv-1", "sequence=5"):
+        assert want in line, "%r missing from %r" % (want, line)
+
+
+def test_prime_labels_are_low_cardinality():
+    with CaptureServer() as srv:
+        lk = ship.Loki(srv.url, {"job": "ralph", "task": "demo", "backend": "prime"})
+        lk.add_prime("agent_tool", _prime_fields(PRIME_EVENT_CLASSES["agent_tool"]))
+        lk.flush()
+        stream = srv.json_at("/loki/api/v1/push")["streams"][0]
+    lbl = stream["stream"]
+    assert lbl["event"] == "agent_tool"
+    assert lbl["job"] == "ralph" and lbl["backend"] == "prime"
+    assert lbl.get("role") == "proposer"            # bounded → promoted to a label
+    # high-cardinality identity must NOT become an indexed label
+    assert "run_id" not in lbl and "invocation_id" not in lbl, lbl
+
+
+def test_prime_result_typed_usage_in_body():
+    with CaptureServer() as srv:
+        lk = ship.Loki(srv.url, {"job": "ralph", "backend": "prime"})
+        lk.add_prime("agent_result", _prime_fields(PRIME_EVENT_CLASSES["agent_result"]))
+        lk.flush()
+        line = srv.json_at("/loki/api/v1/push")["streams"][0]["values"][0][1]
+    for want in ("cost_usd=0.5", "duration_ms=4200", "num_turns=3",
+                 "input_tokens=100", "output_tokens=50", "is_error=false"):
+        assert want in line, "%r missing from %r" % (want, line)
+
+
+def test_prime_flush_returns_accepted_delivery_record():
+    with CaptureServer() as srv:            # default 204
+        lk = ship.Loki(srv.url, {"job": "ralph", "backend": "prime"})
+        lk.add_prime("agent_result", _prime_fields(PRIME_EVENT_CLASSES["agent_result"]))
+        rec = lk.flush()
+    assert rec is not None, "flush() must report a delivery record for a non-empty batch"
+    assert rec["sink"] == "loki"
+    assert isinstance(rec["batch_id"], str) and rec["batch_id"].startswith("loki-")
+    assert rec["event_count"] == 1
+    assert rec["status"] == "accepted"
+    assert rec["http_status"] in (200, 204)
+    assert not rec.get("reason_code")
+
+
+def test_prime_flush_reports_failed_on_http_500():
+    with CaptureServer(status=500) as srv:
+        lk = ship.Loki(srv.url, {"job": "ralph", "backend": "prime"})
+        lk.add_prime("agent_tool", _prime_fields(PRIME_EVENT_CLASSES["agent_tool"]))
+        rec = lk.flush()                    # must not raise
+    assert rec["status"] == "failed"
+    assert rec["http_status"] == 500
+    assert rec["reason_code"], "failed delivery must carry a stable reason_code"
+
+
+def test_prime_flush_reports_failed_on_connection_refused():
+    lk = ship.Loki("http://127.0.0.1:1", {"job": "ralph", "backend": "prime"})
+    lk.add_prime("agent_diagnostic", _prime_fields(PRIME_EVENT_CLASSES["agent_diagnostic"]))
+    rec = lk.flush()                        # nothing listening → refused; must not raise
+    assert rec["status"] == "failed"
+    assert rec["reason_code"]
+
+
+def test_prime_flush_empty_returns_no_delivery_record():
+    lk = ship.Loki("http://unused", {"job": "ralph"})
+    assert lk.flush() is None               # no batch attempted → no delivery evidence
+
+
 # ── best-effort contract (must never raise) ─────────────────────────────────
 def test_flush_swallows_connection_refused():
     # nothing listening on this port -> connection refused; must not raise
