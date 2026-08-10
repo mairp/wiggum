@@ -186,8 +186,8 @@
 
 ### Tests for User Story 6
 
-- [ ] T065 [P] [US6] Add golden normalized-event regressions for existing Claude/Bebop init/text/tool/evidence/result behavior in `lib/test_agent_stream_regression.py`
-- [ ] T066 [P] [US6] Add raw fallback tests for preserved final output, producer status, explicit capability label, and intentionally absent fine-grained events in `lib/test_prime_pipeline.py`
+- [x] T065 [P] [US6] Add golden normalized-event regressions for existing Claude/Bebop init/text/tool/evidence/result behavior in `lib/test_agent_stream_regression.py`
+- [x] T066 [P] [US6] Add raw fallback tests for preserved final output, producer status, explicit capability label, and intentionally absent fine-grained events in `lib/test_prime_pipeline.py`
 - [ ] T067 [P] [US6] Extend telemetry compatibility tests to assert no existing Claude/Bebop Loki or OTLP fields are dropped in `lib/test_telemetry_parity.py`
 - [ ] T068 [P] [US6] Add orchestrator regression coverage for lifecycle ordering, stop/resume, phase advancement, critic rejection, and provider-neutral terminal synthesis in `lib/test_orchestrator_verification.py`
 

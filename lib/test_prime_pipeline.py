@@ -226,3 +226,135 @@ def test_each_pass_emits_exactly_one_terminal_result(tmp_path):
     assert launches == 2, proc.stderr
     assert len(_terminals(records)) == 2
     assert len(results) == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  T066 [US6] — the explicit Prime raw-text fallback (WIGGUM_AGENT_STREAM=false).
+#
+#  When neither the local tap nor stream-json is enabled, the `prime` backend
+#  launches `--mode text`, runs NO tap, and produces plain output. This path is a
+#  first-class, DELIBERATELY-degraded observability mode — not a broken structured
+#  path. These tests pin the four guarantees an operator relies on to trust it:
+#    1. the agent's final output is preserved verbatim (no tap consumes/rewrites it);
+#    2. the producer's success/failure status still drives the loop outcome;
+#    3. the capability is announced ONCE and explicitly (mode=raw-text, the reduced
+#       supported-signals set), so the absence of fine-grained capture is visible
+#       rather than silent (SC-012);
+#    4. the fine-grained structured signals (init/text/tool/evidence + the
+#       correlated invocation artifacts) are INTENTIONALLY absent — the raw path
+#       must not fabricate a structured envelope it never observed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Raw fallback launcher: echoes a recognizable final line, optionally writes the
+# gate evidence, and exits with $EXIT_CODE. It records every launch and its argv.
+RAW_FINAL_LINE = "RAW-AGENT-FINAL-OUTPUT-marker"
+RAW_LAUNCHER = r"""#!/bin/bash
+echo x >> "$LAUNCH_COUNT"
+cat >/dev/null
+printf '%s\n' "$@" > "$CAPTURE_ARGV"
+printf '%s\n' "RAW-AGENT-FINAL-OUTPUT-marker"
+if [[ "$WRITE_EVIDENCE" == "1" ]]; then
+  mkdir -p "$(dirname "$TEST_EVIDENCE")"
+  printf 'ok\n' > "$TEST_EVIDENCE"
+fi
+exit "${EXIT_CODE:-0}"
+"""
+
+
+def _run_raw(tmp_path, *, exit_code=0, write_evidence=True, max_iter=1, max_errors=2):
+    """Drive proposer.sh through the explicit `prime` raw-text fallback.
+
+    WIGGUM_AGENT_STREAM=false with the `prime` backend selects `--mode text`, no
+    tap, and plain execution — the deliberately-degraded observability mode."""
+    evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
+    events = tmp_path / "events.jsonl"
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("standing prompt")
+
+    fake = tmp_path / "fake-prime"
+    fake.write_text(RAW_LAUNCHER)
+    fake.chmod(0o755)
+    launch_count = tmp_path / "launches"
+
+    env = os.environ.copy()
+    env.update({
+        "WIGGUM_PRIME_AGENT_BIN": str(fake),
+        "WIGGUM_AGENT_STREAM": "false",  # explicit raw fallback
+        "EXIT_CODE": str(exit_code),
+        "WRITE_EVIDENCE": "1" if write_evidence else "0",
+        "TEST_EVIDENCE": str(evidence),
+        "LAUNCH_COUNT": str(launch_count),
+        "CAPTURE_ARGV": str(tmp_path / "argv"),
+        "WIGGUM_EVENTS": str(events),
+        "WIGGUM_RUN_ID": "run-raw",
+        "WIGGUM_PROPOSER_MAX_ERRORS": str(max_errors),
+    })
+    argv = [
+        "bash", str(PROPOSER),
+        "-w", str(tmp_path), "-e", str(evidence), "-f", str(prompt),
+        "--backend", "prime", "-n", str(max_iter), "--sleep", "0",
+        "--feature", "feature-raw", "--role", "proposer",
+        "--phase", "1", "--attempt", "1", "--invocation-id", "inv-raw",
+    ]
+    proc = subprocess.run(argv, capture_output=True, text=True, env=env)
+    records = []
+    if events.exists():
+        records = [json.loads(line) for line in events.read_text().splitlines() if line.strip()]
+    invocations = tmp_path / ".wiggum" / "features" / "feature-raw" / "debug" / "invocations"
+    artifacts = sorted(p.name for p in invocations.rglob("*.json")) if invocations.exists() else []
+    argv_lines = (tmp_path / "argv").read_text().splitlines() if (tmp_path / "argv").exists() else []
+    launches = launch_count.read_text().count("x") if launch_count.exists() else 0
+    return proc, records, artifacts, argv_lines, launches
+
+
+def test_raw_fallback_preserves_final_output(tmp_path):
+    # No tap runs on the raw path, so the agent's plain stdout must pass through
+    # verbatim to the proposer's own stdout — not be consumed or rewritten.
+    proc, _records, _artifacts, argv_lines, _ = _run_raw(tmp_path)
+    assert argv_lines[:4] == ["-p", "--mode", "text", "--no-session"], argv_lines
+    assert RAW_FINAL_LINE in proc.stdout, proc.stdout
+
+
+def test_raw_fallback_reflects_producer_status(tmp_path):
+    # The producer's success/failure still drives the loop outcome even with no
+    # structured result artifact: evidence + exit 0 => success (exit 0); an
+    # erroring producer that writes no evidence must NOT be converted to success.
+    ok_proc, _r, _a, _v, _l = _run_raw(tmp_path, exit_code=0, write_evidence=True)
+    assert ok_proc.returncode == 0, ok_proc.stderr
+
+    fail_dir = tmp_path / "fail"
+    fail_dir.mkdir()
+    fail_proc, _r2, _a2, _v2, launches = _run_raw(
+        fail_dir, exit_code=3, write_evidence=False, max_errors=5)
+    assert fail_proc.returncode != 0, "erroring raw producer must not report success"
+    assert launches == 1, fail_proc.stderr
+
+
+def test_raw_fallback_announces_explicit_capability_label(tmp_path):
+    # The reduced capability is announced ONCE, explicitly, so an operator sees WHY
+    # fine-grained signals are absent rather than inferring silence as failure.
+    _proc, records, _artifacts, _argv, _l = _run_raw(tmp_path)
+    labels = [r for r in records if r.get("event") == "agent_observability"]
+    assert len(labels) == 1, labels
+    label = labels[0]
+    assert label["mode"] == "raw-text"
+    assert label["role"] == "proposer"
+    assert label["supported_signals"] == "text,result"
+    assert label["reason"], "the degraded-capability reason text must be present"
+
+
+def test_raw_fallback_omits_fine_grained_events_and_artifacts(tmp_path):
+    # The raw path never observed a structured schema, so it must NOT fabricate the
+    # fine-grained signals or the correlated invocation artifacts the structured
+    # path produces. Their absence is the contract, not an accident.
+    _proc, records, artifacts, _argv, _l = _run_raw(tmp_path)
+    fine_grained = {
+        "agent_init", "agent_text", "agent_tool", "agent_result",
+        "evidence_writing", "agent_diagnostic",
+    }
+    seen = {r.get("event") for r in records}
+    assert not (seen & fine_grained), sorted(seen & fine_grained)
+    # The correlated structured envelope (invocation_id tag + result/metadata
+    # sidecars) belongs only to the tap path — never the raw fallback.
+    assert not any("invocation_id" in r for r in records), records
+    assert artifacts == [], artifacts

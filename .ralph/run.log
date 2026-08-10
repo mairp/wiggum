@@ -1165,3 +1165,32 @@ GATE FAIL: 19 task(s) still unchecked in tasks.md
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 54 / 120  2026-08-10T15:30:49+04:00 =====
+Done. Completed **T065** — added golden normalized-event regressions for existing Claude/Bebop behavior.
+
+I created `lib/test_agent_stream_regression.py` with 8 tests pinning the established normalization contract that Prime parity work must not disturb:
+
+- **init/text/tool/evidence/result** goldens asserting the exact normalized event shapes from `ClaudeAdapter` (event names, fields, redaction/truncation flags, tool_id propagation, and the full terminal dict).
+- An end-to-end legacy-CLI golden proving the contextless path still emits exactly `[agent_init, agent_text, agent_tool, agent_result]`.
+- A cross-backend golden proving a **Bebop** backend label produces a byte-identical event sequence to **Claude** (only the `backend` field differs) — which is the actual guarantee here, since both share one adapter and Bebop only changes the label.
+
+All 8 tests pass. Checkbox flipped to `- [x]` in `tasks.md`. The tests are additive and don't touch existing tests; no production code changed.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 18 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 55 / 120  2026-08-10T15:33:42+04:00 =====
+Done. T066 is complete.
+
+**What I did this iteration:** Implemented T066 — the raw-fallback regression tests in `lib/test_prime_pipeline.py`. The raw fallback is the `prime` backend running with `WIGGUM_AGENT_STREAM=false`, which selects `--mode text`, runs no stream tap, and executes plainly. Since it's a deliberately-degraded observability mode (not a broken structured path), I added four tests that pin the guarantees an operator relies on:
+
+- `test_raw_fallback_preserves_final_output` — the agent's plain stdout passes through verbatim (launched with `--mode text`, no tap to consume/rewrite it).
+- `test_raw_fallback_reflects_producer_status` — evidence + exit 0 yields success; an erroring producer with no evidence is not converted to success.
+- `test_raw_fallback_announces_explicit_capability_label` — exactly one `agent_observability` event with `mode=raw-text`, `supported_signals=text,result`, and a non-empty reason, so degraded capture is visible not silent (SC-012).
+- `test_raw_fallback_omits_fine_grained_events_and_artifacts` — none of the fine-grained signals (`agent_init/text/tool/result`, `evidence_writing`, `agent_diagnostic`), no `invocation_id` tags, and no `result.json`/`metadata.json` sidecars are fabricated.
+
+**Verification:** `python3 -m pytest -q lib/test_prime_pipeline.py` → 26 passed (4 new + 22 existing). I made no changes to `agent_stream.py` or `proposer.sh` — the existing raw path already satisfies all four tests, which is the correct US6 outcome (behavior preservation), so the tests pass against current code. Flipped T066 to `- [x]` in `tasks.md`. The next unchecked task is T067 (telemetry compatibility tests).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 17 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 56 / 120  2026-08-10T15:38:52+04:00 =====
