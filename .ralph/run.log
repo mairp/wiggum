@@ -1298,3 +1298,39 @@ GATE FAIL: 11 task(s) still unchecked in tasks.md
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 62 / 120  2026-08-10T16:17:24+04:00 =====
+Done. T073 complete.
+
+**What I did this iteration:** Documented the new observability controls in `.env.example`, matching every value against the actual code so no fictional knobs were introduced.
+
+- **Failure breaker** (`WIGGUM_PROPOSER_MAX_ERRORS=2`) — a real env knob read by `proposer.sh` that was undocumented. Added it to the LOOP BEHAVIOR section with its meaning (consecutive erroring passes before exit 7) and reset behavior.
+- **Redaction / payload-limit / raw-retention** — these live as conservative *built-in defaults* in `lib/observability_policy.py`, not env vars. I documented them as an informational SAFETY block (redaction patterns, per-field byte caps 4096/2048/4096/1024/512 + max 8 paths, raw-capture disabled by default, 7-day raw / 30-day metadata retention, `wiggum-retention/v1` policy version) rather than inventing no-op env keys that would mislead operators.
+- **Observability mode / Prime executables** — the raw-text fallback (`WIGGUM_AGENT_STREAM=false`) and Prime bins (`WIGGUM_PRIME_AGENT_BIN` / `WIGGUM_PRIME_FLEET_BIN` / `WIGGUM_PRIME_BIN`) were already documented; I cross-linked the fallback to the safety block so operators know redaction/limits don't apply on the raw path.
+
+Verified all data lines remain valid `KEY=VALUE`, then flipped T073 to `- [x]`. No tests cover `.env.example`, so nothing to run for this task. The next unchecked task is T074 (README updates).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 10 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 63 / 120  2026-08-10T16:24:47+04:00 =====
+Done. This iteration completed **T074** — the README documentation update for Prime observability parity.
+
+## What changed in `README.md`
+
+I grounded every addition against the actual implementation (`lib/agent_stream.py`, `lib/invocation_result.py`, `proposer.sh`, `orchestrator.sh`, and the already-completed `.env.example`), then made five additive edits covering exactly the five items the task names:
+
+1. **Supported signal classes + fallback/degradation** — added the `agent_observability` and `agent_diagnostic` rows to the event-stream table, and a new "Observability parity" paragraph in Configuration. Both describe the three capability modes (`structured` / `degraded` / `raw-text`), the `init,text,tool,evidence,result` signal set, the explicit `structured`→`degraded` transition on schema breakage, and the `WIGGUM_AGENT_STREAM=false` raw escape hatch.
+
+2. **Failure breaker behavior** — rewrote the exit-code `4` row to document `WIGGUM_PROPOSER_MAX_ERRORS` (default 2), what counts as an erroring pass, and the `run_stop reason=proposer_consecutive_errors` signal. Verified the breaker's internal exit 7 is mapped to exit 4 (`E_BUDGET`) by the orchestrator — so the table reflects the code the operator actually sees.
+
+3. **Invocation artifacts** — added an on-disk contract row for `debug/invocations/<run-id>/<role>/phase-<N>/attempt-<M>/iter-<I>/<invocation-id>/`, with the exact contract strings (`wiggum-invocation/v1`, `wiggum-invocation-result/v1`), the raw-only-when-enabled files, and the redaction/truncation/retention rules.
+
+4. **Telemetry state language** — enriched `agent_result` with its terminal `reason_code` vocabulary and added the new `proposer_consecutive_errors` value to the `run_stop` reason list.
+
+## Verification
+
+Gate checks pass: `bash -n` on the four shell files and `py_compile lib/*.py` are both green. This is a docs-only change with no tests bound to it, so nothing in the suite was affected. Checkbox flipped to `- [x]`; tree left consistent. The next unchecked task is **T075** (`wiki/On-Disk-Contract.md`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 9 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 64 / 120  2026-08-10T16:29:03+04:00 =====

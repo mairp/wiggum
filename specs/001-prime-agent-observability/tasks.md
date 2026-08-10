@@ -206,8 +206,8 @@
 
 **Purpose**: Complete operator controls, security verification, documentation, and the stock and named-fleet real acceptance runs across all stories
 
-- [ ] T073 [P] Document all new observability mode, redaction, payload-limit, raw-retention, and Prime executable controls with conservative defaults in `.env.example`
-- [ ] T074 [P] Update supported signal classes, fallback/degradation meaning, failure breaker behavior, invocation artifacts, and telemetry state language in `README.md`
+- [x] T073 [P] Document all new observability mode, redaction, payload-limit, raw-retention, and Prime executable controls with conservative defaults in `.env.example`
+- [x] T074 [P] Update supported signal classes, fallback/degradation meaning, failure breaker behavior, invocation artifacts, and telemetry state language in `README.md`
 - [ ] T075 [P] Update event fields, result reason codes, artifact layout, atomicity, and retention rules in `wiki/On-Disk-Contract.md`
 - [ ] T076 [P] Update Prime configuration, schema compatibility, privacy controls, and raw fallback instructions in `wiki/Configuration.md`
 - [ ] T077 [P] Update local/Loki/OTLP parity, receiver status semantics, queries, sink-failure diagnostics, and provider-neutral dashboard guidance in `wiki/Telemetry.md`

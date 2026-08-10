@@ -402,6 +402,7 @@ once on the next run).
 | `.wiggum/features/<slug>/gates/` (+ `gates/proofs/`) | per-feature | all the phase-control files above — where to look for what the loop produced |
 | `.wiggum/features/<slug>/runs/<run-id>/{run.log,events.jsonl}` | per-feature | each run isolated |
 | `.wiggum/features/<slug>/{verdicts,attempts,debug}/` | per-feature | critic transcripts, archived rejected attempts (`attempts/phase<N>/attempt<M>/`), debug dumps |
+| `.wiggum/features/<slug>/debug/invocations/<run-id>/<role>/phase-<N>/attempt-<M>/iter-<I>/<invocation-id>/` | per-feature | one reconstructable proposer/critic invocation: `metadata.json` (contract `wiggum-invocation/v1`) + a terminal `result.json` (`wiggum-invocation-result/v1`), and — **only when raw capture is explicitly enabled** — `prompt.txt` / `provider.jsonl` / `events.jsonl` / `response.txt`. Every field is routed through `lib/observability_policy.py` first: secrets redacted, thinking dropped, oversized payloads truncated with `truncated=true`. Raw content expires after 7 days; redacted metadata + terminal result are kept 30 (the summary always outlives the raw it describes) |
 | `.wiggum/features/<slug>/PROGRESS.md`, `last-run.conf` | per-feature | proposer notes; that feature's resume config |
 | `.wiggum/lock`, `.wiggum/stop.flag` | **workdir** | one run per repo, ever — concurrency is per-workdir, **not** per-feature |
 | `.wiggum/run.log`, `.wiggum/events.jsonl` | **workdir** | symlinks retargeted into the **active** feature's newest run, so `wiggum tail`/`watch`/`events` work with no flags |
@@ -425,7 +426,7 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | Event | Emitted by | Meaning |
 |---|---|---|
 | `run_start` / `run_end` | orchestrator | a run begins / all phases approved (`outcome`) |
-| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_no_evidence`, `critic_config`) + `phase` |
+| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_no_evidence`, `critic_config`) + `phase` |
 | `phase_start` / `phase_done` | orchestrator | phase N entered / approved |
 | `proposer_start` | orchestrator | a proposer pass for phase N begins |
 | `iter_start` / `iter_done` | proposer | one headless proposer iteration |
@@ -434,10 +435,12 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | `verdict` | critic | the critic's APPROVED/REJECTED decision |
 | `reject` | orchestrator | phase N rejected (attempt M) with feedback |
 | `git_checkpoint` / `gates_migrated` | orchestrator | per-phase commit / one-time relocation of pre-v2 state into `features/default/` |
+| `agent_observability` | agent tap | the capability this invocation begins with — `mode` (`structured` \| `degraded` \| `raw-text`) + `supported_signals` + `reason` + `provider_format` + `role`. Re-emitted if a fatal schema diagnostic degrades `structured`→`degraded` mid-stream, so a loss of fine-grained capture is explicit, never silent |
 | `agent_init` | agent tap | once per pass: model + tool count |
 | `agent_tool` | agent tap | every proposer tool call: tool name + compact target |
 | `agent_text` | agent tap | first line of each assistant message (thinking/narration) |
-| `agent_result` | agent tap | end of pass: cost, tokens, duration, turns |
+| `agent_diagnostic` | agent tap | a bounded parse warning (`code`, e.g. `malformed_json` / `unsupported_schema` / `absent_schema`) — capped, never a flood; schema-fatal codes drive the `structured`→`degraded` transition above |
+| `agent_result` | agent tap | end of pass: cost, tokens, duration, turns, and a terminal `reason_code` — `success` on a clean pass, or one of the failure codes (`timeout`, `provider_error`, `provider_auth`, `malformed_stream`, `missing_terminal`, `unsupported_schema`, `producer_nonzero`, …) that the failure breaker counts |
 | `evidence_writing` | agent tap | first Write/Edit/Bash of the pass that touches a `GATE<N>-EVIDENCE.md` |
 | `_reopen` | presenter | **synthetic**, not on disk: the `events.jsonl` symlink retargeted (a new run after stop+resume), so a following viewer prints a divider and keeps narrating |
 
@@ -601,6 +604,18 @@ Pick a backend per role — `claude | codex | bebop | prime[:variant]`:
   `prime <variant>` fleet launcher is installed, select it with `prime:sol`,
   `prime:judge`, etc. Proposer passes are fresh; Prime critics run without tools.
 
+**Observability parity.** A Prime invocation emits the same signal classes as
+Claude — `init`, `text`, `tool`, `evidence`, `result` — when its structured JSON
+schema (`prime-v3`) is recognized; the invocation-start `agent_observability`
+event announces `mode=structured` up front. If the schema is unavailable the
+capability **degrades** explicitly (`mode=raw-text`, only `text,result`) rather
+than pretending fine-grained events exist; a schema that parses but then breaks
+mid-stream transitions `structured`→`degraded` (only the terminal `result`
+stays trustworthy). The last-resort escape hatch is `WIGGUM_AGENT_STREAM=false`,
+which turns **off** structured capture entirely and restores the legacy raw
+tee'd output — no per-tool events, and the redaction/payload policy no longer
+applies, so use it only when you accept raw provider text in `run.log`.
+
 Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `WIGGUM_MAX_ITER`, `WIGGUM_PROPOSER_TIMEOUT` (1800s),
 `WIGGUM_CRITIC_TIMEOUT` (300s), `WIGGUM_MAX_WALL_MIN` (0 = unlimited),
@@ -640,7 +655,7 @@ guarded, all cheap:
 | `1` | unexpected/internal error |
 | `2` | MAX_REJECTS exceeded — a human needs to arbitrate |
 | `3` | invalid spec/config |
-| `4` | budget exceeded (wall clock or MAX_ITER) |
+| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or the **failure breaker** tripping (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive proposer passes ending in an agent error: crash, timeout, auth/model error, malformed output, or no terminal record; default 2). The breaker emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume` |
 | `5` | lock held by another run |
 | `6` | stopped via `stop.flag` (clean; `wiggum resume` or rerun continues). Now also produced when the stop lands **mid-proposer** — `wiggum stop --now` — which earlier versions mislabeled as `4` |
 
