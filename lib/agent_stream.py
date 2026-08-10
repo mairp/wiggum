@@ -47,8 +47,6 @@ class EventSink:
             self.base["backend"] = backend
 
     def emit(self, event, **fields):
-        if not self.path:
-            return
         fields = self._sanitize_fields(fields)
         if self.envelope:
             record = self.envelope.normalize(event, **fields)
@@ -60,11 +58,19 @@ class EventSink:
                 **self.base,
                 **fields,
             }
-        try:
-            with open(self.path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except OSError:
-            pass
+        if self.path:
+            try:
+                with open(self.path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            except OSError:
+                pass
+        # Return the identity-enriched fields (run_id/invocation_id/sequence and
+        # any correlation the envelope added) so the fan-out ships the SAME
+        # correlated view to every remote sink as it wrote locally. Envelope
+        # bookkeeping (ts/time/event) stays out of the shipped field dict: the
+        # shippers time-stamp their own records and carry `event` as a label.
+        return {key: value for key, value in record.items()
+                if key not in ("ts", "time", "event")}
 
     def _sanitize_fields(self, fields):
         result = {}

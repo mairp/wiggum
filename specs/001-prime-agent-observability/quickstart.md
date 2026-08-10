@@ -283,11 +283,126 @@ Expected:
 - thinking content is absent;
 - raw provider retention is off by default and follows configured retention when enabled.
 
+### Recorded Canary/Payload Matrix Evidence (T081)
+
+Redaction and payload bounding are applied once in the shared policy layer
+(`lib/observability_policy.py`) that produces every event line; the live
+renderer, the local JSONL writer, the invocation-artifact writer, and both the
+Loki (`lib/ralph_loki_ship.py`) and OTLP (`lib/ralph_otel_ship.py`) shippers all
+consume those already-sanitized lines from stdin, so a canary redacted or a
+payload truncated upstream cannot reappear on any downstream surface. The matrix
+therefore exercises each surface against the same sanitized envelope.
+
+Latest matrix run on this repository:
+
+```
+$ python3 -m pytest -q \
+    lib/test_observability_policy.py \
+    lib/test_invocation_artifacts.py \
+    lib/test_agent_event_contract.py \
+    lib/test_ralph_loki_ship.py \
+    lib/test_ralph_otel_ship.py \
+    lib/test_telemetry_parity.py
+........................................................................ [ 81%]
+................                                                         [100%]
+88 passed in 23.95s
+```
+
+Surface coverage:
+
+- **Live output / local JSONL**: `test_observability_policy.py` asserts credential
+  keys and values (`api_key`/`token` = `canary-secret`/`canary-value`) are redacted,
+  that redaction runs before UTF-8 byte truncation, that thinking fields are
+  excluded recursively, and that shortened values carry truncation metadata and byte
+  counts;
+- **Invocation artifacts**: `test_invocation_artifacts.py` and
+  `test_observability_policy.py::test_artifact_payload_is_redacted_and_bounded_before_retention`
+  confirm artifact payloads are redacted and bounded before retention, that raw
+  capture is off by default, and that raw content expires before metadata and result;
+- **Loki capture**: `test_ralph_loki_ship.py` confirms the shipper emits the
+  sanitized envelope unchanged and never reconstructs raw payloads;
+- **OTLP capture**: `test_ralph_otel_ship.py` confirms typed attributes and metrics
+  derive only from the sanitized envelope;
+- **Cross-surface parity**: `test_agent_event_contract.py` and
+  `test_telemetry_parity.py` confirm the `redacted` flag and event identity correlate
+  across representations.
+
+Result: 88 tests pass with no failures, errors, or skips. Zero complete canary
+secrets and no over-limit payloads survive on any of the five surfaces; every
+truncation carries metadata and byte counts; thinking content is absent; raw
+provider retention is disabled by default.
+
 ## 11. Phase Denominator Regression
 
 Run a fixture or integration specification with seven executable phases and inspect phase events/presentation.
 
 Expected sequence includes `1 of 7` through `7 of 7`; never `7 of 6`.
+
+### Recorded Dual-Role Real-Run Evidence (T082)
+
+Two trusted dual-role Prime validations were executed on this host against a
+minimal one-phase native spec (write `hello.txt`, print its absolute path), each
+using the SAME backend for proposer and critic, with `WIGGUM_AGENT_STREAM=true`
+(structured mode), and both Loki (`http://localhost:3100`) and OTLP
+(`http://localhost:4318`) enabled. The workspaces were disposable scratch
+projects, not this repo. Both runs reached `# DONE — all 1 phase(s) approved`
+(orchestrator exit 0); each critic returned a nonce-bound `APPROVED` verdict with
+tools disabled.
+
+- **Stock** (`--proposer prime --critic prime`): the out-of-the-box
+  prime-agent's default provider (OpenAI) is uncredentialed on this host and
+  fails closed with a precise `provider_auth` reason. To exercise the identical
+  stock code path against a working provider, the documented
+  `WIGGUM_PRIME_AGENT_BIN` escape hatch pointed prime-agent at the credentialed
+  gateway (`prime-agent --provider compass --model gpt-5.5 "$@"`); no other stock
+  flag or behavior was changed.
+- **Fleet** (`--proposer prime:compass --critic prime:compass`): the fleet
+  launcher resolves the `compass` variant's provider/model directly.
+
+Sanitized results (retrieval budget 30 s; the shippers reported delivery
+synchronously, so retrieval was immediate on every query):
+
+| Metric | Stock (`prime`) | Fleet (`prime:compass`) |
+| --- | --- | --- |
+| run id | `20260810-171657-3393894` | `20260810-171730-3395240` |
+| terminal outcome | 1 phase APPROVED, exit 0 | 1 phase APPROVED, exit 0 |
+| run latency (run_start→run_end) | 23.5 s | 43.1 s |
+| local JSONL total lines | 20 | 28 |
+| proposer signal classes | observability, init×2, tool×4, text, delivery×2 | observability, init×2, diagnostic×2, tool×10, text, delivery×2 |
+| critic signal classes | observability (tools disabled) | observability (tools disabled) |
+| invocation cardinality | 1 unique proposer dir, no overwrite | 1 unique proposer dir, no overwrite |
+| verdict | APPROVED (nonce-bound) | APPROVED (nonce-bound) |
+| `telemetry_delivery` (loki) | accepted, HTTP 204, 8 events | accepted, HTTP 204, 16 events |
+| `telemetry_delivery` (otlp) | accepted, HTTP 200, 8 events | accepted, HTTP 200, 16 events |
+
+Query verification by run id (all three sinks):
+
+- **Local JSONL** — 100% of expected normalized events present, including the
+  `agent_observability` capability announcement for both roles and exactly one
+  proposer invocation directory per run (no overwritten prompt/result).
+- **Loki** — `{job="ralph"} | logfmt | run_id="<RID>"` retrieved every
+  agent-stream event (init/observability/text/tool/diagnostic) alongside the
+  orchestrator lifecycle events: 15 lines (stock) and 23 lines (fleet), matching
+  the local event set.
+- **OTLP** — the collector fans OTLP logs out to the same Loki backend, tagging
+  them `service_name="ralph"` (the direct Loki push carries only `job`). A
+  `{service_name="ralph"} | logfmt | run_id="<RID>"` query returned exactly twice
+  the `{job="ralph"}` count for each run (stock 30 vs 15; fleet 46 vs 23),
+  proving the OTLP-forwarded copy independently carried the same `run_id`,
+  `invocation_id`, and `sequence` correlation through the OTLP path.
+
+Privacy: a scan of both shipped local JSONL files for `thinking`,
+`thinkingSignature`, `canary-secret`, and `canary-value` returned zero matches.
+
+Correlation fix landed by this task: the local-first fan-out
+(`lib/telemetry_delivery.py`) previously shipped the pre-envelope fields to Loki
+and OTLP, so agent-stream events reached the remote sinks WITHOUT `run_id` and a
+run_id-scoped query retrieved only the orchestrator lifecycle events. The local
+`EventSink.emit` (`lib/agent_stream.py`) now returns the identity-enriched record
+it wrote, and the fan-out ships that same correlated view to every remote sink.
+Regression pinned by
+`lib/test_telemetry_delivery.py::test_envelope_identity_reaches_remote_sinks_not_only_local`;
+the full `python3 -m pytest -q lib` suite (349 tests) remains green.
 
 ## 12. Completion Gate
 

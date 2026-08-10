@@ -49,13 +49,21 @@ class LocalFirstFanout:
     def emit(self, event, fields):
         fields = dict(fields)
         # Local authority is written synchronously, before any remote round-trip,
-        # so an event survives a total remote outage.
-        self._local(event, **fields)
+        # so an event survives a total remote outage. The local sink returns the
+        # identity-enriched view it actually wrote (run_id/invocation_id/sequence
+        # added by its envelope); ship THAT so remote sinks carry the same
+        # correlation as the local JSONL — a run_id-scoped query must retrieve the
+        # agent-stream events, not only the orchestrator lifecycle events. Falls
+        # back to the caller's fields when the local callable returns nothing
+        # (e.g. a test double or a path-less sink).
+        enriched = self._local(event, **fields)
+        if not isinstance(enriched, dict):
+            enriched = fields
         # Recursion guard: evidence ABOUT a sink stays local; shipping it to that
         # sink would describe the shipment, describe that shipment, ... forever.
         if event == DELIVERY_EVENT:
             return
-        remote_fields = self._sanitize(dict(fields))
+        remote_fields = self._sanitize(dict(enriched))
         for sink in self._sinks.values():
             try:
                 sink.add_prime(event, dict(remote_fields))

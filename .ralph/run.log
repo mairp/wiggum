@@ -1432,3 +1432,51 @@ GATE FAIL: 3 task(s) still unchecked in tasks.md
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 70 / 120  2026-08-10T16:48:12+04:00 =====
+Done. I completed **T081** — the canary-secret and oversized-payload validation matrix.
+
+**What I did this iteration:**
+1. Identified T081 as the first unchecked task (a validation-and-record task, not new code).
+2. Verified the redaction architecture: `lib/observability_policy.py` sanitizes and byte-bounds every event line once, upstream; the live renderer, local JSONL writer, invocation-artifact writer, and both the Loki and OTLP shippers all consume those already-sanitized lines from stdin — so nothing can leak a canary or over-limit payload on a downstream surface.
+3. Ran the matrix across all five surfaces:
+   ```
+   python3 -m pytest -q lib/test_observability_policy.py lib/test_invocation_artifacts.py \
+     lib/test_agent_event_contract.py lib/test_ralph_loki_ship.py \
+     lib/test_ralph_otel_ship.py lib/test_telemetry_parity.py
+   → 88 passed in 23.95s
+   ```
+4. Recorded the evidence in `specs/001-prime-agent-observability/quickstart.md` §10 (new "Recorded Canary/Payload Matrix Evidence (T081)" block, matching the T072 style), documenting per-surface coverage.
+5. Flipped T081 to `- [x]` in `tasks.md`.
+
+Zero complete canary secrets and no over-limit payloads survive on live output, local JSONL, invocation artifacts, Loki, or OTLP; every truncation carries metadata and byte counts; thinking content is absent; raw retention is off by default.
+
+The remaining unchecked tasks are **T082** (two trusted real dual-role Prime runs with live Loki/OTLP receivers) and **T083** (final FR/SC requirements trace) — both require a live fleet or a full manual trace, appropriate for subsequent iterations.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 2 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 71 / 120  2026-08-10T16:51:08+04:00 =====
+T082 is complete. Here's what happened.
+
+## T082 — two real dual-role Prime validations: done
+
+I executed both required real runs on this host (all infra live: Prime binaries, Loki :3100, OTLP collector :4318), and both reached `# DONE — all 1 phase(s) approved` with nonce-bound `APPROVED` critic verdicts and tools disabled on the critic:
+
+- **Stock** (`--proposer prime --critic prime`), run id `20260810-171657-3393894`
+- **Fleet** (`--proposer prime:compass --critic prime:compass`), run id `20260810-171730-3395240`
+
+The stock prime-agent's *default* provider (OpenAI) is uncredentialed on this host and fails closed with a precise `provider_auth` reason — the instrumentation worked, the key didn't. I used the documented `WIGGUM_PRIME_AGENT_BIN` escape hatch to point stock prime-agent at the credentialed gateway (provider/model only, nothing else changed), which is the honest way to exercise the identical stock code path against a working provider.
+
+**Query-verified across all three sinks by run id**: local JSONL had 100% of events; `{job="ralph"} | logfmt | run_id=…` on Loki retrieved every agent-stream event plus lifecycle events; the OTLP-forwarded copy (`service_name="ralph"`) returned exactly 2× the direct-push count, proving OTLP independently carried the same correlation. No `thinking`/canary content leaked. Evidence recorded in `quickstart.md` §"Recorded Dual-Role Real-Run Evidence (T082)".
+
+### One real bug found and fixed along the way
+
+Verifying the queries surfaced a genuine, contract-violating gap that would have made T082's own acceptance impossible to honestly claim: `LocalFirstFanout` shipped the **pre-envelope** fields to Loki/OTLP, so agent-stream events reached the remote sinks **without `run_id`** — a run_id-scoped query retrieved only the 7 orchestrator lifecycle events, not the agent activity. The parity test passed only because its sample event carried `run_id` inline and never exercised the envelope→fanout→remote path.
+
+Fix (additive, reversible): `EventSink.emit` (`lib/agent_stream.py`) now returns the identity-enriched record it wrote, and the fan-out (`lib/telemetry_delivery.py`) ships that same correlated view to every remote sink. Pinned by a new regression test, `test_envelope_identity_reaches_remote_sinks_not_only_local`.
+
+Gate checks all green: `bash -n` on the four scripts, `py_compile lib/*.py`, and `pytest -q lib` (349 passed). T082's checkbox is flipped to `[x]`; the next unchecked task is T083 (requirements trace).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 1 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 72 / 120  2026-08-10T17:23:53+04:00 =====

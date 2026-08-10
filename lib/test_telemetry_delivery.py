@@ -118,6 +118,48 @@ def test_emitting_a_delivery_event_stays_local_only():
     assert all(e != DELIVERY_EVENT for e, _ in otel.all_added)
 
 
+# ── correlation identity must survive to remote sinks (envelope path) ─────────
+def test_envelope_identity_reaches_remote_sinks_not_only_local():
+    """Regression: the authoritative local sink enriches each event with its
+    invocation identity (run_id/invocation_id/sequence) via the envelope, but the
+    fan-out used to ship the PRE-envelope fields to remote sinks — so Loki/OTLP
+    received agent-stream events with no run_id and a run_id-scoped query could
+    only retrieve the orchestrator lifecycle events. The contract
+    (§Required Correlation, CORRELATION_KEYS) requires run_id to survive to every
+    configured sink; this pins that the enriched identity the local sink wrote is
+    exactly what the remote sinks receive.
+    """
+    import agent_stream
+    from invocation_result import InvocationContext
+
+    context = InvocationContext.create(
+        run_id="RID-CORR", feature="obs-parity", role="proposer", backend="prime",
+        phase=2, attempt=1, iteration=3, invocation_id="inv-corr",
+        provider_format="prime-v3", expected_evidence=None)
+    tmp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       ".test_corr_events.jsonl")
+    try:
+        sink = agent_stream.EventSink(tmp, run_id="RID-CORR", task="demo",
+                                      backend="prime", context=context)
+        loki = FakeSink("loki")
+        fan = td.LocalFirstFanout(sink.emit, {"loki": loki})
+
+        # A bare event: identity is added by the envelope, NOT by the caller.
+        fan.emit("agent_tool", {"tool": "Read", "status": "end", "sequence": 5})
+
+        assert loki.all_added, "the event must reach the remote sink"
+        _event, shipped = loki.all_added[-1]
+        assert shipped.get("run_id") == "RID-CORR", (
+            "run_id must survive to the remote sink, not only the local JSONL")
+        assert shipped.get("invocation_id") == "inv-corr"
+        assert shipped.get("sequence") == 5
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
 # ── local-first: authoritative local events survive total remote loss ─────────
 def test_local_event_is_written_before_any_remote_confirmation():
     local = LocalLog()

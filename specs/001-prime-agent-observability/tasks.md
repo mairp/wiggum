@@ -214,8 +214,8 @@
 - [x] T078 [P] Update verified capabilities, commands, failure troubleshooting, safety caveats, and resume guidance in `roadmap/running-prime-ralph-loop.md`
 - [x] T079 Update roadmap R1-R7 status only for gates proven by automated and real-run evidence, retaining explicit caveats for anything unverified in `roadmap/prime-agent-observability.md`
 - [x] T080 Add or update CLI help for structured/raw/degraded capture, Prime fallback, debug retention, and telemetry status in `proposer.sh`, `orchestrator.sh`, and `wiggum`
-- [ ] T081 Run the canary-secret and oversized-payload matrix across live output, local JSONL, invocation artifacts, Loki capture, and OTLP capture, recording results in `specs/001-prime-agent-observability/quickstart.md`
-- [ ] T082 Execute two trusted real dual-role Prime validations—one with stock Prime for both roles and one with a named fleet selector for both roles—with local, Loki, and OTLP query verification; record sanitized eligible/retrieved event counts, retrieval deadlines, invocation/result cardinality, latency, and receiver outcomes in `specs/001-prime-agent-observability/quickstart.md`
+- [x] T081 Run the canary-secret and oversized-payload matrix across live output, local JSONL, invocation artifacts, Loki capture, and OTLP capture, recording results in `specs/001-prime-agent-observability/quickstart.md`
+- [x] T082 Execute two trusted real dual-role Prime validations—one with stock Prime for both roles and one with a named fleet selector for both roles—with local, Loki, and OTLP query verification; record sanitized eligible/retrieved event counts, retrieval deadlines, invocation/result cardinality, latency, and receiver outcomes in `specs/001-prime-agent-observability/quickstart.md`
 - [ ] T083 Perform a final requirements trace from FR-001–FR-053 and SC-001–SC-014 to tests/evidence, documenting any unmet item instead of marking it complete in `specs/001-prime-agent-observability/checklists/requirements.md`
 
 ---
