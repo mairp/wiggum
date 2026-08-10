@@ -885,3 +885,34 @@ I flipped T060's checkbox to `- [x]`. The next unchecked task is T061 (rendering
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 52 / 120  2026-08-10T15:19:13+04:00 =====
+Done. This iteration completed two `lib/present.py` tasks whose tests were failing in `test_present.py`:
+
+**T061** — Added `agent_observability` and `telemetry_delivery` handlers to `narrate()` in `lib/present.py`:
+- `agent_observability` renders `observability <mode>` with a color keyed to state (structured=green, raw-text=yellow, degraded=red), the reason text, provider format, supported signals, and role. Each mode change stays visible because every event narrates its own reason.
+- `telemetry_delivery` renders `sink <name> <status>` with the HTTP status, batch id, event count, and reason. Failures show at all detail levels; accepted deliveries are full-detail only (routine confirmation).
+- The bounded-malformed-diagnostic and reconciled-terminal-conflict cases were already handled by the existing `agent_diagnostic`/`agent_result` paths.
+
+**T063** — Fixed the phase denominator. Phases are numbered contiguously `1..total` where `total` is the validated executable phase count (`PHASE_COUNT`), but the code was subtracting 1, producing `7/6` on the final phase of a seven-phase run. Corrected in two places:
+- Timeline (`phase_start` in `narrate`): denominator is now `total`, not `total-1`.
+- Card header (`_header_lines`): denominator is `total`, and the progress-bar loop now iterates `1..total` to match 1-indexed phase numbers instead of `0..total-1`.
+
+All 14 tests in `lib/test_present.py` pass; `py_compile lib/*.py` is clean. Flipped T061 and T063 to `[x]` in tasks.md. The next unchecked task is T062 (CLI observability exposure in `wiggum`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 53 / 120  2026-08-10T15:25:04+04:00 =====
+Done. This iteration completed **T062** (plus its validation sibling **T064**), finishing Phase 7 (User Story 5).
+
+**What I changed:**
+
+1. **`wiggum` status command** — added an observability block that surfaces two SC-012 facts that were previously filtered out as `agent_*` noise: the active capability mode with its degradation reason (`observability: degraded — unknown schema version 9…`) and the latest tool activity (`latest tool: IPython …`). It scans the tail of the retained `events.jsonl`, so display and record stay in parity.
+
+2. **`lib/present.py` `plain_line()`** — `wiggum events` plain mode was dumping `agent_observability` as a raw `mode=structured` key list. It now renders the presenter's label (`observability structured` / `observability degraded — <reason>`) while keeping any other fields, so a reader of the event stream sees capability transitions in words, not a key dump.
+
+The `watch` card surface already handled this via `narrate()`, so no change was needed there.
+
+**Verification:** `lib/test_wiggum_cli.py` (7) and `lib/test_present.py` (14) both fully pass — 21 tests green, covering structured/fallback/degradation and the seven-phase (1/7…7/7) journey. `bash -n wiggum` and `py_compile lib/present.py` are clean. 19 unchecked tasks remain (Phase 8 onward).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 54 / 120  2026-08-10T15:30:49+04:00 =====

@@ -280,6 +280,32 @@ PYEOF
         [[ "$_otel" == "true" ]] && echo "    $(wiggum_telemetry_status_line otel "${_otelurl:-http://localhost:4318}" "$STATUS_EV")"
       fi
     fi
+    # Per-invocation observability state (T062 / SC-012): the active capability
+    # mode, its stable degradation reason, and the latest tool activity are
+    # explicit labeled fields — not left buried in the agent_* stream a reader
+    # would otherwise have to grep the source for.
+    if [[ -n "$STATUS_EV" && -f "$STATUS_EV" ]]; then
+      tail -n 400 "$STATUS_EV" 2>/dev/null | python3 -c '
+import sys, json
+obs = tool = None
+for line in sys.stdin:
+    try: o = json.loads(line)
+    except Exception: continue
+    e = o.get("event", "")
+    if e == "agent_observability":
+        obs = o
+    elif e == "agent_tool":
+        tool = o
+if obs is not None:
+    print("  observability: %s%s" % (
+        obs.get("mode", "?"),
+        (" — %s" % obs["reason"]) if obs.get("reason") else ""))
+if tool is not None:
+    summ = tool.get("summary") or tool.get("status") or ""
+    print("  latest tool: %s%s" % (
+        tool.get("tool", "?"), (" (%s)" % summ) if summ else ""))
+' 2>/dev/null || true
+    fi
     # last milestones from events (high-frequency agent_* noise filtered out)
     if [[ -n "$STATUS_EV" && -f "$STATUS_EV" ]]; then
       echo "  last events:"

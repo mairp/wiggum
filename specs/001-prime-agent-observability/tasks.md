@@ -169,10 +169,10 @@
 ### Implementation for User Story 5
 
 - [x] T060 [US5] Emit `agent_observability` at invocation start and on fallback/degradation with mode, stable reason, provider format, role, and supported signals in `proposer.sh`, `lib/critic.py`, and `lib/agent_stream.py`
-- [ ] T061 [US5] Render capability transitions, bounded parser diagnostics, sink failures, and reconciled terminal reasons in timeline, card, and plain modes in `lib/present.py`
-- [ ] T062 [US5] Expose per-invocation observability mode and degradation reason in `wiggum status`, `wiggum events`, and `wiggum watch` in `wiggum`
-- [ ] T063 [US5] Correct phase denominator calculation to use the validated executable phase count and retain it through run/card state in `lib/present.py`
-- [ ] T064 [US5] Validate structured, fallback, degradation, and seven-phase journeys using `lib/test_present.py` and `lib/test_wiggum_cli.py`
+- [x] T061 [US5] Render capability transitions, bounded parser diagnostics, sink failures, and reconciled terminal reasons in timeline, card, and plain modes in `lib/present.py`
+- [x] T062 [US5] Expose per-invocation observability mode and degradation reason in `wiggum status`, `wiggum events`, and `wiggum watch` in `wiggum`
+- [x] T063 [US5] Correct phase denominator calculation to use the validated executable phase count and retain it through run/card state in `lib/present.py`
+- [x] T064 [US5] Validate structured, fallback, degradation, and seven-phase journeys using `lib/test_present.py` and `lib/test_wiggum_cli.py`
 
 **Checkpoint**: Operators can distinguish capture and delivery states and see accurate progress without reading source code.
 

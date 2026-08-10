@@ -259,7 +259,9 @@ def narrate(ev, detail="tools", debug=False):
     if e == "phase_start":
         tot = ev.get("total", "?")
         title = ev.get("title", "")
-        last = int(tot) - 1 if str(tot).isdigit() else tot
+        # `total` is the validated executable phase count; phases are numbered
+        # contiguously 1..total, so the denominator is `total` (not total-1).
+        last = int(tot) if str(tot).isdigit() else tot
         return f"{stamp}  {BOLD}{BCYAN}◆ phase {p}/{last}{RESET}" \
                f"{(' ' + DIM + '—' + RESET + ' ' + BWHITE + title + RESET) if title else ''}"
     if e == "proposer_start":
@@ -331,6 +333,50 @@ def narrate(ev, detail="tools", debug=False):
         col = BRED if severity in ("error", "fatal") else BYELLOW
         return f"{stamp}  {col}! {ev.get('code','diagnostic')}{RESET} {DIM}—{RESET} " \
                f"{YELLOW}{ev.get('message','')}{RESET}"
+    if e == "agent_observability":
+        if lvl < 1:
+            return None
+        mode = ev.get("mode", "?")
+        # structured is the good state (green); raw-text is a fallback (yellow);
+        # degraded means the parser gave up on structure (red).
+        col = BGREEN if mode == "structured" else (BRED if mode == "degraded" else BYELLOW)
+        reason = ev.get("reason", "")
+        bits = []
+        if _present(ev.get("provider_format")):
+            bits.append(f"{CYAN}{ev['provider_format']}{RESET}")
+        signals = ev.get("signals") or ev.get("supported_signals")
+        if isinstance(signals, (list, tuple)):
+            signals = ", ".join(str(s) for s in signals)
+        if _present(signals):
+            bits.append(f"{DIM}signals: {signals}{RESET}")
+        if _present(ev.get("role")):
+            bits.append(f"{DIM}{ev['role']}{RESET}")
+        tail = (f" {DIM}—{RESET} {YELLOW}{reason}{RESET}") if reason else ""
+        extras = (f" {DIM}·{RESET} " + f" {DIM}·{RESET} ".join(bits)) if bits else ""
+        return f"{stamp}  {col}◈ observability {mode}{RESET}{tail}{extras}"
+    if e == "telemetry_delivery":
+        if lvl < 1:
+            return None
+        sink = ev.get("sink", "?")
+        status = str(ev.get("status", "?"))
+        failed = status not in ("accepted", "ok", "success")
+        # A failed configured sink is an operator-visible degradation; an accepted
+        # delivery is routine confirmation, so it lives at full detail only.
+        if not failed and lvl < 2:
+            return None
+        col = BRED if failed else BGREEN
+        glyph = "⚠" if failed else "✓"
+        bits = []
+        if _present(ev.get("http_status")):
+            bits.append(f"{DIM}HTTP {ev['http_status']}{RESET}")
+        if _present(ev.get("batch_id")):
+            bits.append(f"{DIM}{ev['batch_id']}{RESET}")
+        if _present(ev.get("event_count")):
+            bits.append(f"{DIM}{ev['event_count']} events{RESET}")
+        reason = ev.get("reason", "")
+        tail = (f" {DIM}—{RESET} {YELLOW}{reason}{RESET}") if reason else ""
+        extras = (f" {DIM}·{RESET} " + f" {DIM}·{RESET} ".join(bits)) if bits else ""
+        return f"{stamp}  {col}{glyph} sink {sink} {status}{RESET}{tail}{extras}"
     if e == "agent_result":
         if lvl < 1:
             return None
@@ -403,6 +449,21 @@ def narrate(ev, detail="tools", debug=False):
 def plain_line(ev):
     ts = hhmmss(ev)
     e = ev.get("event", "")
+    # Capability transitions carry the presenter's semantics, not just raw keys:
+    # a reader of `wiggum events` sees "observability structured" / "observability
+    # degraded — <reason>" rather than a bare mode= dump (T061/T062, SC-012).
+    if e == "agent_observability":
+        mode = ev.get("mode", "?")
+        reason = ev.get("reason", "")
+        tail = "  observability %s" % mode
+        if reason:
+            tail += " — %s" % reason
+        extras = " ".join("%s=%s" % (k, v) for k, v in ev.items()
+                          if k not in ("time", "ts", "event", "task", "backend",
+                                       "run_id", "mode", "reason"))
+        if extras:
+            tail += "  " + extras
+        return "%s%s" % (ts, tail)
     rest = " ".join("%s=%s" % (k, v) for k, v in ev.items()
                     if k not in ("time", "ts", "event", "task", "backend", "run_id"))
     return "%s  %-18s %s" % (ts, e, rest)
@@ -617,7 +678,9 @@ class State:
         total = self.phases_total
         bar = ""
         if str(total).isdigit():
-            for i in range(int(total)):
+            # Phases are numbered contiguously 1..total; the trail has one dot
+            # per executable phase and the denominator is `total` (not total-1).
+            for i in range(1, int(total) + 1):
                 mark = self.last_verdict.get(str(i))
                 if mark:
                     bar += mark + " "
@@ -626,7 +689,7 @@ class State:
                 else:
                     bar += f"{DIM}·{RESET} "
         cur = self.cur_phase if self.cur_phase is not None else "?"
-        head = f"{BOLD}{cur}{RESET}" + (f"/{int(total)-1}" if str(total).isdigit() else "")
+        head = f"{BOLD}{cur}{RESET}" + (f"/{int(total)}" if str(total).isdigit() else "")
         trail = f"  {bar.strip()}" if bar else ""
         lines.append(f"  phase {head}{trail}  {DIM}{self.cur_title[:40]}{RESET}")
         idle = int(time.time() - self.last_event_epoch)
