@@ -1194,3 +1194,43 @@ GATE FAIL: 17 task(s) still unchecked in tasks.md
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 56 / 120  2026-08-10T15:38:52+04:00 =====
+Completed T067 — the first unchecked task.
+
+**What I did:** Extended `lib/test_telemetry_parity.py` with five golden-baseline tests that pin the exact set of fields the existing Claude/Bebop Grafana dashboards read (`tool_use` and `api_request` stream fields, plus lifecycle `gate` event fields) and assert every one survives to **each** sink independently — Loki and OTLP.
+
+**Why this was needed:** The file already had `loki ⊆ otel` subset assertions, but those pass even if a field regresses out of *both* shippers symmetrically. The new tests close that gap: `test_claude_stream_fields_not_dropped_by_{loki,otel}`, `test_claude_lifecycle_event_fields_not_dropped_by_{loki,otel}`, and `test_claude_stream_values_are_semantically_equal_across_sinks` (which also guards against a sink silently rewriting a value, not just dropping it).
+
+**Verification:**
+- `python3 -m pytest -q lib/test_telemetry_parity.py` → 24 passed (19 prior + 5 new).
+- Confirmed the new baseline test actually fails on a simulated regression (dropped `cost_usd` from the Loki `api_request` line raised the expected assertion), so it's not passing vacuously.
+- `py_compile` clean.
+
+Checkbox T067 flipped to `- [x]`. The next unchecked task is T068 (orchestrator regression coverage), a fresh session's work.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 16 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 57 / 120  2026-08-10T15:42:10+04:00 =====
+I completed **T068** (the first unchecked task): orchestrator lifecycle regression coverage for US6 "Preserve Existing Backend Behavior."
+
+## What I did
+
+Added four regression tests to `lib/test_orchestrator_verification.py`, each driving the **real** `orchestrator.sh` (with real `proposer.sh` + `critic.py`) end-to-end and asserting against the run's authoritative `events.jsonl` and documented exit codes:
+
+1. **Lifecycle ordering + provider-neutral terminal** — a two-phase happy-path run emits `run_start` first, `phase_start → proposer_start → phase_done` per phase in order, and exactly one terminal `run_end` with `outcome=all_approved` from the Prime backend label.
+2. **Phase advancement** — a pre-seeded `GATE1-APPROVED` makes the run resume at phase 2 rather than restart from phase 1.
+3. **Stop/resume** — `stop.flag` halts cleanly (exit 6, reason `stop_flag`), consumes the flag, approves nothing, and a rerun resumes to completion.
+4. **Critic rejection** — an always-REJECT critic records `reject` + `attempt_archived` and halts at `MAX_REJECTS` (exit 2, reason `max_rejects`) with no `GATE1-APPROVED` marker.
+
+## Key design choice
+
+The hard part was running critic rejection and lifecycle flows **hermetically** — no live LLM. I used a single fake Prime Agent injected via `WIGGUM_PRIME_AGENT_BIN` that serves both roles: `proposer.sh` and `critic.py` both shell out to it. The critic turn is distinguished by its `--no-tools` isolation flag and echoes the per-call nonce back; the proposer writes the exact evidence path the prompt names. Running with `WIGGUM_AGENT_STREAM=false` and `WIGGUM_GIT_COMMITS=off` keeps it on the raw-text path and off the outer repo. This is also what gives the tests their **provider-neutral** value: they exercise the Prime path, not Claude/Bebop.
+
+## Verification
+
+`python3 -m pytest -q lib/test_orchestrator_verification.py` → **5 passed** (1 pre-existing + 4 new), py_compile clean. I flipped T068's checkbox to `- [x]`. The next unchecked task is T069 (an implementation task in `lib/agent_stream.py`), left for the next iteration.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 15 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 58 / 120  2026-08-10T16:06:37+04:00 =====

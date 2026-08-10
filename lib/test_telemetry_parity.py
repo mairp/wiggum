@@ -190,6 +190,82 @@ def test_event_field_parity_loki_subset_of_otel():
     assert not missing, "OTEL dropped lifecycle fields present in Loki: %r" % sorted(missing)
 
 
+# ── T067: Claude/Bebop golden field baseline (no silent drop in EITHER sink) ──
+# The subset assertions above only guarantee loki ⊆ otel; a regression that dropped
+# a field from BOTH shippers would still pass them. These pin the exact set of
+# fields the existing Claude/Bebop Grafana dashboards read, and assert every one of
+# them survives to EACH configured sink independently — so a symmetric drop fails.
+# The baselines mirror the fields emitted by ralph_{loki,otel}_ship.run_stream /
+# run_event for the shared STREAM_FIXTURE / LIFECYCLE inputs.
+CLAUDE_STREAM_BASELINE = {
+    "tool_use": {"run_id", "iter", "tool", "model"},
+    "api_request": {
+        "run_id", "iter", "model", "is_error", "subtype", "cost_usd",
+        "duration_ms", "duration_api_ms", "num_turns", "input_tokens",
+        "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+        "result_preview",
+    },
+}
+CLAUDE_EVENT_BASELINE = {"gate": {"result", "phase", "attempt"}}
+
+
+def _keys_by_event(triples):
+    out = {}
+    for event, key, _v in triples:
+        out.setdefault(event, set()).add(key)
+    return out
+
+
+def _assert_baseline(keys_by_event, baseline, sink):
+    for event, required in baseline.items():
+        got = keys_by_event.get(event, set())
+        missing = required - got
+        assert not missing, "%s dropped Claude/Bebop %s fields: %r" % (
+            sink, event, sorted(missing))
+
+
+def test_claude_stream_fields_not_dropped_by_loki():
+    with CaptureServer() as ls:
+        _run_loki_stream(ls.url)
+        _assert_baseline(_keys_by_event(_loki_triples(ls)), CLAUDE_STREAM_BASELINE, "loki")
+
+
+def test_claude_stream_fields_not_dropped_by_otel():
+    with CaptureServer() as os_:
+        _run_otel_stream(os_.url)
+        _assert_baseline(_keys_by_event(_otel_triples(os_)), CLAUDE_STREAM_BASELINE, "otel")
+
+
+def test_claude_lifecycle_event_fields_not_dropped_by_loki():
+    with CaptureServer() as ls:
+        _run_loki_event(ls.url)
+        _assert_baseline(_keys_by_event(_loki_triples(ls)), CLAUDE_EVENT_BASELINE, "loki")
+
+
+def test_claude_lifecycle_event_fields_not_dropped_by_otel():
+    with CaptureServer() as os_:
+        _run_otel_event(os_.url)
+        _assert_baseline(_keys_by_event(_otel_triples(os_)), CLAUDE_EVENT_BASELINE, "otel")
+
+
+def test_claude_stream_values_are_semantically_equal_across_sinks():
+    # Same source stream through both sinks → identical (event, key, value) triples
+    # for every field the dashboards read. Guards against a sink silently rewriting
+    # a Claude/Bebop value (not just its presence).
+    with CaptureServer() as ls, CaptureServer() as os_:
+        _run_loki_stream(ls.url)
+        _run_otel_stream(os_.url)
+        loki_triples = _loki_triples(ls)
+        otel_triples = _otel_triples(os_)
+    for event, keys in CLAUDE_STREAM_BASELINE.items():
+        for key in keys:
+            lv = {v for (e, k, v) in loki_triples if e == event and k == key}
+            ov = {v for (e, k, v) in otel_triples if e == event and k == key}
+            assert lv, "loki missing %s.%s" % (event, key)
+            assert lv == ov, "sink value mismatch %s.%s: loki=%r otel=%r" % (
+                event, key, sorted(lv), sorted(ov))
+
+
 def test_identity_labels_preserved():
     # job/task/backend identity: Loki labels -> OTEL resource attrs (task/backend)
     # plus service.name. Confirm the OTEL resource carries task+backend.
