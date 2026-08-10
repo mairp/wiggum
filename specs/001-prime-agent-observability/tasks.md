@@ -136,8 +136,8 @@
 
 ### Tests for User Story 4
 
-- [ ] T047 [P] [US4] Add failing artifact layout tests for sanitized identity paths, atomic metadata/result files, unique multi-phase/attempt/iteration directories, collision refusal, and retention ordering in `lib/test_invocation_artifacts.py`
-- [ ] T048 [P] [US4] Extend Prime critic tests for JSON-mode stock/fleet argv, no-tool/no-skill/no-context controls, final visible-response extraction, usage/duration/error capture, and text fallback in `lib/test_prime_backend.py`
+- [x] T047 [P] [US4] Add failing artifact layout tests for sanitized identity paths, atomic metadata/result files, unique multi-phase/attempt/iteration directories, collision refusal, and retention ordering in `lib/test_invocation_artifacts.py`
+- [x] T048 [P] [US4] Extend Prime critic tests for JSON-mode stock/fleet argv, no-tool/no-skill/no-context controls, final visible-response extraction, usage/duration/error capture, and text fallback in `lib/test_prime_backend.py`
 - [ ] T049 [P] [US4] Extend critic regressions for unchanged nonce binding, strict verdict tokens, malformed verdict fail-safe, grounding, and absence of thinking/tool content in verdict input in `lib/test_critic.py`
 - [ ] T050 [P] [US4] Add failing raw-debug-disabled-by-default, redacted artifact, payload cap, and raw-before-metadata retention-expiry tests in `lib/test_observability_policy.py`
 

@@ -155,3 +155,120 @@ def test_prime_proposer_explicit_text_fallback_preserves_stdin(tmp_path):
     assert stdin == "standing prompt"
     assert not any("invocation_id" in record for record in records)
     assert metadata == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  T048 [US4] — the JSON-mode Prime critic (call_prime_critic).
+#
+#  These target the structured critic surface implemented by T053 in critic.py:
+#  standard/fleet launch in `--mode json` with every critic restriction retained,
+#  reconstruction of the final assistant-visible response only (never adapter
+#  chrome, tool, or thinking content), and capture of model/provider/usage/
+#  duration/diagnostics as metadata that cannot alter the verdict. They are red
+#  until call_prime_critic exists.
+# ─────────────────────────────────────────────────────────────────────────────
+NONCE = "NONCE1234"
+
+_APPROVED_TEXT = "Looks good.\nVERDICT %s: APPROVED" % NONCE
+
+_APPROVED_STREAM = [
+    '{"type":"session","version":3,"id":"critic-session","cwd":"/tmp",'
+    '"provider":"anthropic","model":"claude-x"}',
+    '{"type":"message_start","message":{"role":"assistant","id":"m1",'
+    '"model":"claude-x","provider":"anthropic"}}',
+    '{"type":"message_update","messageId":"m1","contentIndex":0,'
+    '"delta":{"type":"text_delta","text":"Looks good.\\n"}}',
+    '{"type":"message_update","messageId":"m1","contentIndex":0,'
+    '"delta":{"type":"text_delta","text":"VERDICT %s: APPROVED"}}' % NONCE,
+    '{"type":"message_end","message":{"role":"assistant","id":"m1",'
+    '"content":[{"type":"text","text":"%s"}]}}' % _APPROVED_TEXT.replace("\n", "\\n"),
+    '{"type":"agent_end","status":"success","stopReason":"end_turn",'
+    '"usage":{"inputTokens":100,"outputTokens":20,"totalTokens":120}}',
+]
+
+_AUTH_ERROR_STREAM = [
+    '{"type":"session","version":3,"id":"critic-session","cwd":"/tmp"}',
+    '{"type":"error","error":{"message":"Provider authentication failed"},'
+    '"stopReason":"error"}',
+    '{"type":"agent_end","status":"error","stopReason":"error"}',
+]
+
+
+def _json_completed(lines):
+    # Prime exits 0 even when the provider itself errored — the adapter, not the
+    # exit code, is authoritative for provider state.
+    return mock.Mock(returncode=0, stdout="\n".join(lines) + "\n", stderr="")
+
+
+def test_prime_critic_stock_uses_json_mode_and_keeps_all_restrictions():
+    env = {"WIGGUM_PRIME_AGENT_BIN": "/bin/prime-agent"}
+    with mock.patch.dict(os.environ, env, clear=False), \
+         mock.patch("subprocess.run", return_value=_json_completed(_APPROVED_STREAM)) as run:
+        result = critic.call_prime_critic("large prompt", None, 42, "/tmp/work tree")
+    assert run.call_args.args[0] == [
+        "/bin/prime-agent", "-p", "--mode", "json", "--no-session",
+        "--no-tools", "--no-skills", "--no-context-files", "--cwd", "/tmp/work tree",
+    ]
+    assert run.call_args.kwargs["input"] == "large prompt"
+    assert run.call_args.kwargs["timeout"] == 42
+    assert result.mode == "json"
+
+
+def test_prime_critic_fleet_variant_uses_json_mode_launcher():
+    env = {"WIGGUM_PRIME_FLEET_BIN": "/bin/prime"}
+    with mock.patch.dict(os.environ, env, clear=False), \
+         mock.patch("subprocess.run", return_value=_json_completed(_APPROVED_STREAM)) as run:
+        result = critic.call_prime_critic("prompt", "judge", 9, "/tmp/wt")
+    assert run.call_args.args[0] == [
+        "/bin/prime", "judge", "-p", "--mode", "json", "--no-session",
+        "--no-tools", "--no-skills", "--no-context-files", "--cwd", "/tmp/wt",
+    ]
+    assert result.mode == "json"
+
+
+def test_prime_critic_reconstructs_final_visible_response_for_verdict():
+    with mock.patch("subprocess.run", return_value=_json_completed(_APPROVED_STREAM)):
+        result = critic.call_prime_critic("prompt", None, 9, "/tmp/wt")
+    # The verdict is parsed from the reconstructed response exactly as in text mode.
+    assert critic.parse_verdict(result.response, NONCE) == ("APPROVED", "ok")
+    assert result.response == _APPROVED_TEXT
+    # Reconstruction is assistant-visible text ONLY — never the adapter's display
+    # chrome (init/tool/diagnostic prefixes). A naive join of the presenter output
+    # would leak these markers into verdict input.
+    for chrome in ("· init", "→ ", "← ", "! ", "prime-v3"):
+        assert chrome not in result.response
+
+
+def test_prime_critic_captures_usage_model_provider_and_duration():
+    with mock.patch("subprocess.run", return_value=_json_completed(_APPROVED_STREAM)):
+        result = critic.call_prime_critic("prompt", None, 9, "/tmp/wt")
+    assert result.status == "success"
+    assert result.model == "claude-x"
+    assert result.provider == "anthropic"
+    assert result.usage.get("output_tokens") == 20
+    assert result.usage.get("total_tokens") == 120
+    assert isinstance(result.duration_ms, int) and result.duration_ms >= 0
+
+
+def test_prime_critic_detects_provider_error_despite_zero_exit():
+    with mock.patch("subprocess.run", return_value=_json_completed(_AUTH_ERROR_STREAM)):
+        result = critic.call_prime_critic("prompt", None, 9, "/tmp/wt")
+    # Prime exited 0, but the provider error MUST surface as the terminal status.
+    assert result.status == "error"
+    assert result.reason_code == "provider_auth"
+    assert result.diagnostics
+    # No assistant-visible response was produced, so verdict parsing fails safe.
+    assert critic.parse_verdict(result.response or "", NONCE)[0] == "MALFORMED"
+
+
+def test_prime_critic_text_fallback_preserves_response_and_argv():
+    env = {"WIGGUM_PRIME_AGENT_BIN": "/bin/prime-agent", "WIGGUM_AGENT_STREAM": "false"}
+    completed = mock.Mock(returncode=0, stdout="VERDICT %s: APPROVED\n" % NONCE, stderr="")
+    with mock.patch.dict(os.environ, env, clear=False), \
+         mock.patch("subprocess.run", return_value=completed) as run:
+        result = critic.call_prime_critic("prompt", None, 9, "/tmp/wt")
+    assert "--mode" in run.call_args.args[0]
+    assert run.call_args.args[0][run.call_args.args[0].index("--mode") + 1] == "text"
+    assert result.mode == "raw-text"
+    assert result.response == "VERDICT %s: APPROVED\n" % NONCE
+    assert critic.parse_verdict(result.response, NONCE) == ("APPROVED", "ok")
