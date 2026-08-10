@@ -56,10 +56,16 @@ OPTIONS
 Local agent-stream capture (tool calls, messages, cost -> events.jsonl) is ON by
 default for claude/bebop backends so the live view can narrate the agent working;
 Prime Agent uses schema-v3 JSON through agent_stream when local capture or telemetry
-is enabled; Codex currently uses raw text output. Set WIGGUM_AGENT_STREAM=false
-(without -j) to select Prime's explicit text fallback and restore raw output.
+is enabled; Codex currently uses raw text output. Each invocation records a
+capability mode: `structured` (parsed agent stream), `raw-text` (explicit fallback,
+no structure), or `degraded` (structured expected but the schema was rejected — the
+result carries the stable reason). Set WIGGUM_AGENT_STREAM=false (without -j) to
+select Prime's explicit `raw-text` fallback and restore raw output.
 -j only controls
 the telemetry add-on (Loki when --loki-url is set, OTEL when --otel-url is set).
+Telemetry is local-first: a sink ships only when its URL flag is passed, and a
+failed configured sink is surfaced as an operator-visible degradation, never
+silently dropped.
 
 EXIT
   0  evidence file appeared      4  max-iter reached without evidence

@@ -5,7 +5,11 @@
 #                                        `wiggum -w DIR …` (leading flag) also starts.
 #                                        Pass --help after `run` for all launch flags.
 #   wiggum status    [-w DIR] [--feature S] [--all]  one-screen state (run state,
-#                                        phases, files). --all lists every feature.
+#                                        phases, files). Also shows the active capture
+#                                        mode (structured/raw-text/degraded + reason)
+#                                        and telemetry receiver state (configured/
+#                                        reachable/request-accepted/query-verified).
+#                                        --all lists every feature.
 #   wiggum watch     [-w DIR]            live status card (mini-TUI; Ctrl-C detaches)
 #   wiggum tail      [-w DIR] [--feature S]  tail -f the orchestrator run.log
 #   wiggum events    [-w DIR] [--feature S] [-f] [--json]  the raw event stream:

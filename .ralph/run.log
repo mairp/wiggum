@@ -1400,3 +1400,35 @@ GATE FAIL: 5 task(s) still unchecked in tasks.md
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 68 / 120  2026-08-10T16:41:55+04:00 =====
+All 7 R-sections plus the header have grounded status lines (8 total). The tree is consistent.
+
+## Done — T079
+
+Updated `roadmap/prime-agent-observability.md` so each remediation gate's status reflects only what evidence actually proves, with explicit caveats on everything unverified. I first confirmed the grounding: all 133 automated tests across the Prime, stream, and telemetry suites pass, but the real-run acceptance tasks (T081 canary/oversized matrix, T082 dual-role live runs against real receivers) are still unchecked — so no real-run evidence exists yet.
+
+The evidence-grounded status I recorded:
+- **R1, R2, R4 — Met by automated evidence.** Fixtures/contract, stream adapter, and failure-accounting exit criteria are fully satisfied by green tests.
+- **R3, R5 — Implemented, automated evidence green, real-run/real-receiver confirmation pending.** Live full-detail rendering (R3) and Loki/OTLP query-by-run-id (R5) are covered in test but their exit criteria explicitly require a live run/healthy receivers not yet performed (T081/T082).
+- **R6 — Met for structure and safety; live canary matrix pending.** Retention/redaction covered by tests; end-to-end secret/oversized exclusion not yet demonstrated outside unit tests (T081).
+- **R7 — Automated half met, real-run half pending.** Presenter fix, mode reporting, integration suite, and docs done (T073–T078; T080 still open); the two trusted dual-role runs remain (T082).
+
+I also rewrote the header **Status** line and the **Current operational caveat** to say parity is implemented and test-verified but not yet confirmed by a real dual-role run against healthy receivers, and kept the existing note that `--telemetry`/`--otel` proves export config, not receiver availability. Checked T079 off in `tasks.md`. No code changed, so no test run applies to this task; the pre-existing suites I ran as grounding were all green.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 4 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 69 / 120  2026-08-10T16:45:21+04:00 =====
+Done — completed **T080**, the first unchecked task.
+
+Updated the CLI help across all three front-door scripts to accurately describe the observability features, using the vocabulary the code actually uses:
+
+- **`proposer.sh`** — spelled out the three capability modes (`structured` / `raw-text` / `degraded` + stable reason), clarified the `WIGGUM_AGENT_STREAM=false` Prime raw-text fallback, and noted telemetry is local-first with failed sinks surfaced as degradations.
+- **`orchestrator.sh`** — expanded `--debug` to state it retains per-pass raw prompt/response under `<feature-dir>/debug/invocations/...` for both proposer and critic; documented the four telemetry receiver states on `--telemetry`; and added a note on capture modes + the `WIGGUM_AGENT_STREAM` fallback.
+- **`wiggum`** — extended the `status` verb description to say it surfaces the active capture mode and the telemetry receiver state.
+
+Verified: `bash -n` passes on all four shell files, and each `--help` renders correctly. Since T080 is documentation-only (no associated test file), I checked its box in `tasks.md`. Three tasks remain (T081–T083), all real-run/verification tasks.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 3 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 70 / 120  2026-08-10T16:48:12+04:00 =====

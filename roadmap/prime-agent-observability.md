@@ -1,6 +1,6 @@
 # Prime Agent Observability Roadmap
 
-**Status:** Current findings verified; remediation planned  
+**Status:** Remediation implemented; automated evidence green (133 tests across the Prime, stream, and telemetry suites). Real-run acceptance (live full-detail Prime run, canary/oversized matrix, and dual-role runs query-verified against real Loki/OTLP receivers) is still pending — see the per-gate status notes and the operational caveat below.  
 **Reviewed repository:** `/root/wiggum` at `4d58688`  
 **Reviewed run:** `/root/lisa/.wiggum/features/001-prime-agent-sdk/runs/20260810-054642-1886073`
 
@@ -85,6 +85,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 
 **Exit criteria:** fixtures cover text, IPython tool use, successful result, model error, nonzero exit, and truncated JSON.
 
+**Status:** Met by automated evidence. Sanitized fixtures and contract tests are in place and green (`lib/test_prime_fixtures.py`); all six scenarios are covered.
+
 ### R2 — Implement the Prime stream adapter
 
 - Add a Prime-aware parser or make `agent_stream.py` provider-aware.
@@ -93,6 +95,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 - Preserve malformed/non-JSON diagnostics without corrupting JSONL.
 
 **Exit criteria:** fixture tests produce stable `agent_*` events and never leak unbounded tool input or secrets.
+
+**Status:** Met by automated evidence. The provider-aware adapter normalizes init/text/tools/targets/usage/duration/result and coalesces token fragments; fixture tests are green (`lib/test_prime_stream.py`, `lib/test_prime_stream_tools.py`, `lib/test_agent_stream.py`) and assert bounded tool input with no secret leakage.
 
 ### R3 — Route Prime through local live observability
 
@@ -103,6 +107,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 
 **Exit criteria:** `WIGGUM_AGENT_STREAM=true WIGGUM_LIVE_DETAIL=full` shows Prime model, text, tool activity, and pass result during a live run.
 
+**Status:** Implemented; automated evidence green, real-run confirmation pending. `--mode json` selection, bare/`prime:<variant>` routing, explicit text fallback, and per-backend streaming capability are implemented and covered by pipeline tests (`lib/test_prime_pipeline.py`, `lib/test_prime_backend.py`). The live full-detail Prime run that the exit criterion names is not yet recorded (T082); until that run is captured and verified, treat live rendering parity as demonstrated in test only.
+
 ### R4 — Correct pass status and failure accounting
 
 - Preserve the actual producer exit status through parser pipelines.
@@ -111,6 +117,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 - Ensure timeout, missing executable, authentication failure, and malformed output trip the configured consecutive-error breaker.
 
 **Exit criteria:** each failure scenario stops predictably and emits a visible, durable reason.
+
+**Status:** Met by automated evidence. Producer exit status is preserved through the parser pipeline, a provider-neutral terminal result is emitted on early stream end, error lookup is scoped to the current run/phase/attempt/iteration, and timeout/missing-executable/auth-failure/malformed-output each trip the consecutive-error breaker; covered and green (`lib/test_prime_error_breaker.py`, `lib/test_agent_stream_result.py`).
 
 ### R5 — Complete Loki/OTLP parity
 
@@ -121,6 +129,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 
 **Exit criteria:** queries by run ID return matching Prime tool/text/result events in both supported sinks, and local JSONL remains the authoritative fallback.
 
+**Status:** Implemented; automated evidence green, real-receiver confirmation pending. Loki-only, OTLP-only, and dual-sink delivery, non-fatal sink-failure recording, run/phase/attempt/iteration correlation, and provider-neutral dashboards are implemented and covered (`lib/test_telemetry_delivery.py`, `lib/test_telemetry_parity.py`). The exit criterion's query-by-run-id against real healthy Loki and OTLP receivers is not yet performed (T081/T082); receiver acknowledgement and end-to-end parity remain unverified against live sinks. Passing `--telemetry`/`--otel` proves export was configured, not receiver availability.
+
 ### R6 — Improve critic and debug retention
 
 - Store proposer prompts and raw/normalized streams per phase, attempt, and iteration.
@@ -130,6 +140,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 
 **Exit criteria:** every invocation can be reconstructed without filename collisions, while secrets and excessively large payloads are excluded.
 
+**Status:** Met by automated evidence for structure and safety; live canary matrix pending. Per-phase/attempt/iteration prompt and raw/normalized stream retention, critic request/response/usage/duration/failure capture, JSON-mode critic handling with tools disabled and verdict nonce safety, and configurable redaction/retention are implemented and covered (`lib/test_prime_evidence.py`). The end-to-end canary-secret and oversized-payload matrix across live output, JSONL, artifacts, Loki, and OTLP is not yet executed (T081); real-capture exclusion of secrets and oversized payloads remains to be demonstrated outside unit tests.
+
 ### R7 — Presenter, documentation, and regression tests
 
 - Fix the `phase N/(total-1)` display defect.
@@ -138,6 +150,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 - Update CLI help, README, configuration, telemetry, and on-disk-contract documentation.
 
 **Exit criteria:** automated tests and a real dual-role Prime run demonstrate parity with the Claude proposer baseline.
+
+**Status:** Automated half met; real-run half pending. The presenter phase-display fix, structured/raw-text/degraded mode reporting, and the integration suite (bare/fleet Prime, malformed streams, timeout/nonzero exit, telemetry combinations, live rendering, artifact naming) are implemented and green, and CLI/README/Configuration/Telemetry/On-Disk-Contract docs are updated (T073–T078; T080 pending for CLI help). The two trusted real dual-role Prime runs — one stock, one named-fleet — with local/Loki/OTLP query verification are not yet executed (T082); parity with the Claude baseline is demonstrated in test but not yet in a real run.
 
 ## Validation matrix
 
@@ -151,8 +165,8 @@ Prime frequently exposes operations through the `ipython` tool. The adapter must
 
 ## Current operational caveat
 
-Until R1–R7 are implemented, describe Prime support as:
+R1–R7 are implemented and covered by automated tests, but the real-run acceptance gates (a live full-detail Prime run, the canary/oversized-payload matrix, and stock and named-fleet dual-role runs query-verified against real Loki/OTLP receivers) are not yet recorded. Until those runs are captured and verified, describe Prime support as:
 
-> Prime execution is supported. Live and telemetry output provide Wiggum lifecycle events and final text, but not full Prime proposer/critic tool, message, token, or usage streams.
+> Prime execution is supported with structured proposer/critic observability implemented and verified by the automated suite. Full parity — live rendering, telemetry query-by-run-id, and secret/oversized-payload exclusion — is demonstrated in test but not yet confirmed by a real dual-role run against healthy receivers.
 
 Passing `--telemetry` or `--otel` proves export was configured; it does not by itself prove receiver availability or complete agent-level capture.

@@ -72,18 +72,30 @@ OPTIONS
   --generate-tests DIR  Safely scaffold tests below this absolute directory.
                         Existing changed artifacts are never overwritten. Supplying
                         this flag enables plan mode. Also WIGGUM_GENERATE_TESTS.
-  --telemetry           Ship the event stream to Loki (off by default).
+  --telemetry           Ship the event stream to Loki (off by default). Receiver
+                        status resolves to one of four states — configured /
+                        reachable / request-accepted / query-verified — surfaced by
+                        `wiggum status`, never a collapsed "telemetry: true".
   --loki-url URL        Loki base URL (with --telemetry; default :3100).
   --otel                Ship the event stream to an OTLP collector (off by default).
-                        Independent of --telemetry; use both to dual-ship.
+                        Independent of --telemetry; use both to dual-ship. A failed
+                        configured sink is reported as a degradation, not dropped.
   --otel-url URL        OTLP/HTTP base URL (with --otel; default :4318).
   --live                Render a clean, scrolling timeline inline in THIS terminal
                         (like a coding agent working). Raw proposer/critic output
                         goes to the run.log only. No second terminal / `wiggum watch`
                         needed. Auto-on when stdout is a TTY; --no-live to force off.
   --no-live             Force the raw tee'd output even on a TTY (old behavior).
-  --debug               Verbose: dump prompts, raw req/resp, phase transitions.
+  --debug               Verbose: dump phase transitions and retain each pass's raw
+                        prompt/response alongside its metadata/result/events under
+                        <feature-dir>/debug/invocations/... for both proposer and
+                        critic (off by default; retention is opt-in).
   -h, --help            Show this help.
+
+Each agent invocation records a capability mode — structured / raw-text / degraded
+— with a stable reason on degradation; `wiggum status` shows the active mode and the
+latest tool activity. Set WIGGUM_AGENT_STREAM=false to force Prime's raw-text
+fallback (no local structure).
 
 Config precedence: built-in defaults < .env (in repo root) < these flags.
 See .env.example for every knob and the README for the file contract.
