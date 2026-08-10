@@ -1050,3 +1050,46 @@ GATE FAIL: 27 task(s) still unchecked in tasks.md
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 48 / 120  2026-08-10T14:31:29+04:00 =====
+Done. This iteration completed **T057** — the test-first task for User Story 5's presenter coverage.
+
+**What I did:** Added six failing/asserting tests to `lib/test_present.py` covering the SC-012 facts:
+- `agent_observability` mode rendering for structured / raw-text / degraded, with reasons and provider format
+- mode-change transitions keeping each reason visible
+- bounded malformed-input diagnostics (code + message)
+- `telemetry_delivery` sink-failure labeling (sink name, status, HTTP code, reason)
+- reconciled terminal conflict reasons
+- a consolidated SC-012 check asserting all five facts (mode, current phase, latest tool activity, final pass outcome, sink failure) appear as explicit labeled fields
+
+**Result:** 4 of the new tests fail as intended (the renderer currently returns `None` for `agent_observability` and `telemetry_delivery` events — that rendering is T061's job), while the 2 tests hitting already-rendered facts pass, and all 6 pre-existing tests remain green. No existing tests were weakened.
+
+I left T059 (seven-phase numerator/denominator regression) for its own iteration — it's a `[P]` sibling on the same file but requires changing the phase-count display semantics (`p/total-1` → `7 of 7`), a distinct non-trivial concern.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 26 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 49 / 120  2026-08-10T14:35:26+04:00 =====
+Done. This iteration completed **T058** — the test-first task adding failing CLI observability tests.
+
+## What I did
+
+Created `lib/test_wiggum_cli.py`, which drives the real `wiggum` bash front door (`status`, `events`, `watch`) against a sanitized, self-contained fixture workdir and asserts the US5 / SC-012 observability contract:
+
+- **Capability labels & degradation discovery** — `status`, `events`, and `watch` must surface the per-invocation observability mode (`structured` → `degraded`) and the stable degradation reason (`unknown schema version 9 …`).
+- **Configured-vs-accepted wording** — telemetry state is never collapsed to `telemetry: true`; loki acceptance is proven from the retained delivery record.
+- **All five SC-012 facts** — mode, current phase, latest tool activity, final pass outcome, and configured sink failure — asserted in *both* the displayed output and the retained `events.jsonl`.
+
+The fixture is host-independent: fixed timestamps, no `/root/` paths, no real credentials or provider payloads, and the otel URL points at the discard port so the live probe can't spuriously flip its state.
+
+## Result (correct test-first behavior)
+
+`python3 -m pytest -q lib/test_wiggum_cli.py` → **5 failed, 2 passed**.
+
+- The 5 failures are the display-side gaps that the T061/T062 implementation tasks will close: `wiggum status` currently filters `agent_*` events out of its "last events" block, so observability mode, degradation reason, and latest tool activity never reach the display; `events`/`watch` don't yet render the presenter's capability labels.
+- The 2 passing tests confirm the retained `events.jsonl` already carries the labeled fields — establishing the display/record parity target.
+
+Flipped T058 to `[x]` in `tasks.md`. Left T059 (the `[P]` sibling in `test_present.py`) for its own pass since it touches a different file. New file passes `py_compile`; tree is consistent.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 25 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 50 / 120  2026-08-10T14:47:53+04:00 =====

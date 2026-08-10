@@ -162,8 +162,8 @@
 
 ### Tests for User Story 5
 
-- [ ] T057 [P] [US5] Add failing presenter snapshots for structured/raw-text/degraded capability, reason changes, bounded malformed diagnostics, sink failures, and terminal conflict reasons, asserting explicit labels for all five SC-012 facts in `lib/test_present.py`
-- [ ] T058 [P] [US5] Add failing CLI status/events/watch tests for capability labels, configured-versus-accepted telemetry wording, degraded invocation discovery, and all five SC-012 facts in both display output and retained records in `lib/test_wiggum_cli.py`
+- [x] T057 [P] [US5] Add failing presenter snapshots for structured/raw-text/degraded capability, reason changes, bounded malformed diagnostics, sink failures, and terminal conflict reasons, asserting explicit labels for all five SC-012 facts in `lib/test_present.py`
+- [x] T058 [P] [US5] Add failing CLI status/events/watch tests for capability labels, configured-versus-accepted telemetry wording, degraded invocation discovery, and all five SC-012 facts in both display output and retained records in `lib/test_wiggum_cli.py`
 - [ ] T059 [P] [US5] Add a seven-phase numerator/denominator regression fixture and assertions for phases 1 through 7 in `lib/test_present.py`
 
 ### Implementation for User Story 5

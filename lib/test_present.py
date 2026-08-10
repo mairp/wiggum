@@ -90,6 +90,112 @@ def test_terminal_result_renders_normalized_fields_and_legacy_aliases():
     assert "1m05s" in line and "4 turns" in line and "reconciled" in line
 
 
+def test_observability_mode_renders_structured_raw_text_and_degraded_labels():
+    structured = rendered({
+        "event": "agent_observability", "mode": "structured",
+        "reason": "Prime JSON schema v3 selected", "provider_format": "prime-v3",
+        "signals": ["init", "text", "tool", "evidence", "result"],
+    })
+    raw_text = rendered({
+        "event": "agent_observability", "mode": "raw-text",
+        "reason": "structured schema unavailable — parsing plain output",
+        "provider_format": None, "signals": ["text", "result"],
+    })
+    degraded = rendered({
+        "event": "agent_observability", "mode": "degraded",
+        "reason": "unknown schema version 9 — degraded parsing",
+        "provider_format": None, "signals": ["result"],
+    })
+    assert "observability structured" in structured
+    assert "Prime JSON schema v3 selected" in structured
+    assert "prime-v3" in structured
+    assert "tool" in structured and "evidence" in structured
+    assert "observability raw-text" in raw_text
+    assert "structured schema unavailable" in raw_text
+    assert "observability degraded" in degraded
+    assert "unknown schema version 9" in degraded
+
+
+def test_observability_mode_change_keeps_each_reason_visible():
+    first = rendered({
+        "event": "agent_observability", "mode": "structured",
+        "reason": "Prime JSON schema v3 selected", "provider_format": "prime-v3",
+    })
+    fallback = rendered({
+        "event": "agent_observability", "mode": "raw-text",
+        "reason": "provider dropped to plain text mid-run",
+    })
+    assert "observability structured" in first
+    assert "Prime JSON schema v3 selected" in first
+    assert "observability raw-text" in fallback
+    assert "provider dropped to plain text mid-run" in fallback
+
+
+def test_bounded_malformed_diagnostic_shows_code_and_message():
+    line = rendered({
+        "event": "agent_diagnostic", "code": "malformed_event", "severity": "warning",
+        "message": "dropped 1 unparsable line (bounded)",
+    })
+    assert "malformed_event" in line
+    assert "dropped 1 unparsable line (bounded)" in line
+
+
+def test_configured_sink_failure_is_labeled_with_sink_and_reason():
+    failed = rendered({
+        "event": "telemetry_delivery", "sink": "otel", "batch_id": "otel-0007",
+        "event_count": 12, "status": "failed", "http_status": 503,
+        "reason": "Receiver rejected batch",
+    })
+    accepted = rendered({
+        "event": "telemetry_delivery", "sink": "loki", "batch_id": "loki-0001",
+        "event_count": 4, "status": "accepted", "http_status": 200,
+        "reason": "Receiver accepted request",
+    }, "full")
+    assert "sink otel" in failed and "failed" in failed
+    assert "Receiver rejected batch" in failed
+    assert "503" in failed
+    assert "sink loki" in accepted and "accepted" in accepted
+
+
+def test_terminal_conflict_reason_is_reconciled_and_explicit():
+    line = rendered({
+        "event": "agent_result", "status": "error", "is_error": True,
+        "reason_code": "provider_terminal_conflict",
+        "reason": "provider reported error while exit code was 0",
+        "source": "reconciled",
+    })
+    assert "pass error" in line
+    assert "provider reported error while exit code was 0" in line
+    assert "reconciled" in line
+
+
+def test_sc012_five_facts_are_explicit_labeled_fields():
+    """SC-012: mode, current phase, latest tool activity, final pass outcome,
+    and configured sink failure are all present as explicit labeled fields."""
+    mode = rendered({
+        "event": "agent_observability", "mode": "structured",
+        "reason": "Prime JSON schema v3 selected", "provider_format": "prime-v3",
+    })
+    phase = rendered({"event": "phase_start", "phase": 3, "total": 8, "title": "wire"})
+    tool = rendered({
+        "event": "agent_tool", "tool": "IPython", "status": "progress",
+        "summary": "running checks", "tool_id": "tool-1",
+    })
+    outcome = rendered({
+        "event": "agent_result", "status": "error", "is_error": True,
+        "reason": "credentials rejected", "source": "provider",
+    })
+    sink = rendered({
+        "event": "telemetry_delivery", "sink": "otel", "status": "failed",
+        "http_status": 503, "reason": "Receiver rejected batch",
+    })
+    assert "observability" in mode
+    assert "phase 3" in phase
+    assert "IPython" in tool
+    assert "pass error" in outcome
+    assert "sink otel" in sink and "failed" in sink
+
+
 def test_follow_renders_received_activity_within_two_seconds_without_terminal(tmp_path):
     """T018 latency proof: no run_end is needed to flush live activity."""
     path = tmp_path / "events.jsonl"
