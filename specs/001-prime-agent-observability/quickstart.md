@@ -195,7 +195,37 @@ python3 -m pytest -q \
   lib/test_telemetry_parity.py
 ```
 
-Then query each real receiver by run id. Expected:
+Then query each real receiver by run id. Receiver-specific query commands (substitute
+the `$RUN_ID` under validation):
+
+```bash
+# Local JSONL — every expected normalized event identity:
+jq -c 'select(.run_id=="'"$RUN_ID"'") | {event, sequence}' \
+  telemetry/local/*.jsonl | sort -u
+
+# Loki — events + terminal results by run id (LogQL over the last 30s):
+logcli query --limit=5000 --since=30s \
+  '{job="ralph"} | logfmt | run_id="'"$RUN_ID"'"'
+# terminal result only:
+logcli query --since=30s \
+  '{job="ralph"} | logfmt | run_id="'"$RUN_ID"'" | event="agent_result"'
+
+# OTLP downstream (capture receiver / collector debug exporter) — filter accepted
+# log records whose run_id attribute matches, then confirm agent_result is present:
+curl -s "$OTLP_CAPTURE_URL/query?run_id=$RUN_ID" \
+  | jq -c '.resourceLogs[].scopeLogs[].logRecords[]
+             | {event: (.attributes[]|select(.key=="event").value.stringValue),
+                run_id: (.attributes[]|select(.key=="run_id").value.stringValue)}
+             | select(.run_id=="'"$RUN_ID"'")'
+```
+
+The automated stand-in for these queries is
+`lib/test_telemetry_parity.py::test_query_matrix_*` (T046): it polls each configured
+healthy capture receiver by run id within the 30-second budget, fails below 99%
+retrieval or on any missing terminal result, and reports the missing event
+identities on a shortfall.
+
+Expected:
 
 - local JSONL contains 100% of expected events;
 - each healthy sink exposes at least 99% of eligible events within 30 seconds and all terminal results;

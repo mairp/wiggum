@@ -19,6 +19,7 @@ import io
 import os
 import sys
 import json
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ralph_loki_ship as loki_ship       # noqa: E402
@@ -424,6 +425,145 @@ def test_asymmetric_outage_http_500_reports_failed_healthy_sink_unaffected():
         assert _loki_identities(ls) == MANIFEST_IDENTITIES
     assert loki_rec["status"] == "accepted"
     assert otel_rec["status"] == "failed" and otel_rec["http_status"] == 500
+
+
+# ── T046: live-receiver query matrix ─────────────────────────────────────────
+# T038 above asserts request-level parity (what went on the wire). T046 layers the
+# contract §Query Acceptance gate on top: after a run completes, each CONFIGURED
+# HEALTHY sink is *queried by run id* and must, within a 30-second budget, return
+# ≥99% of eligible events and ALL terminal results; any discrepancy is reported as
+# the set of missing event identities (telemetry-v1 §Query Acceptance). The capture
+# server stands in for a real receiver — we query its accepted batches by run id,
+# poll with a real deadline, and fail on shortfall. Receiver-specific query commands
+# (LogQL / OTLP capture) are documented in quickstart.md §8.
+QUERY_BUDGET_S = 30.0            # contract: "within 30 seconds of completion"
+MIN_RETRIEVAL = 0.99            # contract: "at least 99% of eligible events"
+ELIGIBLE_IDENTITIES = MANIFEST_IDENTITIES
+TERMINAL_IDENTITY = (PRIME_MANIFEST[-1][0], str(PRIME_MANIFEST[-1][1]["sequence"]))
+
+
+def _query_run(fetch, run_id, *, budget_s=QUERY_BUDGET_S, interval_s=0.05):
+    """Poll `fetch()` for identities whose run_id matches, until eligible events are
+    ≥99% retrieved with all terminal results, or the budget expires. Returns
+    (retrieved_ids, elapsed_s). fetch() -> iterable of (event, sequence, run_id)."""
+    deadline = time.monotonic() + budget_s
+    retrieved = set()
+    while True:
+        for event, sequence, rid in fetch():
+            if rid == run_id:
+                retrieved.add((event, sequence))
+        enough = len(retrieved & ELIGIBLE_IDENTITIES) >= MIN_RETRIEVAL * len(ELIGIBLE_IDENTITIES)
+        if enough and TERMINAL_IDENTITY in retrieved:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(interval_s)
+    return retrieved, time.monotonic() - (deadline - budget_s)
+
+
+def _loki_query_fetch(srv):
+    def fetch():
+        for r in srv.requests:
+            for s in (r.json or {}).get("streams", []):
+                event = s["stream"].get("event", "")
+                for _ts, line in s["values"]:
+                    body = _parse_logfmt(line)
+                    yield event, body.get("sequence", ""), body.get("run_id", "")
+    return fetch
+
+
+def _otel_query_fetch(srv):
+    def fetch():
+        for r in srv.requests:
+            body = r.json
+            if not body or "resourceLogs" not in body:
+                continue
+            for rl in body["resourceLogs"]:
+                for sl in rl["scopeLogs"]:
+                    for rec in sl["logRecords"]:
+                        attrs = {a["key"]: _otel_scalar(a["value"]) for a in rec.get("attributes", [])}
+                        yield attrs.get("event", ""), attrs.get("sequence", ""), attrs.get("run_id", "")
+    return fetch
+
+
+def _assert_query_acceptance(retrieved, elapsed, sink):
+    missing = ELIGIBLE_IDENTITIES - retrieved
+    ratio = len(retrieved & ELIGIBLE_IDENTITIES) / len(ELIGIBLE_IDENTITIES)
+    assert ratio >= MIN_RETRIEVAL, "%s query returned %.0f%% (<99%%); missing %r" % (
+        sink, ratio * 100, sorted(missing))
+    assert TERMINAL_IDENTITY in retrieved, "%s query missing terminal result %r" % (sink, TERMINAL_IDENTITY)
+    assert elapsed <= QUERY_BUDGET_S, "%s query exceeded 30s budget (%.1fs)" % (sink, elapsed)
+
+
+def test_query_matrix_loki_only_meets_acceptance():
+    with CaptureServer() as ls:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url)
+        got, dt = _query_run(_loki_query_fetch(ls), PRIME_CORRELATION["run_id"])
+    _assert_query_acceptance(got, dt, "loki")
+
+
+def test_query_matrix_otel_only_meets_acceptance():
+    with CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, otel_url=os_.url)
+        got, dt = _query_run(_otel_query_fetch(os_), PRIME_CORRELATION["run_id"])
+    _assert_query_acceptance(got, dt, "otel")
+
+
+def test_query_matrix_dual_sink_both_meet_acceptance_and_share_identities():
+    with CaptureServer() as ls, CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url, otel_url=os_.url)
+        lg, ldt = _query_run(_loki_query_fetch(ls), PRIME_CORRELATION["run_id"])
+        og, odt = _query_run(_otel_query_fetch(os_), PRIME_CORRELATION["run_id"])
+    _assert_query_acceptance(lg, ldt, "loki")
+    _assert_query_acceptance(og, odt, "otel")
+    # dual-sink query results share invocation/event identities (§Query Acceptance)
+    assert lg & ELIGIBLE_IDENTITIES == og & ELIGIBLE_IDENTITIES
+
+
+def test_query_matrix_local_only_makes_no_receiver_query():
+    # Local-only mode has no remote receiver to query; nothing is retrieved and the
+    # matrix does not fabricate a healthy sink.
+    with CaptureServer() as ls, CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST)
+        lg, _ = _query_run(_loki_query_fetch(ls), PRIME_CORRELATION["run_id"], budget_s=0.2)
+        og, _ = _query_run(_otel_query_fetch(os_), PRIME_CORRELATION["run_id"], budget_s=0.2)
+    assert lg == set() and og == set()
+
+
+def test_query_matrix_asymmetric_outage_healthy_sink_still_query_verifies():
+    # OTLP down: Loki (the healthy sink) must still satisfy query acceptance; the
+    # dead sink simply yields no retrievable identities.
+    with CaptureServer() as ls:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url, otel_url="http://127.0.0.1:1")
+        lg, ldt = _query_run(_loki_query_fetch(ls), PRIME_CORRELATION["run_id"])
+    _assert_query_acceptance(lg, ldt, "loki")
+
+
+def test_query_matrix_reports_missing_identities_on_shortfall():
+    # A receiver that accepted only a partial run must fail acceptance AND name the
+    # missing identities (contract: "any discrepancy is reported with missing event
+    # identities"). We drop the terminal result from the shipped manifest.
+    partial = PRIME_MANIFEST[:-1]
+    with CaptureServer() as ls:
+        _ship_prime(partial, loki_url=ls.url)
+        got, dt = _query_run(_loki_query_fetch(ls), PRIME_CORRELATION["run_id"], budget_s=0.3)
+    missing = ELIGIBLE_IDENTITIES - got
+    assert TERMINAL_IDENTITY in missing
+    try:
+        _assert_query_acceptance(got, dt, "loki")
+    except AssertionError as e:
+        assert str(TERMINAL_IDENTITY) in str(e) or "terminal" in str(e)
+    else:
+        raise AssertionError("shortfall must fail query acceptance")
+
+
+def test_query_matrix_wrong_run_id_retrieves_nothing():
+    # Query isolation: a run-id that does not match returns no identities even though
+    # the receiver holds a full accepted batch for another run.
+    with CaptureServer() as ls:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url)
+        got, _ = _query_run(_loki_query_fetch(ls), "no-such-run", budget_s=0.2)
+    assert got == set()
 
 
 if __name__ == "__main__":

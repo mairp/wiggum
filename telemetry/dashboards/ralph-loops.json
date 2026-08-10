@@ -1,13 +1,13 @@
 {
   "uid": "ralph-loops",
-  "title": "Ralph Loops (Claude Code)",
+  "title": "Ralph Loops",
   "tags": [
     "ai",
-    "claude-code",
-    "ralph"
+    "ralph",
+    "wiggum"
   ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "30s",
   "time": {
@@ -28,7 +28,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Autonomous Claude Code **Ralph loops** (`utilities/ralph_loop.sh --stream-json`). Each iteration is a fresh headless `claude` run; this dashboard tracks cost, tokens, tool use, iteration duration and gate outcomes per run. Use the **task** variable to focus one loop. Data is the persistent Loki event stream (`job=\"ralph\"`) over the time range."
+        "content": "Autonomous Wiggum **Ralph loops**, provider-neutral. Each iteration is a fresh headless proposer/critic invocation; this dashboard tracks cost, tokens, tool use, iteration duration and gate outcomes per run regardless of backend (Claude, Prime standard, Prime fleet, …). Queries match both the Claude stream vocabulary (`api_request`/`tool_use`) and the normalized Prime vocabulary (`agent_result`/`agent_tool`) so no backend has to masquerade as another. Use the **task**, **backend** and **role** variables to focus, and the **run**/**invocation** variables to query by Prime run/invocation identifier. Data is the persistent Loki event stream (`job=\"ralph\"`) over the time range."
       }
     },
     {
@@ -79,7 +79,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({job=\"ralph\", event=\"run_start\", task=~\"$task\"} [$__range]))",
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"run_start\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" [$__range]))",
           "queryType": "instant"
         }
       ]
@@ -132,7 +132,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({job=\"ralph\", event=\"iter_start\", task=~\"$task\"} [$__range]))",
+          "expr": "sum(count_over_time({job=\"ralph\", event=\"iter_start\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" [$__range]))",
           "queryType": "instant"
         }
       ]
@@ -185,7 +185,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cost_usd [$__range]))",
+          "expr": "sum(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap cost_usd [$__range]))",
           "queryType": "instant"
         }
       ]
@@ -238,7 +238,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap output_tokens [$__range]))",
+          "expr": "sum(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap output_tokens [$__range]))",
           "queryType": "instant"
         }
       ]
@@ -291,7 +291,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({job=\"ralph\", event=\"tool_use\", task=~\"$task\"} [$__range]))",
+          "expr": "sum(count_over_time({job=\"ralph\", event=~\"tool_use|agent_tool\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" [$__range]))",
           "queryType": "instant"
         }
       ]
@@ -352,7 +352,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | is_error=\"true\" [$__range]))",
+          "expr": "sum(count_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | is_error=\"true\" or status=\"error\" [$__range]))",
           "queryType": "instant"
         }
       ]
@@ -404,7 +404,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (model)(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cost_usd [$__interval]))",
+          "expr": "sum by (model)(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap cost_usd [$__interval]))",
           "legendFormat": "{{model}}",
           "queryType": "range"
         }
@@ -457,7 +457,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap input_tokens [$__interval]))",
+          "expr": "sum(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap input_tokens [$__interval]))",
           "legendFormat": "input",
           "queryType": "range"
         },
@@ -467,7 +467,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap output_tokens [$__interval]))",
+          "expr": "sum(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap output_tokens [$__interval]))",
           "legendFormat": "output",
           "queryType": "range"
         },
@@ -477,7 +477,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cache_read_tokens [$__interval]))",
+          "expr": "sum(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap cache_read_tokens [$__interval]))",
           "legendFormat": "cacheRead",
           "queryType": "range"
         },
@@ -487,7 +487,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cache_creation_tokens [$__interval]))",
+          "expr": "sum(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap cache_creation_tokens [$__interval]))",
           "legendFormat": "cacheCreation",
           "queryType": "range"
         }
@@ -540,7 +540,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "quantile_over_time(0.95, {job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap duration_ms [$__interval])",
+          "expr": "quantile_over_time(0.95, {job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap duration_ms [$__interval])",
           "legendFormat": "p95",
           "queryType": "range"
         },
@@ -550,7 +550,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "quantile_over_time(0.50, {job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap duration_ms [$__interval])",
+          "expr": "quantile_over_time(0.50, {job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap duration_ms [$__interval])",
           "legendFormat": "p50",
           "queryType": "range"
         }
@@ -603,7 +603,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (model)(count_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} [$__interval]))",
+          "expr": "sum by (model)(count_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" [$__interval]))",
           "legendFormat": "req {{model}}",
           "queryType": "range"
         },
@@ -613,7 +613,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({job=\"ralph\", event=\"tool_use\", task=~\"$task\"} [$__interval]))",
+          "expr": "sum(count_over_time({job=\"ralph\", event=~\"tool_use|agent_tool\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" [$__interval]))",
           "legendFormat": "tool calls",
           "queryType": "range"
         }
@@ -658,7 +658,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (tool)(count_over_time({job=\"ralph\", event=\"tool_use\", task=~\"$task\"} | logfmt [$__range]))",
+          "expr": "sum by (tool)(count_over_time({job=\"ralph\", event=~\"tool_use|agent_tool\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" [$__range]))",
           "queryType": "instant",
           "legendFormat": "{{tool}}"
         }
@@ -703,7 +703,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (task)(sum_over_time({job=\"ralph\", event=\"api_request\", task=~\"$task\"} | logfmt | unwrap cost_usd [$__range]))",
+          "expr": "sum by (task)(sum_over_time({job=\"ralph\", event=~\"api_request|agent_result\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\" | unwrap cost_usd [$__range]))",
           "queryType": "instant",
           "legendFormat": "{{task}}"
         }
@@ -748,7 +748,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (result)(count_over_time({job=\"ralph\", event=\"gate\", task=~\"$task\"} | logfmt [$__range]))",
+          "expr": "sum by (result)(count_over_time({job=\"ralph\", event=\"gate\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" [$__range]))",
           "queryType": "instant",
           "legendFormat": "{{result}}"
         }
@@ -757,7 +757,7 @@
     {
       "id": 15,
       "type": "logs",
-      "title": "Recent Ralph events (run/iter/api_request/tool_use/gate/run_end)",
+      "title": "Recent Ralph events (init/text/tool/evidence/result/gate/lifecycle)",
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -782,7 +782,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{job=\"ralph\", task=~\"$task\"}",
+          "expr": "{job=\"ralph\", task=~\"$task\", backend=~\"$backend\", role=~\"$role\"} | logfmt | run_id=~\"$run\" | invocation_id=~\"$invocation\"",
           "queryType": "range"
         }
       ]
@@ -804,6 +804,60 @@
         "current": {
           "text": "All",
           "value": "$__all"
+        }
+      },
+      {
+        "name": "backend",
+        "label": "backend",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "query": "label_values({job=\"ralph\"}, backend)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "role",
+        "label": "role",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "query": "label_values({job=\"ralph\"}, role)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "run",
+        "label": "run_id",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        }
+      },
+      {
+        "name": "invocation",
+        "label": "invocation_id",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
         }
       }
     ]

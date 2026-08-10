@@ -595,3 +595,31 @@ Verification: `bash -n` clean on all four scripts, `py_compile` clean, and `test
 
 ===== ITER 36 / 120  2026-08-10T13:00:54+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done with this iteration. Completed **T045** — made the Grafana dashboard `telemetry/dashboards/ralph-loops.json` provider-neutral and queryable by Prime run/invocation identifiers.
+
+What changed:
+- **De-branded** the title ("Ralph Loops (Claude Code)" → "Ralph Loops"), tags, and the description text so no backend has to masquerade as Claude (FR-038).
+- **Provider-neutral event matching**: every request/token/cost/duration query now matches both the Claude stream vocabulary and the normalized Prime vocabulary via alternation — `event=~"api_request|agent_result"` and `event=~"tool_use|agent_tool"`. The "Errored requests" panel matches both `is_error="true"` and the normalized `status="error"`.
+- **New query-by-identity variables**: added `backend` and `role` label selectors (both are bounded Loki labels per the telemetry-v1 contract) and `run` / `invocation` textbox variables that filter the logfmt body fields `run_id` and `invocation_id` (which the contract keeps out of labels as high-cardinality identity). All 15 panels are wired to these variables.
+
+Verification: JSON parses cleanly (15 panels, 5 template variables). No test file or spec artifact asserts on the dashboard content, so nothing else was affected. The queries align with the field names actually emitted by `EventEnvelope.identity()`, `ralph_loki_ship.py`, and `agent_stream.py`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 37 / 120  2026-08-10T13:07:39+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. Completed **T046** (US3), the first unchecked task.
+
+**What I did:**
+- Added the live-receiver query matrix to `lib/test_telemetry_parity.py` (7 new `test_query_matrix_*` tests). Where the existing T038 tests assert request-level parity (what goes on the wire), these layer the contract's §Query Acceptance gate on top: after a run completes, each configured healthy sink is *queried by run id* and must return ≥99% of eligible events plus all terminal results within a real 30-second polling budget, reporting the missing event identities on any shortfall. Coverage spans local-only (no receiver query), Loki-only, OTLP-only, dual-sink (with shared-identity assertion), asymmetric outage (healthy sink still query-verifies), shortfall detection, and run-id query isolation.
+- Documented receiver-specific query commands in `specs/001-prime-agent-observability/quickstart.md` §8 — LogQL/`logcli` for Loki, `jq` over local JSONL, and an OTLP capture-query snippet — cross-referencing the T046 automated stand-in.
+- Flipped T046's checkbox to `[x]` in `tasks.md`.
+
+**Verification:** `python3 -m pytest -q lib/test_telemetry_parity.py` → 19 passed; `py_compile` clean. No existing tests were weakened, and fixtures use only synthetic values (run id `r1`, no credentials or host paths).
+
+The next unchecked task is T047 (US4, artifact layout tests) — a fresh iteration will pick it up.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 38 / 120  2026-08-10T13:12:45+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
