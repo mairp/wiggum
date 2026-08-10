@@ -899,3 +899,40 @@ GATE FAIL: 35 task(s) still unchecked in tasks.md
 
 ===== ITER 40 / 120  2026-08-10T13:32:58+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. T049 complete.
+
+**What I did:** T049 was a test-only regression task for the critic's verdict contract. I added six tests to `lib/test_critic.py` (importing `parse_verdict` and `build_prompt`) that lock in:
+
+- **Nonce binding** — only a verdict carrying this call's exact nonce approves; a spoofed `APPROVED` under a different nonce cannot flip the gate.
+- **Strict tokens** — only exact `APPROVED`/`REJECTED` on their own line count; truncated/wrong/trailing tokens are MALFORMED.
+- **Fail-safe** — missing, empty, `None`, and duplicate verdict lines all fail safe (MALFORMED → not approved).
+- **Grounding** — the verified on-disk snapshot is carried into the verdict input.
+- **No thinking/tool content** — `build_prompt` assembles the verdict input only from declared sections (spec/evidence/grounding/context), so proposer thinking and `tool_use`/`tool_result` blocks can never reach the critic.
+
+All 35 tests in `lib/test_critic.py` pass, and I flipped T049 to `- [x]`. The next unchecked task is T050 (observability policy tests) for a future iteration.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 34 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 41 / 120  2026-08-10T13:36:29+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T050** (test-first task for User Story 4).
+
+## What I did
+
+Added four failing tests to `lib/test_observability_policy.py` that lock the `RedactionRetentionPolicy` contract from data-model §10, one per clause in the task:
+
+- **`test_raw_capture_is_disabled_by_default`** — raw capture off by default, `metadata_retention_days >= raw_retention_days`, and a `policy_version` string that travels in `.metadata()`.
+- **`test_metadata_retention_cannot_be_shorter_than_raw_retention`** — construction rejects metadata retention shorter than raw retention, and negative raw retention.
+- **`test_artifact_payload_is_redacted_and_bounded_before_retention`** — `redact_payload()` strips credentials/thinking and truncates to the byte cap *before* anything is retained (payload cap + redaction-before-truncation).
+- **`test_raw_content_expires_before_metadata_and_result`** — the retention-ordering invariant: raw content is removed at/after raw expiry while audit metadata survives, and metadata is never removed while raw is still retained (checked across ages 0–89 days).
+
+## State of the tree
+
+The tests are correctly **red** — they fail at collection with `ImportError: cannot import name 'RedactionRetentionPolicy'`, the same convention already used by the sibling test-first task T047 (`test_invocation_artifacts.py`), which awaits its implementation task the same way. The implementation lands in **T051/T055** (`lib/invocation_result.py` / policy surface). The pre-existing five tests are unchanged, and the file compiles clean (`py_compile` OK). Checkbox T050 flipped to `- [x]`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 33 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 42 / 120  2026-08-10T13:41:01+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
