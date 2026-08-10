@@ -778,3 +778,32 @@ The checkbox for T054 is flipped to `[x]`. Next unchecked task is T055 (retentio
 
 ===== ITER 46 / 120  2026-08-10T14:24:01+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed T055.
+
+**What I found:** T055 depends on `RedactionRetentionPolicy`, which the already-checked T050 tests imported but which was never actually implemented — `lib/test_observability_policy.py` was failing at import. So T055 needed both the missing policy and the cleanup driver.
+
+**What I implemented:**
+
+1. **`RedactionRetentionPolicy`** in `lib/observability_policy.py` — the configured retention policy the T050 tests pin: raw capture disabled by default, `metadata_retention_days ≥ raw_retention_days` enforced at construction, a versioned `metadata()` block, `redact_payload()` for bounded/redacted retention, and `retention_actions(age_days=…)` that expires raw content first and only ever removes metadata once raw is already gone.
+
+2. **Retention cleanup in `lib/invocation_result.py`** — `InvocationArtifactSet.apply_retention(policy, now=…)` skips active (un-finalized) invocations, prunes raw content then metadata per policy, and always preserves the terminal `result.json` as the required audit record. Added `is_active()`, `age_days()` (best-effort timestamp parse, treats malformed stamps as fresh), `remove_metadata()`, a `bind()` classmethod for attaching to an existing directory, and a module-level `apply_retention_sweep()` that walks the artifact tree.
+
+3. **Tests** — added three focused tests to `lib/test_invocation_artifacts.py` covering the active-skip guard, the raw-then-metadata expiry ordering with result preservation, and the directory sweep.
+
+**Verification:** `python3 -m py_compile lib/*.py` clean; full `python3 -m pytest -q lib` green (312 passed). T055's checkbox flipped to `- [x]`. The tree is consistent — the next unchecked task is T056 (the US4 validation journey).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 47 / 120  2026-08-10T14:30:25+04:00 =====
+Done. This iteration completed **T056** — the User Story 4 validation checkpoint.
+
+T056 is a validation task, not new code. I ran the three named test files and confirmed all 58 tests pass, then verified they substantively cover what the task requires rather than just being green:
+
+- **Multi-phase/retry reconstruction** (`test_invocation_artifacts.py`): unique per-`phase/attempt/iter/invocation` directories, collision refusal instead of overwrite, retention ordering.
+- **Critic safety** (`test_critic.py`, `test_prime_backend.py`): unchanged nonce binding, verdict parsed from the reconstructed final assistant-visible response only (no thinking/tool/adapter chrome leaking into verdict input), tools/skills/context disabled via `--no-tools --no-skills --no-context-files`, and malformed-verdict fail-safe.
+
+I flipped T056's checkbox to `- [x]`, which closes out Phase 6 (User Story 4). The next unchecked task is T057, the first of the User Story 5 (P3) presenter tests.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 48 / 120  2026-08-10T14:31:29+04:00 =====

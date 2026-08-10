@@ -41,6 +41,24 @@ def _utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _read_timestamp(path, field):
+    """Best-effort parse of an ISO8601 stamp from a JSON artifact, or None."""
+    try:
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = record.get(field) if isinstance(record, dict) else None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 @dataclass(frozen=True)
 class InvocationContext:
     run_id: str
@@ -300,6 +318,30 @@ class InvocationArtifactSet:
     terminal result.
     """
 
+    @classmethod
+    def bind(cls, directory):
+        """Attach to an existing invocation directory without its context.
+
+        Used by the retention sweep, which walks the artifact tree and operates
+        on directories by their on-disk audit stamps rather than reconstructing
+        each invocation's identity.
+        """
+        instance = cls.__new__(cls)
+        instance.feature_root = None
+        instance.context = None
+        instance.dir = Path(directory)
+        instance._bind_paths()
+        instance._finalized = False
+        return instance
+
+    def _bind_paths(self):
+        self.metadata_path = self.dir / "metadata.json"
+        self.result_path = self.dir / "result.json"
+        self.prompt_path = self.dir / "prompt.txt"
+        self.provider_path = self.dir / "provider.jsonl"
+        self.events_path = self.dir / "events.jsonl"
+        self.response_path = self.dir / "response.txt"
+
     def __init__(self, feature_root, context):
         self.feature_root = Path(feature_root)
         self.context = context
@@ -354,6 +396,75 @@ class InvocationArtifactSet:
                 path.unlink()
                 removed.append(path.name)
         return removed
+
+    def is_active(self):
+        """An invocation without a terminal result has not been finalized."""
+        return not self.result_path.exists()
+
+    def age_days(self, now):
+        """Age of the invocation in whole days from its most reliable timestamp.
+
+        Prefers the terminal result's ``finalized_at``; falls back to metadata
+        ``created_at``. A missing or unparsable stamp reports age ``0`` so a
+        malformed record is treated as fresh rather than eagerly deleted.
+        """
+        stamp = _read_timestamp(self.result_path, "finalized_at")
+        if stamp is None:
+            stamp = _read_timestamp(self.metadata_path, "created_at")
+        if stamp is None:
+            return 0
+        return max(0, int((now - stamp).total_seconds() // 86400))
+
+    def remove_metadata(self):
+        """Remove the redacted audit metadata, leaving the terminal result."""
+        if self.metadata_path.exists():
+            self.metadata_path.unlink()
+            return True
+        return False
+
+    def apply_retention(self, policy, *, now):
+        """Apply one retention decision, never touching an active invocation.
+
+        The terminal ``result.json`` is the required audit record and is always
+        preserved; only raw content and the redacted metadata may expire, in
+        that order.
+        """
+        if self.is_active():
+            return {"invocation": str(self.dir), "skipped": "active"}
+        actions = policy.retention_actions(age_days=self.age_days(now))
+        removed_raw = self.prune_raw() if actions["remove_raw"] else []
+        removed_metadata = (
+            self.remove_metadata() if actions["remove_metadata"] else False
+        )
+        return {
+            "invocation": str(self.dir),
+            "age_days": self.age_days(now),
+            "removed_raw": removed_raw,
+            "removed_metadata": removed_metadata,
+        }
+
+
+def _iter_invocation_dirs(feature_root):
+    """Yield every leaf invocation directory (one holding metadata.json)."""
+    root = Path(feature_root).joinpath(*_ARTIFACT_ROOT)
+    if not root.is_dir():
+        return
+    for metadata in sorted(root.rglob("metadata.json")):
+        yield metadata.parent
+
+
+def apply_retention_sweep(feature_root, policy, *, now):
+    """Apply configured retention across every invocation under ``feature_root``.
+
+    Active (un-finalized) invocations are skipped so an in-flight proposer or
+    critic call is never disturbed; every finalized invocation's raw content and
+    then metadata expire per policy while its terminal result is preserved as
+    the required audit record.
+    """
+    return [
+        InvocationArtifactSet.bind(directory).apply_retention(policy, now=now)
+        for directory in _iter_invocation_dirs(feature_root)
+    ]
 
 
 class ResultFinalizer:

@@ -11,6 +11,7 @@ These target the artifact API implemented by T051 in ``invocation_result.py``;
 they are red until that surface exists.
 """
 
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -18,8 +19,10 @@ import pytest
 from invocation_result import (
     InvocationArtifactSet,
     InvocationContext,
+    apply_retention_sweep,
     invocation_artifact_dir,
 )
+from observability_policy import RedactionRetentionPolicy
 
 
 def make_context(**overrides):
@@ -140,3 +143,79 @@ def test_retention_removes_raw_content_before_metadata_and_result(tmp_path):
     assert artifacts.result_path.exists()
     # Pruning again is a no-op once raw content is gone.
     assert artifacts.prune_raw() == []
+
+
+def _finalized_artifacts(tmp_path, **overrides):
+    context = make_context(**overrides)
+    artifacts = InvocationArtifactSet(tmp_path, context)
+    artifacts.create()
+    artifacts.finalize(
+        provider_terminal={"status": "success", "stop_reason": "stop"},
+        producer_exit_code=0, parser_exit_code=0,
+    )
+    for path in artifacts._raw_paths():
+        path.write_text("canary")
+    return artifacts
+
+
+def test_retention_skips_active_invocations(tmp_path):
+    context = make_context(invocation_id="inv-active")
+    artifacts = InvocationArtifactSet(tmp_path, context)
+    artifacts.create()  # created but never finalized -> active
+    for path in artifacts._raw_paths():
+        path.write_text("canary")
+
+    policy = RedactionRetentionPolicy(raw_retention_days=0, metadata_retention_days=0)
+    outcome = artifacts.apply_retention(policy, now=datetime.now(timezone.utc))
+
+    assert outcome["skipped"] == "active"
+    assert artifacts.metadata_path.exists()
+    assert artifacts.prompt_path.exists()
+
+
+def test_retention_expires_raw_then_metadata_but_keeps_result(tmp_path):
+    artifacts = _finalized_artifacts(tmp_path, invocation_id="inv-old")
+    policy = RedactionRetentionPolicy(raw_retention_days=7, metadata_retention_days=30)
+    now = datetime.now(timezone.utc)
+
+    # Fresh: nothing removed.
+    fresh = artifacts.apply_retention(policy, now=now)
+    assert fresh["removed_raw"] == []
+    assert fresh["removed_metadata"] is False
+    assert artifacts.prompt_path.exists()
+
+    # Past raw retention: raw content goes, audit stays.
+    mid = artifacts.apply_retention(policy, now=now + timedelta(days=14))
+    assert set(mid["removed_raw"]) == {
+        "prompt.txt", "provider.jsonl", "events.jsonl", "response.txt",
+    }
+    assert mid["removed_metadata"] is False
+    assert artifacts.metadata_path.exists()
+    assert artifacts.result_path.exists()
+
+    # Past metadata retention: metadata expires, terminal result is preserved.
+    old = artifacts.apply_retention(policy, now=now + timedelta(days=60))
+    assert old["removed_metadata"] is True
+    assert not artifacts.metadata_path.exists()
+    assert artifacts.result_path.exists()
+
+
+def test_retention_sweep_covers_every_finalized_invocation(tmp_path):
+    kept = _finalized_artifacts(tmp_path, phase=1, invocation_id="inv-1")
+    other = _finalized_artifacts(tmp_path, phase=2, invocation_id="inv-2")
+    active = InvocationArtifactSet(tmp_path, make_context(phase=3, invocation_id="inv-3"))
+    active.create()
+
+    policy = RedactionRetentionPolicy(raw_retention_days=7, metadata_retention_days=30)
+    outcomes = apply_retention_sweep(
+        tmp_path, policy, now=datetime.now(timezone.utc) + timedelta(days=14),
+    )
+
+    by_dir = {outcome["invocation"]: outcome for outcome in outcomes}
+    assert str(active.dir) in by_dir and by_dir[str(active.dir)]["skipped"] == "active"
+    for finalized in (kept, other):
+        outcome = by_dir[str(finalized.dir)]
+        assert set(outcome["removed_raw"]) == {
+            "prompt.txt", "provider.jsonl", "events.jsonl", "response.txt",
+        }
+        assert finalized.result_path.exists()

@@ -199,3 +199,73 @@ class ObservabilityPolicy:
             "original_bytes": cleaned.original_bytes,
             "retained_bytes": summary.retained_bytes,
         }
+
+
+RETENTION_POLICY_VERSION = "wiggum-retention/v1"
+
+
+class RedactionRetentionPolicy:
+    """Configured raw/metadata retention with conservative, audited defaults.
+
+    Raw provider capture is disabled by default. Metadata retention can never be
+    shorter than raw retention, so redacted audit metadata and the terminal
+    result always outlive the raw prompt/response content they summarize. The
+    policy version travels with retained artifacts so a sweep is interpretable
+    after the fact.
+    """
+
+    def __init__(
+        self,
+        *,
+        raw_capture_enabled=False,
+        raw_retention_days=7,
+        metadata_retention_days=30,
+        tool_result_max_bytes=4096,
+        policy_version=RETENTION_POLICY_VERSION,
+        observability_policy=None,
+    ):
+        for name, value in (
+            ("raw_retention_days", raw_retention_days),
+            ("metadata_retention_days", metadata_retention_days),
+            ("tool_result_max_bytes", tool_result_max_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if tool_result_max_bytes <= 0:
+            raise ValueError("tool_result_max_bytes must be a positive integer")
+        if metadata_retention_days < raw_retention_days:
+            raise ValueError(
+                "metadata retention must not be shorter than raw retention"
+            )
+        self.raw_capture_enabled = bool(raw_capture_enabled)
+        self.raw_retention_days = raw_retention_days
+        self.metadata_retention_days = metadata_retention_days
+        self.tool_result_max_bytes = tool_result_max_bytes
+        self.policy_version = policy_version
+        self._policy = observability_policy or ObservabilityPolicy(
+            tool_result_max_bytes=tool_result_max_bytes,
+        )
+
+    def metadata(self):
+        return {
+            "policy_version": self.policy_version,
+            "raw_capture_enabled": self.raw_capture_enabled,
+            "raw_retention_days": self.raw_retention_days,
+            "metadata_retention_days": self.metadata_retention_days,
+        }
+
+    def redact_payload(self, value):
+        """Redact and byte-cap a payload before it is retained on disk."""
+        return self._policy.sanitize(value, max_bytes=self.tool_result_max_bytes)
+
+    def retention_actions(self, *, age_days):
+        """Decide what to remove for an invocation of the given age.
+
+        Raw content expires first; audit metadata may expire only once raw
+        content is already gone, preserving the raw-before-metadata invariant.
+        """
+        remove_raw = age_days > self.raw_retention_days
+        remove_metadata = age_days > self.metadata_retention_days
+        if remove_metadata:
+            remove_raw = True
+        return {"remove_raw": remove_raw, "remove_metadata": remove_metadata}
