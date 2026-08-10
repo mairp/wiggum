@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"fixture-session-stock-auth","cwd":"/work/project"}
+{"type":"message_start","message":{"id":"fixture-message-stock-auth-1","role":"assistant","model":"fixture-model","provider":"fixture-provider"}}
+{"type":"message_end","message":{"id":"fixture-message-stock-auth-1","role":"assistant","content":[],"stopReason":"error","errorMessage":"Provider authentication was rejected"}}
+{"type":"agent_end","status":"error","stopReason":"error","error":{"type":"authentication_error","message":"Provider authentication was rejected"},"fixtureProcessExitCode":0}

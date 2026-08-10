@@ -1,0 +1,9 @@
+{"type":"session","version":3,"id":"fixture-session-fleet-ipython","cwd":"/work/project","fleet":"fixture-fleet"}
+{"type":"toolcall_start","toolCallId":"fixture-tool-ipython-1","toolName":"ipython"}
+{"type":"toolcall_delta","toolCallId":"fixture-tool-ipython-1","argumentsDelta":"open('lib/example.py').read()"}
+{"type":"toolcall_end","toolCallId":"fixture-tool-ipython-1","arguments":"open('lib/example.py').read()"}
+{"type":"tool_execution_start","toolCallId":"fixture-tool-ipython-1","toolName":"ipython","arguments":"open('lib/example.py').read()"}
+{"type":"tool_execution_update","toolCallId":"fixture-tool-ipython-1","message":"Read one fixture workspace file"}
+{"type":"tool_execution_end","toolCallId":"fixture-tool-ipython-1","status":"success","result":"example fixture content","durationMs":4}
+{"type":"turn_end","turnId":"fixture-turn-ipython-1","usage":{"inputTokens":18,"outputTokens":4}}
+{"type":"agent_end","status":"success","stopReason":"end_turn"}

@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"fixture-session-stock-retry","cwd":"/work/project"}
+{"type":"auto_retry_start","attempt":1,"reason":"temporary provider unavailable","delayMs":10}
+{"type":"auto_retry_end","attempt":1,"status":"retrying"}
+{"type":"message_start","message":{"id":"fixture-message-stock-retry-1","role":"assistant","model":"fixture-model","provider":"fixture-provider"}}
+{"type":"message_update","messageId":"fixture-message-stock-retry-1","contentIndex":0,"delta":{"type":"text_delta","text":"Recovered after an internal retry."}}
+{"type":"message_end","message":{"id":"fixture-message-stock-retry-1","role":"assistant","content":[{"type":"text","text":"Recovered after an internal retry."}],"stopReason":"end_turn"}}
+{"type":"turn_end","turnId":"fixture-turn-stock-retry-1","usage":{"inputTokens":15,"outputTokens":7}}
+{"type":"agent_end","status":"success","stopReason":"end_turn"}

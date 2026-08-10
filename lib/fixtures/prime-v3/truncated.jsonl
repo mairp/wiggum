@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"fixture-session-truncated","cwd":"/work/project"}
+{"type":"message_update","messageId":"fixture-message-truncated-1","delta":{"type":"text_delta","text":"synthetic incomplete

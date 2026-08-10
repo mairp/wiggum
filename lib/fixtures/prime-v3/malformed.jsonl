@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"fixture-session-malformed","cwd":"/work/project"}
+this is a short synthetic malformed record
+{"type":"agent_end","status":"success","stopReason":"end_turn"}

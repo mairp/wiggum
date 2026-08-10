@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"fixture-session-stock-success","cwd":"/work/project"}
+{"type":"message_start","message":{"id":"fixture-message-stock-1","role":"assistant","model":"fixture-model","provider":"fixture-provider"}}
+{"type":"message_update","messageId":"fixture-message-stock-1","contentIndex":0,"delta":{"type":"text_delta","text":"Inspecting the requested files."}}
+{"type":"message_end","message":{"id":"fixture-message-stock-1","role":"assistant","content":[{"type":"text","text":"Inspecting the requested files."}],"stopReason":"end_turn"}}
+{"type":"turn_end","turnId":"fixture-turn-stock-1","usage":{"inputTokens":12,"outputTokens":6}}
+{"type":"agent_end","status":"success","stopReason":"end_turn"}

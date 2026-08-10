@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"fixture-session-unknown","cwd":"/work/project"}
+{"type":"fixture_future_record","fixtureField":"bounded additive value","sequence":2}
+{"type":"agent_end","status":"success","stopReason":"end_turn"}

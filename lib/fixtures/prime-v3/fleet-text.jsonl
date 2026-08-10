@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"fixture-session-fleet-text","cwd":"/work/project","fleet":"fixture-fleet"}
+{"type":"message_start","message":{"id":"fixture-message-fleet-1","role":"assistant","model":"fixture-model","provider":"fixture-provider"}}
+{"type":"message_update","messageId":"fixture-message-fleet-1","contentIndex":0,"delta":{"type":"text_delta","text":"Checking "}}
+{"type":"message_update","messageId":"fixture-message-fleet-1","contentIndex":0,"delta":{"type":"text_delta","text":"the workspace."}}
+{"type":"message_end","message":{"id":"fixture-message-fleet-1","role":"assistant","content":[{"type":"text","text":"Checking the workspace."}],"stopReason":"end_turn"}}
+{"type":"turn_end","turnId":"fixture-turn-fleet-1","usage":{"inputTokens":10,"outputTokens":5}}
+{"type":"agent_end","status":"success","stopReason":"end_turn"}
