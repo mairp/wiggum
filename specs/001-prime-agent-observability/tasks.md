@@ -110,8 +110,8 @@
 ### Tests for User Story 3
 
 - [x] T036 [P] [US3] Extend Loki capture tests with every normalized Prime event class, required correlation fields, low-cardinality labels, receiver success/failure, and local delivery evidence in `lib/test_ralph_loki_ship.py`
-- [ ] T037 [P] [US3] Extend OTLP capture tests with every normalized Prime event class, typed usage/duration/cost values, correlation fields, receiver success/failure, and local delivery evidence in `lib/test_ralph_otel_ship.py`
-- [ ] T038 [P] [US3] Add failing four-mode parity, semantic field comparison, terminal-result presence, and asymmetric sink-outage tests in `lib/test_telemetry_parity.py`
+- [x] T037 [P] [US3] Extend OTLP capture tests with every normalized Prime event class, typed usage/duration/cost values, correlation fields, receiver success/failure, and local delivery evidence in `lib/test_ralph_otel_ship.py`
+- [x] T038 [P] [US3] Add failing four-mode parity, semantic field comparison, terminal-result presence, and asymmetric sink-outage tests in `lib/test_telemetry_parity.py`
 - [ ] T039 [P] [US3] Add failing recursion-guard and configured/reachable/accepted/query-verified state tests, including a forced outage that fails unless local delivery failure appears within 10 seconds or invocation completion, in `lib/test_telemetry_delivery.py`
 
 ### Implementation for User Story 3

@@ -682,3 +682,37 @@ GATE FAIL: 47 task(s) still unchecked in tasks.md
 
 ===== ITER 28 / 120  2026-08-10T12:04:09+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done — completed **T037** this iteration.
+
+T037 is a test-first ("Tests for …") task, so the increment is the failing test suite that drives the T041 implementation. I added a normalized-Prime-events section to `lib/test_ralph_otel_ship.py`, mirroring the just-landed T036 Loki tests but asserting the OTLP-specific contract from `telemetry-v1.md §OTLP Mapping`:
+
+- **Every event class** (`agent_init`, `agent_text`, `agent_tool`, `evidence_writing`, `agent_diagnostic`, `agent_result`) maps to a log record via a new `add_prime` API.
+- **Correlation fields** (`run_id`, `feature`, `role`, `phase`, `attempt`, `iteration`, `invocation_id`, `sequence`) land in log attributes, with counters kept as typed `intValue` — the key difference from Loki's logfmt-string body.
+- **Typed usage** — `cost_usd` as `doubleValue`, token counts as `intValue`, `is_error` as bool — plus a check that these still drive additive metrics without dropping the log record.
+- **Delivery evidence** — `flush()` returns a `telemetry_delivery` record (`sink="otlp"`, `batch_id` prefixed `otlp-`, `event_count`, `status`, `http_status`, `reason_code`) with `accepted`/`failed` on 200/500/connection-refused, and `None` for an empty batch.
+
+Result: 12 pre-existing tests still pass; the 7 new Prime tests fail cleanly on the missing `add_prime` method and delivery-record return value — the exact red state that T041 (`Extend OTLP log/metric mapping … in lib/ralph_otel_ship.py`) will turn green. No existing tests were weakened, fixtures stay sanitized, and I flipped T037's checkbox to `- [x]`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 46 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 29 / 120  2026-08-10T12:07:10+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T038** — the test-first task for User Story 3's telemetry parity.
+
+I added eight failing tests to `lib/test_telemetry_parity.py` covering the four categories the task names, driven by one deterministic normalized-Prime manifest (every eligible event class, each with a unique `sequence`, ending in a terminal `agent_result`):
+
+- **Four-mode parity** — local-only makes no remote attempt; Loki-only and OTLP-only each carry every event identity; dual-sink carries identical identities in both sinks.
+- **Semantic field comparison** — required correlation fields (`run_id`, `feature`, `role`, `phase`, `attempt`, `iteration`, `invocation_id`, `sequence`) are equal across sinks after normalizing OTLP's typed attributes and Loki's logfmt string to strings.
+- **Terminal-result presence** — the terminal `agent_result` survives to every configured healthy sink.
+- **Asymmetric sink-outage** — OTLP-down and Loki-down (dead port) plus an HTTP 500 receiver each report a `failed` delivery record without raising, while the healthy sink still receives every identity (parity rule 3).
+
+The tests fail cleanly on the missing `add_prime()` shipper API and delivery-record `flush()` — exactly the API that T040/T041 will implement — while the three pre-existing parity tests still pass. File compiles clean; I flipped T038 to `[x]`.
+
+The next unchecked task is **T039** (recursion-guard / delivery-state tests in `lib/test_telemetry_delivery.py`), left for the following iteration.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 45 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 30 / 120  2026-08-10T12:13:41+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors

@@ -200,6 +200,232 @@ def test_identity_labels_preserved():
     assert got.get("task") == "demo" and got.get("backend") == "claude"
 
 
+# ── normalized Prime four-mode / semantic / terminal / outage parity (T038) ───
+# US3 replays ONE deterministic set of normalized Prime events under local-only,
+# Loki-only, OTLP-only, and dual-sink configurations, then compares correlation /
+# event identities across every configured healthy sink and fails each sink
+# independently (contract telemetry-v1 §Operating Modes, §Parity Rules,
+# §Query Acceptance). These are request-level capture-server assertions; T046 adds
+# the live-receiver query matrix. They drive the shipper add_prime()/delivery-record
+# flush() API (T040/T041), so they FAIL until that mapping exists.
+PRIME_CORRELATION = {
+    "run_id": "r1", "feature": "obs-parity", "role": "proposer",
+    "phase": 2, "attempt": 1, "iteration": 3, "invocation_id": "inv-1",
+}
+# One deterministic invocation: every eligible normalized class, each with a unique
+# ordering (sequence) so identities are distinguishable; agent_result is terminal.
+PRIME_MANIFEST = [
+    ("agent_init", {"sequence": 1, "session_id": "s1", "provider": "prime",
+                    "model": "m1", "schema_version": 3}),
+    ("agent_text", {"sequence": 2, "text": "hi", "message_id": "msg1",
+                    "content_index": 0, "final_fragment": True}),
+    ("agent_tool", {"sequence": 3, "tool_id": "t1", "tool": "Read",
+                    "status": "end", "is_error": False, "duration_ms": 12}),
+    ("evidence_writing", {"sequence": 4, "tool_id": "t1", "tool": "Write",
+                          "target": "/x", "match": "exact-expected-target"}),
+    ("agent_diagnostic", {"sequence": 5, "code": "provider_retry",
+                          "severity": "warning", "message": "retry",
+                          "record_type": "session"}),
+    ("agent_result", {"sequence": 6, "model": "m1", "is_error": False,
+                      "subtype": "success", "cost_usd": 0.5, "duration_ms": 4200,
+                      "num_turns": 3, "input_tokens": 100, "output_tokens": 50}),
+]
+# Correlation keys that MUST survive to every configured healthy sink, after type
+# normalization (contract §Required Correlation, §Parity Rules rule 2).
+CORRELATION_KEYS = ("run_id", "feature", "role", "phase", "attempt",
+                    "iteration", "invocation_id", "sequence")
+
+
+def _manifest_fields(extra):
+    f = dict(PRIME_CORRELATION)
+    f.update(extra)
+    return f
+
+
+def _ship_prime(manifest, *, loki_url=None, otel_url=None):
+    """Drive the manifest through each CONFIGURED shipper; return delivery records.
+
+    A ``None`` url means the sink is not configured for this mode (local-only style),
+    so no remote attempt is made — mirroring telemetry-v1 §Operating Modes.
+    """
+    loki = otel = None
+    if loki_url is not None:
+        loki = loki_ship.Loki(loki_url, {"job": "ralph", "task": "demo", "backend": "prime"})
+    if otel_url is not None:
+        otel = otel_ship.Otel(otel_url, {"service.name": "ralph", "task": "demo", "backend": "prime"})
+    for event, extra in manifest:
+        fields = _manifest_fields(extra)
+        if loki:
+            loki.add_prime(event, fields)
+        if otel:
+            otel.add_prime(event, fields)
+    loki_rec = loki.flush() if loki else None
+    otel_rec = otel.flush() if otel else None
+    return loki_rec, otel_rec
+
+
+# identity of one event = (event, sequence) + the correlation it must carry.
+def _loki_identities(srv):
+    ids = set()
+    for r in srv.requests:
+        for s in (r.json or {}).get("streams", []):
+            event = s["stream"].get("event", "")
+            for _ts, line in s["values"]:
+                body = _parse_logfmt(line)
+                ids.add((event, body.get("sequence", "")))
+    return ids
+
+
+def _otel_identities(srv):
+    ids = set()
+    for r in srv.requests:
+        body = r.json
+        if not body or "resourceLogs" not in body:
+            continue
+        for rl in body["resourceLogs"]:
+            for sl in rl["scopeLogs"]:
+                for rec in sl["logRecords"]:
+                    attrs = {a["key"]: _otel_scalar(a["value"]) for a in rec.get("attributes", [])}
+                    ids.add((attrs.get("event", ""), attrs.get("sequence", "")))
+    return ids
+
+
+MANIFEST_IDENTITIES = {(event, str(extra["sequence"])) for event, extra in PRIME_MANIFEST}
+
+
+def _loki_body_by_event(srv):
+    """{event: {key: str}} from every Loki logfmt line."""
+    out = {}
+    for r in srv.requests:
+        for s in (r.json or {}).get("streams", []):
+            event = s["stream"].get("event", "")
+            for _ts, line in s["values"]:
+                out.setdefault(event, {}).update(_parse_logfmt(line))
+    return out
+
+
+def _otel_attrs_by_event(srv):
+    """{event: {key: str}} from every OTLP log-record attribute (normalized to str)."""
+    out = {}
+    for r in srv.requests:
+        body = r.json
+        if not body or "resourceLogs" not in body:
+            continue
+        for rl in body["resourceLogs"]:
+            for sl in rl["scopeLogs"]:
+                for rec in sl["logRecords"]:
+                    attrs = {a["key"]: _otel_scalar(a["value"]) for a in rec.get("attributes", [])}
+                    event = attrs.get("event", "")
+                    out.setdefault(event, {}).update(attrs)
+    return out
+
+
+def test_local_only_mode_makes_no_remote_attempt():
+    # Local-only: no remote sink configured → both receivers stay empty
+    # (telemetry-v1 §Operating Modes: "no remote attempt").
+    with CaptureServer() as ls, CaptureServer() as os_:
+        loki_rec, otel_rec = _ship_prime(PRIME_MANIFEST)
+        assert ls.requests == [] and os_.requests == []
+    assert loki_rec is None and otel_rec is None
+
+
+def test_loki_only_mode_carries_every_event_identity():
+    with CaptureServer() as ls:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url)
+        assert _loki_identities(ls) == MANIFEST_IDENTITIES
+
+
+def test_otel_only_mode_carries_every_event_identity():
+    with CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, otel_url=os_.url)
+        assert _otel_identities(os_) == MANIFEST_IDENTITIES
+
+
+def test_dual_sink_modes_share_event_and_invocation_identities():
+    # Dual-sink: one source invocation, independent export, IDENTICAL identities
+    # in both sinks (telemetry-v1 §Query Acceptance: "share invocation identities").
+    with CaptureServer() as ls, CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url, otel_url=os_.url)
+        loki_ids = _loki_identities(ls)
+        otel_ids = _otel_identities(os_)
+    assert loki_ids == MANIFEST_IDENTITIES
+    assert otel_ids == MANIFEST_IDENTITIES
+    assert loki_ids == otel_ids
+
+
+def test_dual_sink_correlation_is_semantically_equal_after_normalization():
+    # Parity rule 2: sink representations differ (Loki logfmt string vs OTLP typed
+    # attribute) but values must be equal once normalized to strings.
+    with CaptureServer() as ls, CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url, otel_url=os_.url)
+        loki_bodies = _loki_body_by_event(ls)
+        otel_attrs = _otel_attrs_by_event(os_)
+    for event, extra in PRIME_MANIFEST:
+        lb = loki_bodies.get(event, {})
+        oa = otel_attrs.get(event, {})
+        for key in CORRELATION_KEYS:
+            expected = str(_manifest_fields(extra)[key])
+            assert lb.get(key) == expected, "loki %s.%s=%r != %r" % (event, key, lb.get(key), expected)
+            assert oa.get(key) == expected, "otel %s.%s=%r != %r" % (event, key, oa.get(key), expected)
+            assert lb.get(key) == oa.get(key), "semantic mismatch %s.%s" % (event, key)
+
+
+def _has_terminal_result(bodies):
+    result = bodies.get("agent_result")
+    if not result:
+        return False
+    # terminal identity: the normalized result event with usage + correlation
+    return all(result.get(k) == str(_manifest_fields(PRIME_MANIFEST[-1][1])[k])
+               for k in ("run_id", "invocation_id")) and "output_tokens" in result
+
+
+def test_terminal_result_present_in_every_configured_sink():
+    # §Query Acceptance requires "all terminal results" in each healthy sink.
+    with CaptureServer() as ls:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url)
+        assert _has_terminal_result(_loki_body_by_event(ls)), "loki dropped terminal agent_result"
+    with CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, otel_url=os_.url)
+        assert _has_terminal_result(_otel_attrs_by_event(os_)), "otel dropped terminal agent_result"
+    with CaptureServer() as ls, CaptureServer() as os_:
+        _ship_prime(PRIME_MANIFEST, loki_url=ls.url, otel_url=os_.url)
+        assert _has_terminal_result(_loki_body_by_event(ls))
+        assert _has_terminal_result(_otel_attrs_by_event(os_))
+
+
+def test_asymmetric_outage_otel_down_does_not_suppress_loki():
+    # Parity rule 3: one sink's failure cannot suppress the attempt to the other.
+    # OTLP points at a dead port; Loki must still carry every identity, and OTLP
+    # must report a failed delivery WITHOUT raising.
+    with CaptureServer() as ls:
+        loki_rec, otel_rec = _ship_prime(PRIME_MANIFEST, loki_url=ls.url,
+                                         otel_url="http://127.0.0.1:1")
+        assert _loki_identities(ls) == MANIFEST_IDENTITIES
+    assert loki_rec is not None and loki_rec["status"] == "accepted"
+    assert otel_rec is not None and otel_rec["status"] == "failed"
+    assert otel_rec["reason_code"]
+
+
+def test_asymmetric_outage_loki_down_does_not_suppress_otel():
+    with CaptureServer() as os_:
+        loki_rec, otel_rec = _ship_prime(PRIME_MANIFEST, loki_url="http://127.0.0.1:1",
+                                         otel_url=os_.url)
+        assert _otel_identities(os_) == MANIFEST_IDENTITIES
+    assert otel_rec is not None and otel_rec["status"] == "accepted"
+    assert loki_rec is not None and loki_rec["status"] == "failed"
+    assert loki_rec["reason_code"]
+
+
+def test_asymmetric_outage_http_500_reports_failed_healthy_sink_unaffected():
+    # A receiver that answers 500 is an explicit receiver failure for that sink only;
+    # the healthy sink is untouched (telemetry-v1 §Delivery Evidence status=failed).
+    with CaptureServer() as ls, CaptureServer(status=500) as os_:
+        loki_rec, otel_rec = _ship_prime(PRIME_MANIFEST, loki_url=ls.url, otel_url=os_.url)
+        assert _loki_identities(ls) == MANIFEST_IDENTITIES
+    assert loki_rec["status"] == "accepted"
+    assert otel_rec["status"] == "failed" and otel_rec["http_status"] == 500
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
