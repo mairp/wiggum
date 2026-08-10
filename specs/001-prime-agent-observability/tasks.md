@@ -143,8 +143,8 @@
 
 ### Implementation for User Story 4
 
-- [ ] T051 [US4] Implement invocation artifact path construction, exclusive directory creation, atomic metadata/result writes, and policy-controlled prompt/provider/events/response retention in `lib/invocation_result.py`
-- [ ] T052 [US4] Replace run-scoped proposer prompt/pass debug filenames with invocation-scoped artifact writes in `proposer.sh`
+- [x] T051 [US4] Implement invocation artifact path construction, exclusive directory creation, atomic metadata/result writes, and policy-controlled prompt/provider/events/response retention in `lib/invocation_result.py`
+- [x] T052 [US4] Replace run-scoped proposer prompt/pass debug filenames with invocation-scoped artifact writes in `proposer.sh`
 - [ ] T053 [US4] Run stock and fleet Prime critics in JSON mode, reconstruct only final assistant-visible response, and record model/provider/usage/duration/diagnostics/result while preserving all restrictions in `lib/critic.py`
 - [ ] T054 [US4] Attach critic run/feature/role/phase/attempt/iteration-0/invocation correlation and artifact paths at the orchestrator call site in `orchestrator.sh`
 - [ ] T055 [US4] Implement configured raw-content and metadata retention cleanup without removing active invocations or required audit results in `lib/invocation_result.py`

@@ -48,7 +48,9 @@ OPTIONS
   -j, --stream-json       Also ship tool_use/api_request telemetry (Loki and/or OTEL).
   --loki-url URL          Loki base (with -j).
   --otel-url URL          OTLP/HTTP base (with -j). Ships to OTEL alongside Loki.
-  --debug                 Dump the assembled prompt + raw agent output to .wiggum/debug/.
+  --debug                 Retain each pass's prompt.txt + response.txt in that
+                          pass's own invocation dir (.wiggum/features/<f>/debug/
+                          invocations/...), alongside its metadata/result/events.
   -h, --help              Show this help.
 
 Local agent-stream capture (tool calls, messages, cost -> events.jsonl) is ON by
@@ -131,7 +133,6 @@ esac
 mkdir -p "$(dirname "$EVIDENCE")"
 
 STATE_DIR="$WORKDIR/.wiggum"
-mkdir -p "$STATE_DIR/debug"
 : "${WIGGUM_EVENTS:=$STATE_DIR/events.jsonl}"
 export WIGGUM_EVENTS
 
@@ -334,6 +335,13 @@ PY
     # single durable result.json after the pass finishes.
     mkdir -p "$invocation_dir"
     printf '%s\n' "$invocation_dir" > "$STATE_DIR/.last-invocation-dir" 2>/dev/null || true
+    # Debug raw retention is invocation-scoped, not run-scoped: the standing
+    # prompt this pass actually sent lands in the SAME collision-free directory as
+    # its metadata/result/events, so a single invocation is fully reconstructable
+    # from one directory. Off by default (policy: raw disabled unless --debug).
+    if [[ "$DEBUG" == "true" ]]; then
+      printf '%s\n' "$prompt" > "$invocation_dir/prompt.txt"
+    fi
     if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
       python3 - "$invocation_dir/metadata.json" "$RUN_ID" "$FEATURE" "$stream_backend" \
         "$PHASE" "$ATTEMPT" "$iter" "$invocation_id" "$EVIDENCE" <<'PY'
@@ -388,8 +396,21 @@ PY
     else
       tap_cmd=( python3 "$TAP" "${tap_args[@]}" )
     fi
-    run_agent "$prompt" "${shared[@]}" 2>&1 | "${tap_cmd[@]}"
-    local producer_rc="${PIPESTATUS[0]}" parser_rc="${PIPESTATUS[1]}"
+    # Under --debug, tee the raw producer stream into this invocation's own
+    # response.txt (invocation-scoped, not a run-scoped shared log). The tee is a
+    # middle pipeline stage, so the parser exit shifts from PIPESTATUS[1] to [2] —
+    # the producer stays [0] and the producer/tap reconciliation is unchanged.
+    local producer_rc parser_rc
+    if [[ "$DEBUG" == "true" ]]; then
+      run_agent "$prompt" "${shared[@]}" 2>&1 | tee "$invocation_dir/response.txt" | "${tap_cmd[@]}"
+      # Capture BOTH exits in one command: a simple assignment resets PIPESTATUS,
+      # so splitting into two statements would make the second read the wrong array.
+      # tee is a middle stage, so the parser exit is [2] here (producer stays [0]).
+      local -a pipe_rc=( "${PIPESTATUS[@]}" ); producer_rc="${pipe_rc[0]}"; parser_rc="${pipe_rc[2]}"
+    else
+      run_agent "$prompt" "${shared[@]}" 2>&1 | "${tap_cmd[@]}"
+      local -a pipe_rc=( "${PIPESTATUS[@]}" ); producer_rc="${pipe_rc[0]}"; parser_rc="${pipe_rc[1]}"
+    fi
     end_ms="$(date +%s%3N 2>/dev/null || echo 0)"
     preserve_producer_status "$invocation_dir" "$producer_rc" "$parser_rc" "$(( end_ms - start_ms ))"
     return 0
@@ -428,10 +449,10 @@ fi
 PROMPT="$(cat "$PROMPT_FILE")"
 [[ -n "${PROMPT//[[:space:]]/}" ]] || { echo "proposer.sh: prompt is empty" >&2; exit 1; }
 
-if [[ "$DEBUG" == "true" ]]; then
-  printf '%s\n' "$PROMPT" > "$STATE_DIR/debug/proposer-prompt.$RUN_ID.txt"
-  echo "proposer.sh[debug]: prompt -> $STATE_DIR/debug/proposer-prompt.$RUN_ID.txt" >&2
-fi
+# Debug raw retention (prompt/response) is now invocation-scoped: run_iteration
+# writes each pass's prompt.txt/response.txt into that pass's own collision-free
+# invocation directory, alongside its metadata/result/events, so one invocation
+# reconstructs from one directory rather than a shared run-scoped debug file.
 
 # The current pass runs in the background with its PID recorded, so
 # `wiggum stop --now` can kill the in-flight agent tree; a graceful
@@ -472,11 +493,7 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   wiggum_emit iter_start iter "$i" max_iter "$MAX_ITER"
   echo "----- proposer pass $i/$MAX_ITER  $(date -Is) -----" >&2
 
-  if [[ "$DEBUG" == "true" ]]; then
-    run_iteration "$i" "$PROMPT" 2>&1 | tee -a "$STATE_DIR/debug/proposer-pass.$RUN_ID.log" &
-  else
-    run_iteration "$i" "$PROMPT" &
-  fi
+  run_iteration "$i" "$PROMPT" &
   PASS_PID=$!
   echo "$PASS_PID" > "$PIDFILE" 2>/dev/null || true
   wait "$PASS_PID" || true

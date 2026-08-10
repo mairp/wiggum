@@ -272,6 +272,90 @@ def reconcile_result(
     return result
 
 
+_ARTIFACT_ROOT = ("debug", "invocations")
+RAW_ARTIFACTS = ("prompt.txt", "provider.jsonl", "events.jsonl", "response.txt")
+
+
+def invocation_artifact_dir(feature_root, context):
+    """Derive the invocation directory purely from sanitized identity fields."""
+    return Path(feature_root).joinpath(
+        *_ARTIFACT_ROOT,
+        safe_path_component(context.run_id),
+        safe_path_component(context.role),
+        f"phase-{int(context.phase)}",
+        f"attempt-{int(context.attempt)}",
+        f"iter-{int(context.iteration)}",
+        safe_path_component(context.invocation_id),
+    )
+
+
+class InvocationArtifactSet:
+    """One reconstructable invocation's on-disk artifacts under a feature root.
+
+    Paths derive only from sanitized identity, so a hostile ``run_id`` cannot
+    escape the feature root. ``metadata.json`` is written atomically when the
+    exclusive directory is created (before launch); ``result.json`` is written
+    exactly once at finalization; raw prompt/provider/events/response content is
+    prunable after retention expiry without disturbing the audit metadata and
+    terminal result.
+    """
+
+    def __init__(self, feature_root, context):
+        self.feature_root = Path(feature_root)
+        self.context = context
+        self.dir = invocation_artifact_dir(self.feature_root, context)
+        self.metadata_path = self.dir / "metadata.json"
+        self.result_path = self.dir / "result.json"
+        self.prompt_path = self.dir / "prompt.txt"
+        self.provider_path = self.dir / "provider.jsonl"
+        self.events_path = self.dir / "events.jsonl"
+        self.response_path = self.dir / "response.txt"
+        self._finalized = False
+
+    def _raw_paths(self):
+        return (
+            self.prompt_path,
+            self.provider_path,
+            self.events_path,
+            self.response_path,
+        )
+
+    def _metadata(self):
+        metadata = dict(self.context.to_dict())
+        metadata.update(self.context.identity())
+        metadata["created_at"] = _utc_now()
+        return metadata
+
+    def create(self):
+        """Create the invocation directory exclusively and write metadata atomically."""
+        try:
+            self.dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise RuntimeError(
+                f"invocation directory already exists: {self.dir}"
+            ) from error
+        atomic_write_json(self.metadata_path, self._metadata())
+        return self
+
+    def finalize(self, **observations):
+        """Reconcile once and durably write the single terminal result."""
+        if self._finalized or self.result_path.exists():
+            raise RuntimeError("invocation result has already been finalized")
+        result = reconcile_result(self.context, **observations)
+        atomic_write_json(self.result_path, result, replace=False)
+        self._finalized = True
+        return result
+
+    def prune_raw(self):
+        """Remove raw retained content, leaving metadata and result untouched."""
+        removed = []
+        for path in self._raw_paths():
+            if path.exists():
+                path.unlink()
+                removed.append(path.name)
+        return removed
+
+
 class ResultFinalizer:
     """Finalize one result artifact and mirror it as one normalized event."""
 

@@ -699,3 +699,44 @@ The tests are correctly **red** — they fail at collection with `ImportError: c
 
 ===== ITER 42 / 120  2026-08-10T13:41:01+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. Completed **T051** — the invocation artifact API in `lib/invocation_result.py`.
+
+**What I added** (additive, no existing code changed):
+- `invocation_artifact_dir(feature_root, context)` — derives the path `debug/invocations/<run>/<role>/phase-N/attempt-N/iter-N/<invocation_id>` purely from **sanitized** identity components (reusing `safe_path_component`), so a hostile `run_id` like `../../etc/passwd` stays contained under the feature root.
+- `InvocationArtifactSet` with:
+  - `create()` — exclusive `mkdir` (raises `RuntimeError` on collision rather than overwriting) plus atomic `metadata.json` write *before* launch.
+  - `finalize(**observations)` — reconciles via the existing `reconcile_result` and writes `result.json` exactly once (via `os.link`-based non-replace atomic write; second call raises).
+  - `prune_raw()` — removes `prompt.txt`, `provider.jsonl`, `events.jsonl`, `response.txt` while leaving `metadata.json`/`result.json` intact; idempotent (returns `[]` once gone).
+
+**Verification:**
+- `lib/test_invocation_artifacts.py`: 7/7 pass (was red — import error).
+- All other `invocation_result` consumers (`test_agent_event_contract`, `test_agent_result`, `test_prime_error_breaker`, `test_agent_stream`): 38/38 pass.
+- `py_compile` clean.
+
+Checkbox flipped to `- [x] T051` in `tasks.md`. The next unchecked task is T052 (proposer.sh invocation-scoped artifact writes).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 43 / 120  2026-08-10T13:44:23+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. Completed **T052**: replaced the run-scoped proposer debug files with invocation-scoped artifact writes in `proposer.sh`.
+
+**What changed:**
+- Removed the two run-scoped debug outputs — `.wiggum/debug/proposer-prompt.$RUN_ID.txt` (whole run's prompt, overwritten each run) and `.wiggum/debug/proposer-pass.$RUN_ID.log` (all passes' output appended into one shared log) — plus the now-unused `mkdir -p "$STATE_DIR/debug"`.
+- Under `--debug`, `run_iteration` now writes each pass's `prompt.txt` and `response.txt` into that pass's own collision-free invocation directory (`.wiggum/features/<feature>/debug/invocations/<run>/<role>/phase-N/attempt-N/iter-N/<invocation-id>/`), alongside the existing `metadata.json`/`result.json`/`events.jsonl`. So one invocation reconstructs from one directory instead of a run-shared log, matching the `RAW_ARTIFACTS` layout T051 established in `lib/invocation_result.py`.
+- Updated the `--debug` help text to describe the new location.
+
+**Safety detail worth noting:** the raw `response.txt` is captured by inserting `tee` as a middle pipeline stage. That shifts the parser exit from `PIPESTATUS[1]` to `[2]`, so I snapshot the whole `PIPESTATUS` array into a local in the *same* command (a bare `producer_rc=...` assignment resets `PIPESTATUS`, which is exactly what broke the first attempt) — the producer stays `[0]` and the producer/tap reconciliation the failure matrix depends on is unchanged.
+
+**Verification:**
+- `bash -n proposer.sh` clean.
+- `lib/test_prime_pipeline.py` — 22 passed (the full failure matrix: launch/nonzero/signal/timeout/auth/provider_error/empty/malformed/parser all still reconcile correctly).
+- `lib/test_invocation_artifacts.py` — passed.
+- A `--debug` smoke run confirmed `prompt.txt`/`response.txt` land in the invocation dir and no `.wiggum/debug` files are created.
+
+Pre-existing failures unrelated to this task and left for their own tasks: `lib/test_observability_policy.py` (import of `RedactionRetentionPolicy`, T055) and 6 `lib/test_prime_backend.py` critic tests (T053). I confirmed both fail identically with my changes stashed.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 44 / 120  2026-08-10T13:58:25+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
