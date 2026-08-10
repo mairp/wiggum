@@ -31,6 +31,11 @@ import sys, os, json, time, argparse, urllib.request, urllib.error
 CONNECT_TIMEOUT = float(os.environ.get("RALPH_LOKI_TIMEOUT", "2.5"))
 RESULT_PREVIEW  = 300   # chars of the model's final text kept on the api_request event
 
+# Bounded correlation values safe to promote to indexed Loki labels. Everything
+# else — run_id, invocation_id, sequence, cost, tokens — stays in the logfmt BODY
+# so stream cardinality never explodes (contract telemetry-v1 §Loki Mapping).
+PRIME_LABEL_FIELDS = ("role",)
+
 
 def warn(msg):
     sys.stderr.write("ralph_loki_ship: %s\n" % msg)
@@ -64,6 +69,8 @@ class Loki:
         self.push_url = url.rstrip("/") + "/loki/api/v1/push"
         self.base = base_labels           # dict of the always-on labels (job/task/backend)
         self.streams = {}                 # frozenset(labels.items()) -> (labels, [[ts,line],...])
+        self._event_count = 0             # values buffered since the last flush
+        self._batch_seq = 0               # monotonic per-instance batch counter
 
     def add(self, event, line, labels=None):
         lbl = dict(self.base)
@@ -76,10 +83,34 @@ class Loki:
         if key not in self.streams:
             self.streams[key] = (lbl, [])
         self.streams[key][1].append([ts, line])
+        self._event_count += 1
+
+    def add_prime(self, event, fields):
+        """Map a normalized Prime event (agent_init/text/tool/evidence_writing/
+        diagnostic/result) onto a Loki stream.
+
+        The event class becomes the low-cardinality `event` label; only bounded
+        correlation values (PRIME_LABEL_FIELDS) are promoted to labels. Every
+        correlation identity and typed metric goes into the logfmt BODY so LogQL
+        can `| logfmt | unwrap cost_usd` while stream cardinality stays bounded.
+        """
+        labels = {}
+        for k in PRIME_LABEL_FIELDS:
+            v = fields.get(k)
+            if v is not None:
+                labels[k] = str(v)
+        self.add(event, logfmt(fields), labels=labels or None)
 
     def flush(self):
+        """Push all buffered streams. Returns a delivery record dict describing
+        the batch outcome (sink/batch_id/event_count/status/http_status/
+        reason_code) so callers can persist local telemetry_delivery evidence,
+        or None when there was nothing to send. Never raises (best-effort)."""
         if not self.streams:
-            return
+            return None
+        event_count = self._event_count
+        self._batch_seq += 1
+        batch_id = "loki-%d-%d" % (time.time_ns(), self._batch_seq)
         payload = {"streams": [
             {"stream": lbl, "values": vals} for lbl, vals in self.streams.values()
         ]}
@@ -87,9 +118,16 @@ class Loki:
         req = urllib.request.Request(
             self.push_url, data=data,
             headers={"Content-Type": "application/json"}, method="POST")
+        rec = {"sink": "loki", "batch_id": batch_id, "event_count": event_count,
+               "status": "accepted", "http_status": None, "reason_code": None}
         try:
             with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
-                if resp.status not in (200, 204):
+                rec["http_status"] = resp.status
+                if resp.status in (200, 204):
+                    rec["status"] = "accepted"
+                else:
+                    rec["status"] = "failed"
+                    rec["reason_code"] = "http_%s" % resp.status
                     warn("Loki push HTTP %s" % resp.status)
         except urllib.error.HTTPError as e:
             body = ""
@@ -97,11 +135,18 @@ class Loki:
                 body = e.read().decode("utf-8", "replace")[:200]
             except Exception:
                 pass
+            rec["status"] = "failed"
+            rec["http_status"] = e.code
+            rec["reason_code"] = "http_%s" % e.code
             warn("Loki push failed HTTP %s %s" % (e.code, body))
         except Exception as e:  # noqa: BLE001 — best-effort, never propagate
+            rec["status"] = "failed"
+            rec["reason_code"] = "transport_error"
             warn("Loki push error: %s" % e)
         finally:
             self.streams = {}
+            self._event_count = 0
+        return rec
 
 
 # ---- stream mode ----------------------------------------------------------

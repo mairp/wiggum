@@ -112,11 +112,11 @@
 - [x] T036 [P] [US3] Extend Loki capture tests with every normalized Prime event class, required correlation fields, low-cardinality labels, receiver success/failure, and local delivery evidence in `lib/test_ralph_loki_ship.py`
 - [x] T037 [P] [US3] Extend OTLP capture tests with every normalized Prime event class, typed usage/duration/cost values, correlation fields, receiver success/failure, and local delivery evidence in `lib/test_ralph_otel_ship.py`
 - [x] T038 [P] [US3] Add failing four-mode parity, semantic field comparison, terminal-result presence, and asymmetric sink-outage tests in `lib/test_telemetry_parity.py`
-- [ ] T039 [P] [US3] Add failing recursion-guard and configured/reachable/accepted/query-verified state tests, including a forced outage that fails unless local delivery failure appears within 10 seconds or invocation completion, in `lib/test_telemetry_delivery.py`
+- [x] T039 [P] [US3] Add failing recursion-guard and configured/reachable/accepted/query-verified state tests, including a forced outage that fails unless local delivery failure appears within 10 seconds or invocation completion, in `lib/test_telemetry_delivery.py`
 
 ### Implementation for User Story 3
 
-- [ ] T040 [US3] Extend Loki event mapping and batch outcomes for normalized Prime init/text/tool/evidence/diagnostic/result events in `lib/ralph_loki_ship.py`
+- [x] T040 [US3] Extend Loki event mapping and batch outcomes for normalized Prime init/text/tool/evidence/diagnostic/result events in `lib/ralph_loki_ship.py`
 - [ ] T041 [US3] Extend OTLP log/metric mapping and batch outcomes for normalized Prime events and typed result usage in `lib/ralph_otel_ship.py`
 - [ ] T042 [US3] Fan out sanitized normalized events local-first to independently configured sinks and emit recursion-safe local `telemetry_delivery` records in `lib/agent_stream.py`
 - [ ] T043 [US3] Propagate feature, role, phase, attempt, iteration, invocation, and optional trace correlation through lifecycle and agent exports in `wiggum-lib.sh` and `orchestrator.sh`

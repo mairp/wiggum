@@ -716,3 +716,34 @@ GATE FAIL: 45 task(s) still unchecked in tasks.md
 
 ===== ITER 30 / 120  2026-08-10T12:13:41+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T039** — the test-first task for User Story 3's telemetry-delivery layer.
+
+**What I did:** Created `lib/test_telemetry_delivery.py` with 12 failing tests that pin the contract for the not-yet-built `telemetry_delivery` module (implemented later by T042 fan-out and T044 state language). The tests cover the three things T039's text demands:
+
+1. **Recursion guard** — normalized events reach a sink, but the `telemetry_delivery` evidence *about* that sink is retained locally only and never re-shipped to the sink it describes (per agent-events-v2 §telemetry_delivery).
+2. **Four distinct receiver states** — `configured` / `reachable` / `request accepted` / `query verified` each get a distinct phrase, and startup never collapses them into a generic `telemetry: true` (per telemetry-v1 §Receiver State Language, FR-036).
+3. **Forced outage** — a flush against a dead sink (both a fake and the real Loki shipper on a closed port) must surface a local `status=failed` delivery record with a stable `reason_code` within 10 seconds, while the authoritative local event survives (SC-006). One healthy sink is unaffected by another's failure.
+
+**Verification:** The tests fail cleanly with `ModuleNotFoundError: No module named 'telemetry_delivery'` — the correct red state for a test-first task, matching the already-red T036/T037 shipper tests. `python3 -m py_compile lib/*.py` is green and no existing test was weakened. Flipped T039's checkbox to `- [x]`.
+
+The next unchecked task is **T040** (extend Loki event mapping in `lib/ralph_loki_ship.py`), the first implementation task in the US3 block.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 44 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 31 / 120  2026-08-10T12:23:36+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. T040 is complete and its checkbox is flipped.
+
+I implemented the Loki normalized-Prime-event mapping in `lib/ralph_loki_ship.py`:
+
+- **`add_prime(event, fields)`** — maps each Prime event class (`agent_init`, `agent_text`, `agent_tool`, `evidence_writing`, `agent_diagnostic`, `agent_result`) to a stream. The event class is the `event` label; only `role` is promoted to an indexed label (`PRIME_LABEL_FIELDS`), keeping labels low-cardinality. All correlation identity (`run_id`, `invocation_id`, `sequence`, `feature`, `phase`, `attempt`, `iteration`) and typed metrics (cost, tokens, duration) stay in the logfmt body.
+- **`flush()`** now returns a delivery record (`{sink, batch_id, event_count, status, http_status, reason_code}`) reporting `accepted` on 200/204, `failed` with a stable `reason_code` on HTTP errors or transport failure, and `None` for an empty batch — so `agent_stream.py` (T042) can persist local `telemetry_delivery` evidence. It still never raises.
+
+All 21 tests in `lib/test_ralph_loki_ship.py` pass and the module compiles clean. The next unchecked task is T041 (the OTLP counterpart in `lib/ralph_otel_ship.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 43 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 32 / 120  2026-08-10T12:26:01+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
