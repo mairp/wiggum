@@ -433,3 +433,51 @@ GATE FAIL: 60 task(s) still unchecked in tasks.md
 
 ===== ITER 15 / 120  2026-08-10T09:46:30+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T024 done. All five T024 field categories render correctly in `lib/present.py` and the six US1 presenter tests pass.
+
+What I verified this iteration:
+- **`agent_init`** (present.py:273) — provider-neutral: emits `anthropic / claude-sonnet`, `session session-7`, `schema v3`, and never leaks the literal "Prime".
+- **`agent_text`** (:317) — full-detail only; partial/final fragment markers work.
+- **`agent_tool`** lifecycle (:294) — start/progress/end with result summary, duration formatting, and failure styling; suppressed at `milestones`.
+- **`evidence_writing`** (:322) — shows target path and `exact-expected-target` match reason at `milestones`.
+- **`agent_diagnostic`** (:327) — code + message; suppressed at `milestones`.
+- **`agent_result`** (:334) — normalized fields (`$0.12`, `1.2k tok in`, `345 tok out`, `1m05s`, `4 turns`, reason, source).
+
+`python3 -m pytest -q lib/test_present.py` → 6 passed. Checkbox flipped to `- [x]`. The next unchecked task is T025 (validate journeys/fixture replay against the US1 independent test).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 59 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 16 / 120  2026-08-10T09:48:02+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Completed T025 — the final task in User Story 1.
+
+**What I validated:** T025 is a validation task (not net-new code), so I confirmed the US1 independent test is genuinely satisfied rather than just green-by-accident:
+
+- **Both proposer journeys** — `test_prime_backend.py` exercises stock `prime-agent` dispatch and fleet `prime <variant>` launcher selection via `WIGGUM_PRIME_FLEET_BIN`.
+- **Fixture replay** — `test_prime_stream.py` replays 10 sanitized `prime-v3` fixtures covering success, internal retry, auth-error-with-exit-0, unknown records, malformed, and truncated streams.
+- **Live-render timing contract** — `test_present.py:93-124` enforces the ≥95%-within-2-seconds requirement with timestamped injection.
+- **Fixture hygiene** — grep for `sk-ant`, `/root/`, `thinking`, `api_key`, `bearer` across all fixtures returned nothing.
+
+All 30 US1 tests pass (`test_prime_stream`, `test_prime_stream_tools`, `test_prime_evidence`, `test_prime_backend`, `test_present`). No US1 contract deviations existed, so no test edits were needed — I only flipped the checkbox.
+
+This clears the **User Story 1 checkpoint**: the local-observability MVP for both Prime proposer selectors is now independently usable. The next iteration starts Phase 4 (User Story 2) at T026.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 58 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 17 / 120  2026-08-10T09:49:36+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T026** — the test-first task for User Story 2's failure matrix.
+
+**What I did:** Created `lib/test_prime_pipeline.py`, a new end-to-end test suite that drives `proposer.sh` with a fake Prime launcher through all nine failure classes (launch failure, nonzero exit, signal, timeout, provider auth/model error with exit 0, empty stream, malformed/truncated stream, parser failure). It asserts each pass produces exactly one durable `result.json` with the correct `reason_code`/`status` and one equivalent `agent_result` event, plus breaker behavior (halts at exactly N launches, never N+1) and one-terminal-per-pass.
+
+**Why they fail (correctly):** All 13 tests fail for substantive contract gaps, not harness errors — the pipeline currently pipes the producer into the tap and unconditionally `return 0`s, and the tap suppresses `agent_result` when an invocation context is present, so no `result.json` and no terminal event exist for Prime invocations yet. These are exactly the gaps that T030–T035 will close.
+
+I followed the test conventions from `test_prime_backend.py` (fake launcher via `$WIGGUM_PRIME_AGENT_BIN`, sanitized fixtures, no real credentials or `/root/` paths, absolute evidence paths) and targeted the reason-code vocabulary already defined in `lib/invocation_result.py`. Checkbox T026 is flipped to `- [x]`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 57 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 18 / 120  2026-08-10T09:58:31+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors

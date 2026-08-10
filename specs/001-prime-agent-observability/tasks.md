@@ -68,8 +68,8 @@
 - [x] T021 [US1] Register `prime-v3` adapter selection and normalized `agent_init`, `agent_text`, `agent_tool`, `evidence_writing`, `agent_diagnostic`, and terminal-observation output in `lib/agent_stream.py`
 - [x] T022 [US1] Route stock `prime-agent` and fleet `prime <variant>` proposers through `--mode json` and the Prime adapter when structured capture is requested, while preserving prompt stdin and text fallback in `proposer.sh`
 - [x] T023 [US1] Pass run, feature, proposer role, phase, attempt, iteration, invocation ID, and exact evidence path from `orchestrator.sh` through `proposer.sh` into normalized events and invocation artifacts
-- [ ] T024 [US1] Render provider-neutral Prime initialization, coherent text, tool lifecycle, evidence activity, and result fields at the existing detail levels in `lib/present.py`
-- [ ] T025 [US1] Validate both fake stock/fleet proposer journeys and fixture replay against the US1 independent test, fixing only US1 contract deviations in `lib/test_prime_stream.py`, `lib/test_prime_backend.py`, and `lib/test_present.py`
+- [x] T024 [US1] Render provider-neutral Prime initialization, coherent text, tool lifecycle, evidence activity, and result fields at the existing detail levels in `lib/present.py`
+- [x] T025 [US1] Validate both fake stock/fleet proposer journeys and fixture replay against the US1 independent test, fixing only US1 contract deviations in `lib/test_prime_stream.py`, `lib/test_prime_backend.py`, and `lib/test_present.py`
 
 **Checkpoint**: User Story 1 is independently usable as the local-observability MVP for both Prime proposer selectors.
 
@@ -83,7 +83,7 @@
 
 ### Tests for User Story 2
 
-- [ ] T026 [P] [US2] Add failing end-to-end pipeline tests for launch failure, producer nonzero, signal, timeout, provider auth/model error with exit 0, empty stream, malformed/truncated stream, and parser failure in `lib/test_prime_pipeline.py`
+- [x] T026 [P] [US2] Add failing end-to-end pipeline tests for launch failure, producer nonzero, signal, timeout, provider auth/model error with exit 0, empty stream, malformed/truncated stream, and parser failure in `lib/test_prime_pipeline.py`
 - [ ] T027 [P] [US2] Add failing result-handoff tests for atomicity, event/result equivalence, exactly-one final result, duplicate-finalization rejection, and partial-artifact recovery in `lib/test_agent_result.py`
 - [ ] T028 [P] [US2] Add failing breaker tests for exact invocation lookup, single increment, success reset, historical-result isolation, concurrent-feature isolation, and stop-before-N+1 behavior in `lib/test_prime_error_breaker.py`
 - [ ] T029 [P] [US2] Add early-termination result-synthesis regression cases for Claude/Bebop-compatible streams in `lib/test_agent_stream_result.py`
