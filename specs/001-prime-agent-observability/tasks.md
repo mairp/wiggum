@@ -84,8 +84,8 @@
 ### Tests for User Story 2
 
 - [x] T026 [P] [US2] Add failing end-to-end pipeline tests for launch failure, producer nonzero, signal, timeout, provider auth/model error with exit 0, empty stream, malformed/truncated stream, and parser failure in `lib/test_prime_pipeline.py`
-- [ ] T027 [P] [US2] Add failing result-handoff tests for atomicity, event/result equivalence, exactly-one final result, duplicate-finalization rejection, and partial-artifact recovery in `lib/test_agent_result.py`
-- [ ] T028 [P] [US2] Add failing breaker tests for exact invocation lookup, single increment, success reset, historical-result isolation, concurrent-feature isolation, and stop-before-N+1 behavior in `lib/test_prime_error_breaker.py`
+- [x] T027 [P] [US2] Add failing result-handoff tests for atomicity, event/result equivalence, exactly-one final result, duplicate-finalization rejection, and partial-artifact recovery in `lib/test_agent_result.py`
+- [x] T028 [P] [US2] Add failing breaker tests for exact invocation lookup, single increment, success reset, historical-result isolation, concurrent-feature isolation, and stop-before-N+1 behavior in `lib/test_prime_error_breaker.py`
 - [ ] T029 [P] [US2] Add early-termination result-synthesis regression cases for Claude/Bebop-compatible streams in `lib/test_agent_stream_result.py`
 
 ### Implementation for User Story 2

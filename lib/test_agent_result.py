@@ -91,3 +91,43 @@ def test_result_finalizer_never_overwrites_existing_artifact(context, tmp_path):
             parser_exit_code=0,
         )
     assert json.loads(path.read_text()) == {"owner": "other-finalizer"}
+
+
+def test_emitted_event_is_field_equivalent_to_persisted_result(context, tmp_path):
+    events = []
+    finalizer = ResultFinalizer(tmp_path / "result.json", context, emit=events.append)
+    result = finalizer.finalize(
+        provider_terminal={"status": "error", "reason_code": "provider_auth",
+                           "reason": "Authentication failed", "stop_reason": "error"},
+        producer_exit_code=0, parser_exit_code=0,
+    )
+    (event,) = events
+    # Every meaningful result field (contract marker aside) must be carried,
+    # verbatim, on the mirrored event so the stream and the artifact never
+    # disagree. None-valued fields are omitted from the event by design.
+    for key, value in result.items():
+        if key == "contract" or value is None:
+            continue
+        assert event[key] == value, key
+    assert event["event"] == "agent_result"
+    assert event["reason_code"] == result["reason_code"] == "provider_auth"
+    assert event["is_error"] is True
+
+
+def test_result_finalizer_recovers_from_stale_partial_temp(context, tmp_path):
+    # A previous invocation crashed after opening a temp file but before the
+    # atomic link, leaving a partial sibling and no result.json. Finalization
+    # must still produce one complete, valid artifact.
+    path = tmp_path / "result.json"
+    (tmp_path / ".result.json.deadbeef.tmp").write_text('{"partial":true')  # truncated
+    events = []
+    finalizer = ResultFinalizer(path, context, emit=events.append)
+    result = finalizer.finalize(
+        provider_terminal={"status": "success", "stop_reason": "stop"},
+        producer_exit_code=0, parser_exit_code=0,
+    )
+    persisted = json.loads(path.read_text())
+    assert persisted == result
+    assert persisted["reason_code"] == "success"
+    assert persisted["status"] == "success"
+    assert len(events) == 1

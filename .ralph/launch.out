@@ -268,3 +268,37 @@ I followed the test conventions from `test_prime_backend.py` (fake launcher via 
 
 ===== ITER 18 / 120  2026-08-10T09:58:31+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. T027 complete.
+
+**What I did this iteration (T027 — result-handoff tests):** The target file `lib/test_agent_result.py` already existed from a prior wip checkpoint and covered three of the five named concerns (atomicity, exactly-one final result, duplicate-finalization rejection). I added the two missing concerns:
+
+- **Event/result equivalence** — a new test asserting every meaningful field of the persisted result appears verbatim on the mirrored `agent_result` event. Writing it surfaced the real contract that `EventEnvelope.normalize` omits `None`-valued fields by design, so the assertion checks non-`None` fields carry through identically.
+- **Partial-artifact recovery** — a new test seeding a stale, truncated `.result.json.*.tmp` sibling (simulating a crash mid-write) and verifying finalization still produces one complete, valid `result.json` and exactly one event.
+
+All 13 tests in `lib/test_agent_result.py` pass, and I flipped T027 to `- [x]` in tasks.md. The next unchecked task is T028 (breaker tests in `lib/test_prime_error_breaker.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 19 / 120  2026-08-10T10:00:51+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done — completed T028, the first unchecked task.
+
+**What I did:** Added `lib/test_prime_error_breaker.py` with failing tests for the consecutive-error breaker, covering all six behaviors the task names:
+
+- **Exact invocation lookup** — `resolve_result_path`/`load_invocation_result` read the identity-derived `result.json`, and `select_result_event` matches by exact `invocation_id` (never latest-by-mtime).
+- **Single increment** — one count per new failing invocation; a duplicate result for the same id is ignored.
+- **Success reset** — a successful invocation zeroes the count.
+- **Historical-result isolation** — a stale error left elsewhere in the debug tree doesn't leak into the current count.
+- **Concurrent-feature isolation** — a result whose run/feature/phase/attempt scope doesn't match is rejected with `ValueError`.
+- **Stop-before-N+1** — `should_halt()` trips exactly at the limit, before the next pass launches.
+
+The contract I encoded (module `error_breaker` with `ConsecutiveErrorBreaker`, `load_invocation_result`, `resolve_result_path`, `select_result_event`) follows the data-model's `ConsecutiveErrorState` (§7) and the invocation-v1 rule that the breaker "reads this exact invocation result or selects the event by exact invocation id." That module is built later in T032.
+
+**Verification:** Tests fail with `ModuleNotFoundError: No module named 'error_breaker'` — the correct test-first failing state — and the file passes `py_compile`.
+
+I left T029 unchecked: it's a `[P]` sibling but targets a different file and subject (early-termination result synthesis in `test_agent_stream_result.py`), so it's not trivially coupled to T028.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 20 / 120  2026-08-10T10:06:51+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
