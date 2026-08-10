@@ -91,8 +91,8 @@
 ### Implementation for User Story 2
 
 - [x] T030 [US2] Preserve producer, adapter, timeout, and signal statuses through the background pipeline without unconditional success conversion in `proposer.sh`
-- [ ] T031 [US2] Reconcile provider observations with producer/parser status, write atomic invocation `result.json`, and emit exactly one equivalent `agent_result` in `lib/invocation_result.py` and `lib/agent_stream.py`
-- [ ] T032 [US2] Replace historical tail scanning with exact current invocation result consumption, count each failure once, reset on success, and halt before the next pass at the configured threshold in `proposer.sh`
+- [x] T031 [US2] Reconcile provider observations with producer/parser status, write atomic invocation `result.json`, and emit exactly one equivalent `agent_result` in `lib/invocation_result.py` and `lib/agent_stream.py`
+- [x] T032 [US2] Replace historical tail scanning with exact current invocation result consumption, count each failure once, reset on success, and halt before the next pass at the configured threshold in `proposer.sh`
 - [ ] T033 [US2] Emit visible durable launch, authentication, provider, timeout, nonzero, signal, malformed, parser, missing-terminal, unsupported-schema, and conflict reasons from `proposer.sh` through `wiggum-lib.sh`
 - [ ] T034 [US2] Apply provider-neutral early-termination result synthesis to supported Claude/Bebop adapter paths without changing successful result semantics in `lib/agent_stream.py`
 - [ ] T035 [US2] Validate the complete failure matrix and breaker threshold using `lib/test_prime_pipeline.py`, `lib/test_prime_error_breaker.py`, and `lib/test_agent_stream_result.py`

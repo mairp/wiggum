@@ -329,6 +329,11 @@ PY
     local stream_backend="$BACKEND_LABEL"
     [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] && stream_backend="$BACKEND"
     local invocation_dir="$WORKDIR/.wiggum/features/$FEATURE/debug/invocations/$RUN_ID/$ROLE/phase-$PHASE/attempt-$ATTEMPT/iter-$iter/$invocation_id"
+    # Publish this pass's invocation dir so the controller loop (which spawned
+    # run_iteration in the background) can locate the artifacts to reconcile the
+    # single durable result.json after the pass finishes.
+    mkdir -p "$invocation_dir"
+    printf '%s\n' "$invocation_dir" > "$STATE_DIR/.last-invocation-dir" 2>/dev/null || true
     if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
       python3 - "$invocation_dir/metadata.json" "$RUN_ID" "$FEATURE" "$stream_backend" \
         "$PHASE" "$ATTEMPT" "$iter" "$invocation_id" "$EVIDENCE" <<'PY'
@@ -361,7 +366,8 @@ PY
     if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
       tap_args+=( --feature "$FEATURE" --role "$ROLE" --phase "$PHASE"
                   --attempt "$ATTEMPT" --invocation-id "$invocation_id"
-                  --expected-evidence "$EVIDENCE" --provider-format prime-v3 )
+                  --expected-evidence "$EVIDENCE" --provider-format prime-v3
+                  --terminal-sidecar "$invocation_dir/provider-terminal.json" )
     fi
     # Dual-ship: the tap fans out to whichever sinks are enabled (either/both/neither).
     [[ "$LOKI_ENABLED" == "true" ]] && tap_args+=( --loki "$LOKI_URL" )
@@ -445,8 +451,18 @@ trap 'rm -f "$PIDFILE"' EXIT
 # N erroring passes in a row without evidence aborts with exit 7; a clean
 # (is_error=false) pass resets the count so legitimate multi-pass iteration is
 # untouched.
+#
+# In the structured Prime path this counting is done by the exact per-invocation
+# result.json (finalize_invocation.py + error_breaker.py): the controller
+# reconciles the producer status it observed with the tap's provider terminal,
+# writes one durable result, folds it into persisted breaker state, and consumes
+# THAT exact invocation's result — never a historical tail-scan of the event log.
+# Non-Prime backends keep the legacy event-log is_error tail-scan below.
 : "${WIGGUM_PROPOSER_MAX_ERRORS:=2}"
 consec_err=0
+FINALIZER="$LIB_DIR/finalize_invocation.py"
+BREAKER_STATE="$STATE_DIR/.breaker-state.$RUN_ID.json"
+rm -f "$BREAKER_STATE"
 
 for (( i=1; i<=MAX_ITER; i++ )); do
   if [[ -f "$STATE_DIR/stop.flag" ]]; then
@@ -472,6 +488,40 @@ for (( i=1; i<=MAX_ITER; i++ )); do
     wiggum_emit evidence_written file "$(basename "$EVIDENCE")" iters "$i"
     echo "proposer.sh: evidence appeared after pass $i ($EVIDENCE)." >&2
     exit 0
+  fi
+
+  # Structured Prime path: consume THIS exact invocation's durable result.json,
+  # reconciled from the producer status (producer.json) and the tap's provider
+  # terminal (provider-terminal.json). The finalizer writes result.json + one
+  # agent_result event, folds the result into persisted breaker state, and reports
+  # halt/continue with the reason code. This replaces the historical tail-scan for
+  # Prime — the count is derived from this invocation's identity, not the last
+  # event in a shared log.
+  if [[ "$PRIME_STRUCTURED" == "true" ]]; then
+    last_invocation_dir=""
+    [[ -f "$STATE_DIR/.last-invocation-dir" ]] && last_invocation_dir="$(cat "$STATE_DIR/.last-invocation-dir" 2>/dev/null)"
+    if [[ -n "$last_invocation_dir" && -f "$last_invocation_dir/metadata.json" ]]; then
+      read -r fin_decision fin_reason fin_iserror fin_count < <(
+        python3 "$FINALIZER" "$last_invocation_dir" "$WIGGUM_EVENTS" \
+          "$BREAKER_STATE" "$WIGGUM_PROPOSER_MAX_ERRORS" 2>/dev/null)
+      consec_err="${fin_count:-$consec_err}"
+      if [[ "$fin_iserror" == "true" ]]; then
+        echo "proposer.sh: pass $i errored (reason '$fin_reason') — consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS" >&2
+        wiggum_emit iter_error iter "$i" subtype "$fin_reason" consec "$consec_err"
+      fi
+      if [[ "$fin_decision" == "halt" ]]; then
+        echo "proposer.sh: $consec_err consecutive agent errors — aborting (exit 7). Raise --timeout or WIGGUM_PROPOSER_MAX_ERRORS, or fix the phase harness (e.g. an over-long prompt or a run that never reaches a verdict)." >&2
+        wiggum_emit run_stop reason proposer_consecutive_errors iter "$i" subtype "$fin_reason"
+        exit 7
+      fi
+    fi
+    if [[ -f "$STATE_DIR/stop.flag" ]]; then
+      echo "proposer.sh: stop.flag detected — stopping after pass $i" >&2
+      exit 6
+    fi
+    wiggum_emit iter_done iter "$i" evidence missing
+    (( i < MAX_ITER )) && sleep "$SLEEP_SECS"
+    continue
   fi
 
   # No evidence yet: inspect the pass's is_error flag from the last agent_result

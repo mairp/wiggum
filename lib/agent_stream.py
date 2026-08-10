@@ -10,7 +10,7 @@ import signal
 import sys
 import time
 
-from invocation_result import EventEnvelope, InvocationContext
+from invocation_result import EventEnvelope, InvocationContext, atomic_write_json
 from observability_policy import ObservabilityPolicy
 from prime_stream import PrimeAdapter
 
@@ -134,6 +134,8 @@ class ClaudeAdapter:
         self.expected_evidence = expected_evidence
         self.model_seen = None
         self.evidence_announced = False
+        self._terminal_exposed = False
+        self._finished = False
 
     def consume(self, record):
         outcome = AdapterOutcome()
@@ -154,6 +156,7 @@ class ClaudeAdapter:
                 self._consume_block(block, outcome)
         elif record_type == "result":
             outcome.terminal = self._terminal(record)
+            self._terminal_exposed = True
             outcome.output.append(
                 "  ✓ result: %s  cost=$%.4f  turns=%s  out_tok=%s  %sms" % (
                     record.get("subtype", "?"), record.get("total_cost_usd") or 0.0,
@@ -227,6 +230,25 @@ class ClaudeAdapter:
             terminal["reason"] = record.get("result") or "Provider reported an error"
         return terminal
 
+    def finish(self):
+        """Synthesize one failing terminal when the stream ended before ``result``."""
+        outcome = AdapterOutcome()
+        if self._finished:
+            return outcome
+        self._finished = True
+        if self._terminal_exposed:
+            return outcome
+        terminal = {
+            "status": "error",
+            "reason_code": "missing_terminal",
+            "reason": "Provider stream ended without a terminal result",
+            "model": self.model_seen,
+        }
+        self._terminal_exposed = True
+        outcome.terminal = terminal
+        outcome.output.append("  ✗ result: missing_terminal (stream ended before result)")
+        return outcome
+
 
 def select_provider_adapter(provider_format, policy, **kwargs):
     if provider_format in {"claude", "claude-stream-json"}:
@@ -285,6 +307,12 @@ def main():
     parser.add_argument("--invocation-id", default="")
     parser.add_argument("--expected-evidence", default="")
     parser.add_argument("--provider-format", default="claude")
+    # When set (structured Prime path only), the tap records the provider-terminal
+    # observation it — and only it — can see into this atomic sidecar. The producer
+    # exit/signal/timeout is observed separately by the controller (producer.json);
+    # the controller reconciles both into the single durable result.json. The tap
+    # NEVER writes result.json itself: it lacks the producer status.
+    parser.add_argument("--terminal-sidecar", default="")
     parser.add_argument("--loki", default="")
     parser.add_argument("--otel", default="")
     args = parser.parse_args()
@@ -302,6 +330,8 @@ def main():
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
     common = {"iter": args.iteration} if args.iteration is not None and not context else {}
+    last_terminal = {"value": None}
+    malformed = {"flag": False}
 
     try:
         for raw in sys.stdin:
@@ -322,6 +352,10 @@ def main():
                 outcome = adapter.consume(record)
             for event, fields in outcome.events:
                 sink.emit(event, **fields, **common)
+                if event == "agent_diagnostic" and fields.get("code") == "malformed_json":
+                    malformed["flag"] = True
+            if outcome.terminal:
+                last_terminal["value"] = outcome.terminal
             if outcome.terminal and not context:
                 terminal = outcome.terminal
                 sink.emit(
@@ -360,6 +394,26 @@ def main():
             outcome = finish()
             for event, fields in outcome.events:
                 sink.emit(event, **fields, **common)
+            if outcome.terminal:
+                last_terminal["value"] = outcome.terminal
+            if outcome.terminal and not context:
+                terminal = outcome.terminal
+                sink.emit(
+                    "agent_result",
+                    model=terminal.get("model"),
+                    is_error=terminal.get("status") != "success",
+                    subtype=terminal.get("stop_reason") or terminal.get("reason_code"),
+                    reason_code=terminal.get("reason_code"),
+                    reason=terminal.get("reason"),
+                    cost_usd=terminal.get("cost_usd"),
+                    duration_ms=terminal.get("duration_ms"),
+                    num_turns=terminal.get("num_turns"),
+                    input_tokens=terminal.get("input_tokens"),
+                    output_tokens=terminal.get("output_tokens"),
+                    cache_read_tokens=terminal.get("cache_read_tokens"),
+                    cache_creation_tokens=terminal.get("cache_creation_tokens"),
+                    **common,
+                )
             for line in outcome.output:
                 print(line)
             sys.stdout.flush()
@@ -372,6 +426,18 @@ def main():
                     telemetry_sink.flush()
                 except Exception:  # noqa: BLE001
                     pass
+        if args.terminal_sidecar:
+            # Persist exactly what the tap observed of the provider terminal, plus
+            # the malformed-stream signal. The controller reconciles this with the
+            # producer status it observed; the tap never decides success on its own.
+            try:
+                atomic_write_json(args.terminal_sidecar, {
+                    "contract": "wiggum-provider-terminal/v1",
+                    "provider_terminal": last_terminal["value"],
+                    "malformed_stream": malformed["flag"],
+                })
+            except Exception as error:  # noqa: BLE001
+                sys.stderr.write("agent_stream: terminal sidecar write failed (%s)\n" % error)
 
 
 if __name__ == "__main__":
