@@ -1062,7 +1062,22 @@ run_phase() {
       [[ "$VERIFICATION" != "off" ]] && crit_args+=( --verification-plan "$VERIFICATION_JSON" )
       [[ "$DEBUG" == "true" ]] && crit_args+=( --debug )
 
-      python3 "${crit_args[@]}" 2>&1 | emit_out
+      # Attach this critic call's invocation identity + artifact path (invocation-v1).
+      # A critic is a single, non-iterative turn, so its iteration is fixed at 0; the
+      # invocation id is deterministic per (run, phase, attempt) so the artifact dir is
+      # collision-free and matches the contract layout
+      #   <feature-dir>/debug/invocations/<run>/critic/phase-<N>/attempt-<A>/iter-0/<id>/.
+      # These are exported ONLY for this subprocess (env prefix), so role=critic never
+      # leaks into the next proposer iteration; run/feature come from the exported globals.
+      local crit_invocation_id crit_invocation_dir
+      crit_invocation_id="${WIGGUM_RUN_ID}-critic-phase-${n}-attempt-${attempt}"
+      crit_invocation_dir="$FEATURE_DIR/debug/invocations/$WIGGUM_RUN_ID/critic/phase-$n/attempt-$attempt/iter-0/$crit_invocation_id"
+
+      WIGGUM_ROLE=critic \
+      WIGGUM_ITERATION=0 \
+      WIGGUM_INVOCATION_ID="$crit_invocation_id" \
+      WIGGUM_INVOCATION_DIR="$crit_invocation_dir" \
+        python3 "${crit_args[@]}" 2>&1 | emit_out
       crc="${PIPESTATUS[0]}"
     fi
 

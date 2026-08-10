@@ -1105,6 +1105,129 @@ def call_prime_shell(prompt, variant, timeout, workdir=None):
     return out.stdout
 
 
+class PrimeCriticResult:
+    """Structured outcome of a JSON-mode Prime critic turn.
+
+    ``response`` is the reconstructed assistant-VISIBLE text ONLY — never the
+    adapter's display chrome, tool arguments, or thinking — so ``parse_verdict``
+    sees exactly what a text-mode critic would. Every other field is observability
+    metadata that MUST NOT alter the verdict.
+    """
+
+    __slots__ = ("mode", "response", "status", "reason_code", "model", "provider",
+                 "usage", "duration_ms", "diagnostics")
+
+    def __init__(self, *, mode, response, status, reason_code=None, model=None,
+                 provider=None, usage=None, duration_ms=0, diagnostics=None):
+        self.mode = mode
+        self.response = response
+        self.status = status
+        self.reason_code = reason_code
+        self.model = model
+        self.provider = provider
+        self.usage = usage or {}
+        self.duration_ms = duration_ms
+        self.diagnostics = diagnostics or []
+
+
+def _prime_launch_argv(variant, mode, workdir):
+    """Build the tool-free, isolated Prime critic argv for the requested mode.
+
+    Identical restriction flags to ``call_prime_shell`` — a critic never gets
+    tools, skills, session reuse, or context files — differing only in --mode."""
+    if variant:
+        launcher = os.environ.get("WIGGUM_PRIME_FLEET_BIN",
+                                  os.environ.get("WIGGUM_PRIME_BIN", "prime"))
+        argv = [launcher, variant]
+    else:
+        launcher = os.environ.get("WIGGUM_PRIME_AGENT_BIN", "prime-agent")
+        argv = [launcher]
+    argv += ["-p", "--mode", mode, "--no-session", "--no-tools",
+             "--no-skills", "--no-context-files"]
+    if workdir:
+        argv += ["--cwd", workdir]
+    return argv
+
+
+def call_prime_critic(prompt, variant, timeout, workdir=None):
+    """Run a fresh, isolated, tool-free Prime critic and return a PrimeCriticResult.
+
+    In structured mode (the default) Prime runs ``--mode json`` and its v3 stream
+    is replayed through the shared PrimeAdapter to reconstruct the final visible
+    response and to observe the provider terminal (model/provider/usage/duration/
+    diagnostics). Prime exits 0 even when the provider itself errored, so the
+    adapter's terminal — not the exit code — decides success vs. error. With
+    WIGGUM_AGENT_STREAM=false the critic falls back to raw ``--mode text`` output.
+    """
+    import subprocess
+    structured = os.environ.get("WIGGUM_AGENT_STREAM", "true") == "true"
+    mode = "json" if structured else "text"
+    argv = _prime_launch_argv(variant, mode, workdir)
+    start = time.time()
+    try:
+        out = subprocess.run(
+            argv, input=prompt, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Prime Agent critic timed out after %ss" % timeout)
+    except OSError as exc:
+        raise RuntimeError("Prime launcher failed: %s" % exc)
+    duration_ms = max(0, int((time.time() - start) * 1000))
+    if out.returncode != 0:
+        raise RuntimeError("Prime Agent critic exit %d: %s" %
+                           (out.returncode, (out.stderr or "")[:300]))
+
+    if not structured:
+        if not out.stdout.strip():
+            raise RuntimeError("Prime Agent critic returned empty stdout")
+        return PrimeCriticResult(mode="raw-text", response=out.stdout,
+                                 status="success", duration_ms=duration_ms)
+
+    from observability_policy import ObservabilityPolicy
+    from prime_stream import PrimeAdapter
+    adapter = PrimeAdapter(ObservabilityPolicy())
+    visible, terminals, diagnostics, error_codes = [], [], [], []
+    for line in out.stdout.splitlines():
+        if not line.strip():
+            continue
+        outcome = adapter.consume_raw(line)
+        for event, fields in outcome.events:
+            if event == "agent_text" and fields.get("text"):
+                visible.append(fields["text"])
+            elif event == "agent_diagnostic":
+                diagnostics.append(fields.get("message") or fields.get("code"))
+                if fields.get("severity") == "error" and fields.get("code"):
+                    error_codes.append(fields["code"])
+        if outcome.terminal:
+            terminals.append(outcome.terminal)
+    final = adapter.finish()
+    if final.terminal:
+        terminals.append(final.terminal)
+
+    # Any error terminal makes the invocation an error, even when a later,
+    # coarser agent_end reports success. The reason_code names the ROOT cause:
+    # the first error-severity diagnostic (e.g. provider_auth) rather than the
+    # generic provider_error the adapter may collapse to at agent_end.
+    terminal = next((t for t in terminals if t.get("status") == "error"), None)
+    status = "error" if terminal else ((terminals[-1] if terminals else {}).get("status") or "error")
+    if status == "error":
+        reason_code = error_codes[0] if error_codes else (terminal or {}).get("reason_code")
+    else:
+        reason_code = (terminals[-1] if terminals else {}).get("reason_code")
+    response = "\n".join(visible)
+    return PrimeCriticResult(
+        mode="json",
+        response=response,
+        status=status,
+        reason_code=reason_code,
+        model=adapter.model or (terminals[-1] if terminals else {}).get("model"),
+        provider=adapter.provider,
+        usage=dict(adapter.usage),
+        duration_ms=duration_ms,
+        diagnostics=diagnostics,
+    )
+
+
 def critic_call(provider, prompt, timeout, workdir=None):
     if provider == "claude":
         model = os.environ.get("WIGGUM_CLAUDE_CRITIC_MODEL", "claude-opus-4-8")

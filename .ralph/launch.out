@@ -740,3 +740,41 @@ Pre-existing failures unrelated to this task and left for their own tasks: `lib/
 
 ===== ITER 44 / 120  2026-08-10T13:58:25+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T053 is done. Here's what this iteration delivered:
+
+**Implemented `call_prime_critic` in `lib/critic.py`** — the JSON-mode Prime critic surface that T048's tests (`lib/test_prime_backend.py`) specified. It:
+
+- Launches both stock (`prime-agent`) and fleet (`prime <variant>`) critics in `--mode json` with **every critic restriction retained** (`--no-session --no-tools --no-skills --no-context-files`), factored into a shared `_prime_launch_argv` so the flags can't drift from the text-mode path.
+- **Reconstructs only the final assistant-visible response** by replaying Prime's v3 stream through the existing `PrimeAdapter` and keeping only `agent_text` events — never adapter display chrome (`· init`, `→`, `←`, `!`), tool arguments, or thinking. That text is what `parse_verdict` sees, exactly as in text mode.
+- **Captures model / provider / usage / duration / diagnostics** into a `PrimeCriticResult` as pure observability metadata that cannot influence the verdict.
+- **Trusts the adapter terminal over the exit code**: Prime exits 0 even when the provider errored, so a `provider_auth`/`provider_error` stream surfaces as `status="error"` with the root-cause `reason_code` taken from the first error-severity diagnostic (so a specific `provider_auth` isn't masked by a later generic `agent_end` error). A failed critic yields no visible response, so verdict parsing fails safe to `MALFORMED`.
+- **Falls back to raw `--mode text`** when `WIGGUM_AGENT_STREAM=false`, preserving stdin and response verbatim.
+
+`call_prime_shell`/`critic_call` are untouched, so the existing dispatch tests still hold. All 13 tests in `test_prime_backend.py` pass, and `test_critic.py` (57 total with `test_prime_stream.py`) stays green. `py_compile` is clean. Checkbox flipped to `- [x]`.
+
+The next unchecked task is T054 (wiring critic correlation at the orchestrator call site) — a separate iteration since it touches `orchestrator.sh`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 45 / 120  2026-08-10T14:11:43+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. This iteration completed **T054**.
+
+**What I did:** At the critic call site in `orchestrator.sh` (the `verification_ok` block around line 1062), I attached the critic invocation's correlation and artifact path, mirroring the existing proposer call site's convention:
+
+- **Correlation:** `role=critic`, `iteration=0` (a critic is a single non-iterative turn), a deterministic `invocation_id` (`${WIGGUM_RUN_ID}-critic-phase-${n}-attempt-${attempt}`), and the run/feature identity that already flows through the exported `WIGGUM_RUN_ID`/`WIGGUM_FEATURE` globals.
+- **Artifact path:** `WIGGUM_INVOCATION_DIR` pointing at `<feature-dir>/debug/invocations/<run>/critic/phase-<N>/attempt-<A>/iter-0/<id>/`, matching the invocation-v1 contract layout and the proposer's feature-root scheme.
+
+These are set as an env prefix scoped to that one `python3` subprocess, so `role=critic`/`iteration=0` never leak into the next proposer iteration. critic.py already reads correlation from the environment, so no flag-surface change was needed (its argparse would reject unknown flags).
+
+**Verification:**
+- `bash -n orchestrator.sh` — clean
+- `pytest lib/test_critic.py` — 35 passed
+- `pytest lib/test_invocation_artifacts.py lib/test_prime_backend.py` — 20 passed
+
+The checkbox for T054 is flipped to `[x]`. Next unchecked task is T055 (retention cleanup in `lib/invocation_result.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 46 / 120  2026-08-10T14:24:01+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
