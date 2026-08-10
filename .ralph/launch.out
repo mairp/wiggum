@@ -981,3 +981,31 @@ The hard part was running critic rejection and lifecycle flows **hermetically** 
 ----- gate not satisfied (continuing) -----
 
 ===== ITER 58 / 120  2026-08-10T16:06:37+04:00 =====
+Done. This iteration completed **T069**.
+
+**T069** — "Resolve adapter selection and event-envelope regressions while preserving legacy Claude/Bebop event semantics in `lib/agent_stream.py`" — was the first unchecked task. Its gating tests (T065–T068) were already added and checked in prior iterations. I verified the implementation is genuinely complete rather than just checking it off:
+
+- `select_provider_adapter` (agent_stream.py:254) routes `claude`/`claude-stream-json` → `ClaudeAdapter`, `prime-v3` → `PrimeAdapter`, and Bebop reuses `ClaudeAdapter` (it's a backend label, not a distinct schema).
+- The `EventEnvelope` correlated-normalization path and the `not context` legacy path preserve the exact `[agent_init, agent_result]` sequence for the plain Claude CLI stream.
+- The regression suite directly asserts these concerns and all pass with no skips/xfails: `test_agent_stream_regression.py` (8), plus the other US6 files `test_prime_pipeline.py` / `test_telemetry_parity.py` / `test_orchestrator_verification.py` (55 combined).
+- `python3 -m py_compile lib/agent_stream.py` is clean.
+
+Then I flipped T069 to `- [x]`. The tree is left consistent; the next unchecked task is T070 (proposer.sh).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 59 / 120  2026-08-10T16:09:54+04:00 =====
+Done. This iteration completed **T070** (US6): verified and confirmed that `proposer.sh` preserves the explicit Prime raw-text execution path and all non-Prime (claude/codex/bebop) launch-argument behavior while sharing status reconciliation across paths.
+
+**What I verified:**
+- The raw Prime fallback (`--mode text`, no tap) passes final output through verbatim, announces the reduced capability exactly once (`mode=raw-text`, `supported_signals=text,result`), lets the producer's exit status drive the loop outcome, and intentionally omits fine-grained events and correlated artifacts.
+- The claude/codex/bebop arms and their shared-arg construction are unchanged.
+- Status reconciliation is shared: evidence-wins applies to every path; the structured Prime path reconciles through `finalize_invocation.py`, while raw/non-Prime backends use the legacy `agent_result` tail-scan — both feeding the same consecutive-error circuit breaker.
+
+**Checks:** `bash -n proposer.sh` clean; the three US6 test files (`test_prime_pipeline.py`, `test_agent_stream_regression.py`, `test_orchestrator_verification.py`) all green — 39 passed.
+
+The implementation already satisfied the contract, so no code change was needed beyond flipping the checkbox. The next unchecked task is T071 (orchestrator.sh lifecycle/invocation-context propagation).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 60 / 120  2026-08-10T16:13:01+04:00 =====
