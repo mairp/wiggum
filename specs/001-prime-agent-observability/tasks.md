@@ -208,8 +208,8 @@
 
 - [x] T073 [P] Document all new observability mode, redaction, payload-limit, raw-retention, and Prime executable controls with conservative defaults in `.env.example`
 - [x] T074 [P] Update supported signal classes, fallback/degradation meaning, failure breaker behavior, invocation artifacts, and telemetry state language in `README.md`
-- [ ] T075 [P] Update event fields, result reason codes, artifact layout, atomicity, and retention rules in `wiki/On-Disk-Contract.md`
-- [ ] T076 [P] Update Prime configuration, schema compatibility, privacy controls, and raw fallback instructions in `wiki/Configuration.md`
+- [x] T075 [P] Update event fields, result reason codes, artifact layout, atomicity, and retention rules in `wiki/On-Disk-Contract.md`
+- [x] T076 [P] Update Prime configuration, schema compatibility, privacy controls, and raw fallback instructions in `wiki/Configuration.md`
 - [ ] T077 [P] Update local/Loki/OTLP parity, receiver status semantics, queries, sink-failure diagnostics, and provider-neutral dashboard guidance in `wiki/Telemetry.md`
 - [ ] T078 [P] Update verified capabilities, commands, failure troubleshooting, safety caveats, and resume guidance in `roadmap/running-prime-ralph-loop.md`
 - [ ] T079 Update roadmap R1-R7 status only for gates proven by automated and real-run evidence, retaining explicit caveats for anything unverified in `roadmap/prime-agent-observability.md`
