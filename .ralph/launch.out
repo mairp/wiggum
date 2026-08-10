@@ -84,3 +84,49 @@ I verified completeness by mapping each requirement to a test, confirmed `python
 
 ===== ITER 6 / 120  2026-08-10T09:30:46+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T015 complete. The task's deliverable — a comprehensive tool-lifecycle test file at `lib/test_prime_stream_tools.py` — is present and covers every enumerated case, verified passing (4/4).
+
+**What I did this iteration:**
+- Located the first unchecked task: **T015** (add tool tests in `lib/test_prime_stream_tools.py`).
+- Confirmed the test file exists with 4 substantive tests, each mapping to a required case:
+  - `toolcall_*` / `tool_execution_*` lifecycle with a shared `tool_id` (against the `fleet-ipython.jsonl` fixture, which contains all 8 record types).
+  - Error outcomes with bounded, redacted argument/result summaries (`retained_bytes` ≤ policy limit, `truncated`, `is_error`, secrets scrubbed).
+  - Abandoned-tool diagnostic reported exactly once.
+  - No thinking-content leakage from message deltas, message ends, or tool arguments.
+- Ran `python3 -m pytest -q lib/test_prime_stream_tools.py` → **4 passed**.
+- Flipped T015 to `- [x]`.
+
+**Note for the next iteration:** the tests pass rather than "fail first" because the underlying `lib/prime_stream.py` implementation (T019–T021) already landed in an earlier interleaved pass. The T015 deliverable is the test file, which is complete — so this is correctly closed. The next unchecked task is **T016** (evidence-target tests in `lib/test_prime_evidence.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 7 / 120  2026-08-10T09:32:48+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T016 complete. 
+
+The test file `lib/test_prime_evidence.py` already existed from a prior iteration and fully satisfies T016's spec — it covers all five required cases:
+- **absolute/relative target normalization** — `test_absolute_and_relative_exact_write_targets_match`
+- **near matches** (`.bak` suffix) and **unrelated gates** (`GATE3`) — `test_near_match_unrelated_gate_and_prose_only_mentions_do_not_match`
+- **prose-only mentions** (`print(...)`) — same test
+- **multiple path candidates** — `test_multiple_path_candidates_match_only_exact_write_target`
+
+All 4 tests pass (`4 passed in 0.07s`). I flipped T016's checkbox to `- [x]`. This was a case where the deliverable was already on disk but left unchecked; the tree is now consistent. The next unchecked task is T017 (extend proposer argv tests in `lib/test_prime_backend.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 8 / 120  2026-08-10T09:34:02+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T017 is complete. The tests it requires already existed in `lib/test_prime_backend.py`, covering all five required aspects for both stock (`prime`) and fleet (`prime:coder`) proposers:
+
+- **JSON mode** — asserts argv is `-p --mode json --no-session ...`
+- **provider-format selection** — asserts `provider_format == "prime-v3"` in the invocation metadata
+- **invocation correlation** — asserts `run_id`, `feature`, `role`, `backend`, `phase`, `attempt`, `iteration`, and `invocation_id` on emitted events
+- **expected evidence path** — asserts `expected_evidence` equals the resolved absolute evidence path
+- **explicit text fallback** — a dedicated test asserting `--mode text` with no structured records when `WIGGUM_AGENT_STREAM=false`
+
+All 7 tests pass (`7 passed in 0.51s`), exercising real behavior in `proposer.sh` and `lib/agent_stream.py` (both of which already implement `prime-v3` / `expected_evidence`). I flipped T017's checkbox to `- [x]`. The prior iteration had written the tests but not marked the task done. The next unchecked task is T018 (live rendering tests in `lib/test_present.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 9 / 120  2026-08-10T09:35:45+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
