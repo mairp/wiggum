@@ -1,57 +1,41 @@
 #!/usr/bin/env python3
-"""agent_stream.py — turn a coding agent's stream-json into wiggum events (stdlib only).
+"""Turn a coding agent's JSONL stream into safe Wiggum events (stdlib only)."""
 
-Sits on the proposer's output pipe:
+import argparse
+from dataclasses import dataclass, field
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
 
-    claude -p ... --output-format stream-json --verbose | agent_stream.py [...]
-
-and does three things with each JSONL event, ALL best-effort (a bad line, a full
-disk or a dead Loki must never break the loop):
-
-  1. Appends fine-grained events to the wiggum event stream ($WIGGUM_EVENTS /
-     --events), same JSON shape as wiggum_emit, so the live presenter can show
-     the agent actually working:
-       agent_init    model, tool count                (once per pass)
-       agent_tool    tool name + compact target       (every tool call)
-       agent_text    first line of each assistant say (what it's thinking/doing)
-       agent_result  cost, tokens, duration, turns    (end of pass)
-       evidence_writing  when a Write/Edit targets GATE<N>-EVIDENCE.md — the
-                         "artifact being delivered" moment.
-  2. Echoes a compact HUMAN summary to stdout (this lands in run.log via the
-     orchestrator's emit_out, keeping the log readable instead of raw JSON).
-  3. Optionally ships tool_use / api_request to Loki (--loki URL) and/or an OTLP
-     collector (--otel URL), reusing the Loki/logfmt code from ralph_loki_ship.py
-     and the Otel class from ralph_otel_ship.py. The two sinks are independent
-     (dual-ship): either, both, or neither. Telemetry is an add-on; the local event
-     capture above happens regardless.
-
-Non-JSON input lines pass through to stdout untouched, so a backend that ignores
---output-format stream-json degrades gracefully to the old behavior.
-
-Signal-safe: SIGTERM/SIGPIPE/partial final line are tolerated; events are
-flushed line-by-line (append + close per event) so a killed pass never corrupts
-events.jsonl.
-"""
-import sys, os, json, time, signal, argparse
-
-TARGET_MAX = 120     # chars kept of a tool target in agent_tool events
-TEXT_MAX = 160       # chars kept of an assistant text block in agent_text events
-
-# Preference order for summarizing a tool call's input into one compact target.
-TARGET_KEYS = ("file_path", "path", "notebook_path", "command", "pattern",
-               "url", "query", "skill", "description", "prompt", "subject")
+from invocation_result import EventEnvelope, InvocationContext
+from observability_policy import ObservabilityPolicy
 
 
-def one_line(s, limit):
-    s = " ".join(str(s).split())
-    return s if len(s) <= limit else s[: limit - 1] + "…"
+TARGET_MAX = 120
+TEXT_MAX = 160
+TARGET_KEYS = (
+    "file_path", "path", "notebook_path", "command", "pattern", "url", "query",
+    "skill", "description", "prompt", "subject",
+)
+
+
+def one_line(value, limit):
+    value = " ".join(str(value).split())
+    return value if len(value) <= limit else value[:limit - 1] + "…"
 
 
 class EventSink:
-    """Append wiggum-shaped JSON events to the events file, one durable line each."""
+    """Append complete JSON events, using correlated envelopes when available."""
 
-    def __init__(self, path, run_id, task, backend):
-        self.path = path
+    def __init__(
+        self, path, run_id="", task="", backend="", *, context=None, policy=None,
+    ):
+        self.path = str(path) if path else ""
+        self.policy = policy or ObservabilityPolicy()
+        self.envelope = EventEnvelope(context) if context else None
         self.base = {}
         if run_id:
             self.base["run_id"] = run_id
@@ -63,18 +47,40 @@ class EventSink:
     def emit(self, event, **fields):
         if not self.path:
             return
-        rec = {"ts": "%f" % time.time(),
-               "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-               "event": event}
-        rec.update(self.base)
-        for k, v in fields.items():
-            if v is not None:
-                rec[k] = str(v)
+        fields = self._sanitize_fields(fields)
+        if self.envelope:
+            record = self.envelope.normalize(event, **fields)
+        else:
+            record = {
+                "ts": "%f" % time.time(),
+                "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "event": event,
+                **self.base,
+                **fields,
+            }
         try:
-            with open(self.path, "a") as fh:
-                fh.write(json.dumps(rec) + "\n")
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         except OSError:
-            pass  # never break the loop over the event stream
+            pass
+
+    def _sanitize_fields(self, fields):
+        result = {}
+        metadata = None
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if key in {"text", "message", "summary", "result_summary", "target"}:
+                cleaned = self.policy.sanitize_text(value)
+            else:
+                cleaned = self.policy.sanitize(value)
+            result[key] = cleaned.value
+            if key in {"text", "message", "summary", "result_summary", "target"}:
+                metadata = cleaned.metadata()
+        if metadata:
+            for key, value in metadata.items():
+                result.setdefault(key, value)
+        return result
 
 
 def tool_target(name, tool_input):
@@ -82,82 +88,217 @@ def tool_target(name, tool_input):
     if not isinstance(tool_input, dict):
         return ""
     if name == "Bash":
-        cmd = tool_input.get("command", "")
-        desc = tool_input.get("description", "")
-        s = cmd if cmd else desc
-        return one_line(s, TARGET_MAX)
-    for k in TARGET_KEYS:
-        v = tool_input.get(k)
-        if v:
-            return one_line(v, TARGET_MAX)
+        value = tool_input.get("command", "") or tool_input.get("description", "")
+        return one_line(value, TARGET_MAX)
+    for key in TARGET_KEYS:
+        value = tool_input.get(key)
+        if value:
+            return one_line(value, TARGET_MAX)
     return ""
 
 
-def looks_like_evidence(name, tool_input, target):
-    """True when this tool call is writing a GATE<N>-EVIDENCE.md (incl. .tmp)."""
-    if name not in ("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"):
+def looks_like_evidence(name, tool_input, target, expected_evidence=None):
+    """Classify writes only when a lexical target equals the expected gate path."""
+    if not expected_evidence or name not in {
+        "Write", "Edit", "MultiEdit", "NotebookEdit", "Bash",
+    }:
         return False
-    hay = target
-    if isinstance(tool_input, dict):
-        hay = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
-    return "GATE" in hay and "-EVIDENCE.md" in hay
+    expected = Path(expected_evidence).expanduser().resolve()
+    policy = ObservabilityPolicy(target_max_bytes=4096)
+    candidates = policy.extract_target_paths(tool_input)
+    if target:
+        candidates.append(target)
+    for candidate in candidates:
+        try:
+            if Path(candidate).expanduser().resolve() == expected:
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
-def main():
-    ap = argparse.ArgumentParser(description="wiggum agent stream parser")
-    ap.add_argument("--events", default=os.environ.get("WIGGUM_EVENTS", ""))
-    ap.add_argument("--run-id", default=os.environ.get("WIGGUM_RUN_ID", ""))
-    ap.add_argument("--task", default=os.environ.get("WIGGUM_TASK", ""))
-    ap.add_argument("--backend", default=os.environ.get("WIGGUM_BACKEND_LABEL", ""))
-    ap.add_argument("--iter", default="")
-    ap.add_argument("--loki", default="", help="Loki base URL; empty = no shipping")
-    ap.add_argument("--otel", default="", help="OTLP/HTTP base URL; empty = no shipping")
-    args = ap.parse_args()
+@dataclass
+class AdapterOutcome:
+    events: list = field(default_factory=list)
+    output: list = field(default_factory=list)
+    terminal: dict | None = None
+    telemetry: tuple | None = None
 
-    sink = EventSink(args.events, args.run_id, args.task, args.backend)
 
-    loki = logfmt = None
+class ClaudeAdapter:
+    """Normalize the established Claude stream without finalizing invocation state."""
+
+    def __init__(self, policy, *, expected_evidence=None):
+        self.policy = policy
+        self.expected_evidence = expected_evidence
+        self.model_seen = None
+        self.evidence_announced = False
+
+    def consume(self, record):
+        outcome = AdapterOutcome()
+        record_type = record.get("type")
+        if record_type == "system" and record.get("subtype") == "init":
+            self.model_seen = record.get("model") or self.model_seen
+            tool_count = len(record.get("tools", []) or [])
+            outcome.events.append(("agent_init", {
+                "model": self.model_seen, "tools": tool_count,
+            }))
+            outcome.output.append("  · init model=%s tools=%d" % (
+                self.model_seen or "?", tool_count,
+            ))
+        elif record_type == "assistant":
+            message = record.get("message", {}) or {}
+            self.model_seen = message.get("model") or self.model_seen
+            for block in message.get("content", []) or []:
+                self._consume_block(block, outcome)
+        elif record_type == "result":
+            outcome.terminal = self._terminal(record)
+            outcome.output.append(
+                "  ✓ result: %s  cost=$%.4f  turns=%s  out_tok=%s  %sms" % (
+                    record.get("subtype", "?"), record.get("total_cost_usd") or 0.0,
+                    record.get("num_turns", "?"),
+                    (record.get("usage", {}) or {}).get("output_tokens", "?"),
+                    record.get("duration_ms", "?"),
+                )
+            )
+            outcome.telemetry = ("api_request", outcome.terminal)
+        return outcome
+
+    def _consume_block(self, block, outcome):
+        block_type = block.get("type")
+        if block_type == "text":
+            text = (block.get("text") or "").strip()
+            if text:
+                display = self.policy.sanitize_text(text, self.policy.text_max_bytes)
+                cleaned = self.policy.sanitize_text(" ".join(text.split()), TEXT_MAX)
+                outcome.events.append(("agent_text", {
+                    "text": cleaned.value,
+                    **cleaned.metadata(),
+                }))
+                outcome.output.append(display.value)
+        elif block_type == "tool_use":
+            name = block.get("name", "?")
+            tool_input = block.get("input")
+            raw_target = tool_target(name, tool_input)
+            target = self.policy.sanitize_text(raw_target, TARGET_MAX).value
+            summary = self.policy.summarize_targets(tool_input or {})
+            fields = {
+                "tool": name,
+                "target": target,
+                "targets": summary["targets"],
+                "redacted": summary["redacted"],
+                "truncated": summary["truncated"],
+                "original_bytes": summary["original_bytes"],
+                "retained_bytes": summary["retained_bytes"],
+            }
+            if block.get("id"):
+                fields["tool_id"] = block["id"]
+            outcome.events.append(("agent_tool", fields))
+            outcome.output.append("  → %s %s" % (name, target) if target else "  → %s" % name)
+            if not self.evidence_announced and looks_like_evidence(
+                name, tool_input, target, self.expected_evidence,
+            ):
+                self.evidence_announced = True
+                evidence = {"tool": name, "target": str(self.expected_evidence),
+                            "match": "exact-expected-target"}
+                if block.get("id"):
+                    evidence["tool_id"] = block["id"]
+                outcome.events.append(("evidence_writing", evidence))
+            outcome.telemetry = ("tool_use", fields)
+
+    def _terminal(self, record):
+        usage = record.get("usage", {}) or {}
+        is_error = bool(record.get("is_error"))
+        terminal = {
+            "status": "error" if is_error else "success",
+            "stop_reason": record.get("subtype"),
+            "model": self.model_seen or record.get("model"),
+            "duration_ms": record.get("duration_ms"),
+            "num_turns": record.get("num_turns"),
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "cache_read_tokens": usage.get("cache_read_input_tokens"),
+            "cache_creation_tokens": usage.get("cache_creation_input_tokens"),
+            "cost_usd": record.get("total_cost_usd"),
+        }
+        if is_error:
+            terminal["reason_code"] = "provider_error"
+            terminal["reason"] = record.get("result") or "Provider reported an error"
+        return terminal
+
+
+def select_provider_adapter(provider_format, policy, **kwargs):
+    if provider_format in {"claude", "claude-stream-json"}:
+        return ClaudeAdapter(policy, **kwargs)
+    raise ValueError("unsupported provider format: %s" % provider_format)
+
+
+def _invocation_context(args):
+    values = (args.run_id, args.feature, args.role, args.backend, args.phase,
+              args.attempt, args.iteration)
+    if not all(value not in (None, "") for value in values):
+        return None
+    return InvocationContext.create(
+        run_id=args.run_id, feature=args.feature, role=args.role, backend=args.backend,
+        phase=int(args.phase), attempt=int(args.attempt), iteration=int(args.iteration),
+        invocation_id=args.invocation_id or None, provider_format=args.provider_format,
+        expected_evidence=args.expected_evidence or None,
+    )
+
+
+def _telemetry(args):
+    loki = otel = logfmt = None
     if args.loki:
         try:
             import ralph_loki_ship as ship
-            base = {"job": "ralph"}
-            if args.task:
-                base["task"] = args.task
-            if args.backend:
-                base["backend"] = args.backend
-            loki = ship.Loki(args.loki, base)
-            logfmt = ship.logfmt
-        except Exception as e:  # noqa: BLE001 — telemetry is optional
-            sys.stderr.write("agent_stream: Loki disabled (%s)\n" % e)
-            loki = None
-
-    # OTEL is an independent, parallel sink (dual-ship). It reuses the same logfmt
-    # for its log-record body, so a --otel-only run still needs logfmt available.
-    otel = None
+            base = {"job": "ralph", **({"task": args.task} if args.task else {}),
+                    **({"backend": args.backend} if args.backend else {})}
+            loki, logfmt = ship.Loki(args.loki, base), ship.logfmt
+        except Exception as error:  # noqa: BLE001
+            sys.stderr.write("agent_stream: Loki disabled (%s)\n" % error)
     if args.otel:
         try:
-            import ralph_otel_ship as otship
-            resource = {"service.name": "ralph"}
-            if args.task:
-                resource["task"] = args.task
-            if args.backend:
-                resource["backend"] = args.backend
-            otel = otship.Otel(args.otel, resource)
-            if logfmt is None:
-                logfmt = otship.logfmt
-        except Exception as e:  # noqa: BLE001 — telemetry is optional
-            sys.stderr.write("agent_stream: OTEL disabled (%s)\n" % e)
-            otel = None
+            import ralph_otel_ship as ship
+            resource = {"service.name": "ralph", **({"task": args.task} if args.task else {}),
+                        **({"backend": args.backend} if args.backend else {})}
+            otel = ship.Otel(args.otel, resource)
+            logfmt = logfmt or ship.logfmt
+        except Exception as error:  # noqa: BLE001
+            sys.stderr.write("agent_stream: OTEL disabled (%s)\n" % error)
+    return loki, otel, logfmt
 
-    # A TERM (wiggum stop --now) must not lose the pipe's tail: finish cleanly.
+
+def main():
+    parser = argparse.ArgumentParser(description="wiggum agent stream parser")
+    parser.add_argument("--events", default=os.environ.get("WIGGUM_EVENTS", ""))
+    parser.add_argument("--run-id", default=os.environ.get("WIGGUM_RUN_ID", ""))
+    parser.add_argument("--task", default=os.environ.get("WIGGUM_TASK", ""))
+    parser.add_argument("--feature", default=os.environ.get("WIGGUM_FEATURE", ""))
+    parser.add_argument("--role", choices=("proposer", "critic"), default=None)
+    parser.add_argument("--backend", default=os.environ.get("WIGGUM_BACKEND_LABEL", ""))
+    parser.add_argument("--phase", type=int)
+    parser.add_argument("--attempt", type=int)
+    parser.add_argument("--iteration", "--iter", dest="iteration", type=int)
+    parser.add_argument("--invocation-id", default="")
+    parser.add_argument("--expected-evidence", default="")
+    parser.add_argument("--provider-format", default="claude")
+    parser.add_argument("--loki", default="")
+    parser.add_argument("--otel", default="")
+    args = parser.parse_args()
+
+    policy = ObservabilityPolicy()
+    context = _invocation_context(args)
+    sink = EventSink(
+        args.events, args.run_id, args.task, args.backend, context=context, policy=policy,
+    )
+    adapter = select_provider_adapter(
+        args.provider_format, policy,
+        expected_evidence=context.expected_evidence if context else args.expected_evidence or None,
+    )
+    loki, otel, logfmt = _telemetry(args)
     stop = {"flag": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
-
-    common = {}
-    if args.iter:
-        common["iter"] = args.iter
-    model_seen = None
-    evidence_announced = False
+    common = {"iter": args.iteration} if args.iteration is not None and not context else {}
 
     try:
         for raw in sys.stdin:
@@ -167,92 +308,53 @@ def main():
             if not raw:
                 continue
             try:
-                o = json.loads(raw)
+                record = json.loads(raw)
             except ValueError:
-                print(raw)  # stray non-JSON print from the agent — pass through
+                print(raw)
                 continue
-
-            t = o.get("type")
-
-            if t == "system" and o.get("subtype") == "init":
-                model_seen = o.get("model") or model_seen
-                ntools = len(o.get("tools", []) or [])
-                sink.emit("agent_init", model=model_seen, tools=ntools, **common)
-                print("  · init model=%s tools=%d" % (model_seen or "?", ntools))
-
-            elif t == "assistant":
-                msg = o.get("message", {}) or {}
-                model_seen = msg.get("model") or model_seen
-                for block in msg.get("content", []) or []:
-                    bt = block.get("type")
-                    if bt == "text":
-                        txt = (block.get("text") or "").strip()
-                        if txt:
-                            sink.emit("agent_text",
-                                      text=one_line(txt, TEXT_MAX), **common)
-                            print(txt)
-                    elif bt == "tool_use":
-                        name = block.get("name", "?")
-                        target = tool_target(name, block.get("input"))
-                        sink.emit("agent_tool", tool=name, target=target, **common)
-                        print("  → %s %s" % (name, target) if target
-                              else "  → %s" % name)
-                        if not evidence_announced and looks_like_evidence(
-                                name, block.get("input"), target):
-                            evidence_announced = True
-                            sink.emit("evidence_writing", tool=name,
-                                      target=target, **common)
-                        if loki or otel:
-                            f = dict(common)
-                            f["tool"] = name
-                            if model_seen:
-                                f["model"] = model_seen
-                            line = logfmt(f)
-                            mlabel = {"model": model_seen} if model_seen else None
-                            if loki:
-                                loki.add("tool_use", line, labels=mlabel)
-                            if otel:
-                                otel.add("tool_use", line, attrs=mlabel, fields=f)
-
-            elif t == "result":
-                u = o.get("usage", {}) or {}
-                cost = o.get("total_cost_usd")
-                model = model_seen or o.get("model")
-                fields = dict(common,
-                              model=model,
-                              is_error=bool(o.get("is_error")),
-                              subtype=o.get("subtype"),
-                              cost_usd=cost,
-                              duration_ms=o.get("duration_ms"),
-                              num_turns=o.get("num_turns"),
-                              input_tokens=u.get("input_tokens"),
-                              output_tokens=u.get("output_tokens"),
-                              cache_read_tokens=u.get("cache_read_input_tokens"),
-                              cache_creation_tokens=u.get("cache_creation_input_tokens"))
-                sink.emit("agent_result", **fields)
-                print("  ✓ result: %s  cost=$%.4f  turns=%s  out_tok=%s  %sms" % (
-                    o.get("subtype", "?"), cost or 0.0,
-                    o.get("num_turns", "?"), u.get("output_tokens", "?"),
-                    o.get("duration_ms", "?")))
-                if loki or otel:
-                    line = logfmt(fields)
-                    mlabel = {"model": model} if model else None
+            outcome = adapter.consume(record)
+            for event, fields in outcome.events:
+                sink.emit(event, **fields, **common)
+            if outcome.terminal and not context:
+                terminal = outcome.terminal
+                sink.emit(
+                    "agent_result",
+                    model=terminal.get("model"),
+                    is_error=terminal.get("status") != "success",
+                    subtype=terminal.get("stop_reason"),
+                    cost_usd=terminal.get("cost_usd"),
+                    duration_ms=terminal.get("duration_ms"),
+                    num_turns=terminal.get("num_turns"),
+                    input_tokens=terminal.get("input_tokens"),
+                    output_tokens=terminal.get("output_tokens"),
+                    cache_read_tokens=terminal.get("cache_read_tokens"),
+                    cache_creation_tokens=terminal.get("cache_creation_tokens"),
+                    **common,
+                )
+            for line in outcome.output:
+                print(line)
+            if outcome.telemetry and (loki or otel):
+                event, fields = outcome.telemetry
+                safe = policy.sanitize(fields).value
+                line = logfmt(safe)
+                labels = {"model": safe["model"]} if safe.get("model") else None
+                if loki:
+                    loki.add(event, line, labels=labels)
+                if otel:
+                    otel.add(event, line, attrs=labels, fields=safe)
+                if event == "api_request":
                     if loki:
-                        loki.add("api_request", line, labels=mlabel)
                         loki.flush()
                     if otel:
-                        otel.add("api_request", line, attrs=mlabel, fields=fields)
                         otel.flush()
-
-            # other types (user/tool_result, stream_event partials) stay quiet
             sys.stdout.flush()
     except BrokenPipeError:
         pass
     finally:
-        for sink_obj in (loki, otel):
-            if sink_obj:
+        for telemetry_sink in (loki, otel):
+            if telemetry_sink:
                 try:
-                    sink_obj.flush()
+                    telemetry_sink.flush()
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -262,5 +364,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         pass
-    except Exception as e:  # noqa: BLE001 — this tap must never kill the loop
-        sys.stderr.write("agent_stream: fatal (ignored): %s\n" % e)
+    except Exception as error:  # noqa: BLE001
+        sys.stderr.write("agent_stream: fatal (ignored): %s\n" % error)
