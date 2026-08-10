@@ -261,6 +261,25 @@ PYEOF
     else
       echo "  (no SPECS.md found)"
     fi
+    # Telemetry receiver states (FR-036): distinguish configured / reachable /
+    # request-accepted / query-verified — never a collapsed "telemetry: true".
+    # Config comes from the feature's last-run.conf; runtime evidence in the
+    # events.jsonl can elevate the claim beyond a probe.
+    _tconf=""
+    [[ -f "$FEATURE_DIR/last-run.conf" ]] && _tconf="$FEATURE_DIR/last-run.conf"
+    [[ -z "$_tconf" && -f "$STATE_DIR/last-run.conf" ]] && _tconf="$STATE_DIR/last-run.conf"
+    if [[ -n "$_tconf" ]]; then
+      _tel="$(grep -m1 '^TELEMETRY=' "$_tconf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+      _otel="$(grep -m1 '^OTEL=' "$_tconf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+      _lokiurl="$(grep -m1 '^LOKI_URL=' "$_tconf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+      _otelurl="$(grep -m1 '^OTEL_URL=' "$_tconf" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
+      if [[ "$_tel" == "true" || "$_otel" == "true" ]]; then
+        echo
+        echo "  telemetry:"
+        [[ "$_tel" == "true" ]]  && echo "    $(wiggum_telemetry_status_line loki "${_lokiurl:-http://localhost:3100}" "$STATUS_EV")"
+        [[ "$_otel" == "true" ]] && echo "    $(wiggum_telemetry_status_line otel "${_otelurl:-http://localhost:4318}" "$STATUS_EV")"
+      fi
+    fi
     # last milestones from events (high-frequency agent_* noise filtered out)
     if [[ -n "$STATUS_EV" && -f "$STATUS_EV" ]]; then
       echo "  last events:"

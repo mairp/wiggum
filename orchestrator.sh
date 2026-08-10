@@ -471,9 +471,16 @@ WIGGUM_LOKI_URL="$LOKI_URL"
 WIGGUM_OTEL_SHIP="$LIB_DIR/ralph_otel_ship.py"
 WIGGUM_OTEL_ENABLED="$OTEL"
 WIGGUM_OTEL_URL="$OTEL_URL"
+# Ambient correlation for lifecycle events (wiggum_emit): the resolved feature
+# slug so remote copies are queryable per Prime run (FR-032), and any inbound
+# distributed-trace id so lifecycle and agent activity share trace context when
+# one exists (FR-033). WIGGUM_TRACE_ID is passed through untouched — never
+# synthesized — so local capture never depends on trace creation.
+WIGGUM_FEATURE="$SLUG"
+WIGGUM_TRACE_ID="${WIGGUM_TRACE_ID:-}"
 export WIGGUM_EVENTS WIGGUM_RUN_ID WIGGUM_TASK WIGGUM_BACKEND_LABEL WIGGUM_SHIP \
        WIGGUM_TELEMETRY WIGGUM_LOKI_URL WIGGUM_OTEL_SHIP WIGGUM_OTEL_ENABLED \
-       WIGGUM_OTEL_URL WIGGUM_MAX_REJECTS="$MAX_REJECTS"
+       WIGGUM_OTEL_URL WIGGUM_FEATURE WIGGUM_TRACE_ID WIGGUM_MAX_REJECTS="$MAX_REJECTS"
 
 # In live mode the scrolling presenter owns the terminal, so log() writes to the
 # run.log only (no duplicated banners); otherwise it tees to the terminal too.
@@ -629,7 +636,18 @@ log "  proposer : $PROPOSER_BACKEND"
 log "  critic   : $CRITIC_BACKEND"
 log "  max-rej  : $MAX_REJECTS   max-iter/phase: $MAX_ITER"
 log "  timeouts : proposer ${PROPOSER_TIMEOUT}s  critic ${CRITIC_TIMEOUT}s   wall: ${MAX_WALL_MIN}min"
-log "  git      : $GIT_COMMITS   telemetry: $TELEMETRY$( [[ "$TELEMETRY" == "true" ]] && echo " -> $LOKI_URL" )$( [[ "$OTEL" == "true" ]] && echo "   otel: -> $OTEL_URL" )"
+log "  git      : $GIT_COMMITS"
+# Telemetry status must distinguish the four receiver states (FR-036), never a
+# collapsed `telemetry: true`. At startup we can honestly claim only configured →
+# reachable (a probe); acceptance/query-verification come later from the JSONL.
+if [[ "$TELEMETRY" == "true" ]]; then
+  log "  telemetry: $(wiggum_telemetry_status_line loki "$LOKI_URL" "$WIGGUM_EVENTS")"
+else
+  log "  telemetry: off (loki export not configured)"
+fi
+if [[ "$OTEL" == "true" ]]; then
+  log "  otel     : $(wiggum_telemetry_status_line otel "$OTEL_URL" "$WIGGUM_EVENTS")"
+fi
 log "  verify   : $VERIFICATION$( [[ "$VERIFICATION" != "off" ]] && echo "  plan: $TEST_PLAN" )$( [[ -n "$GENERATE_TESTS" ]] && echo "  scaffolds: $GENERATE_TESTS" )"
 log "  resume   : phase ${CUR_PHASE:-<all approved>}$( [[ -n "$START_PHASE" ]] && echo " (--start-phase)" )"
 log "  run_id   : $WIGGUM_RUN_ID"

@@ -788,3 +788,41 @@ GATE FAIL: 41 task(s) still unchecked in tasks.md
 
 ===== ITER 34 / 120  2026-08-10T12:44:22+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. Completed **T043** — propagating correlation through the lifecycle export path.
+
+**What was missing:** The agent-export path (orchestrator → `proposer.sh` → `agent_stream.py`) already forwarded the full correlation identity (`feature/role/phase/attempt/invocation`). But the lifecycle path — `wiggum_emit`, which every `run_start`/`phase_start`/`reject`/`run_stop`/etc. event goes through — only carried `run_id/task/backend`. That left lifecycle events unqueryable by `feature` (FR-032) and without trace correlation (FR-033).
+
+**Changes (both files T043 names):**
+- `wiggum-lib.sh` — `wiggum_emit` now emits an ambient `feature` field on every lifecycle event, plus an optional `trace_id` **only when `WIGGUM_TRACE_ID` is set**. Trace context is passed through, never synthesized, so local recording never depends on a trace existing.
+- `orchestrator.sh` — exports the resolved (sanitized) feature `SLUG` as `WIGGUM_FEATURE` and passes through any inbound `WIGGUM_TRACE_ID`, alongside the existing correlation exports.
+
+The Loki/OTLP `--json-stdin` path already flattens arbitrary event fields, so these reach both sinks with no change to the T040/T041 shipper files.
+
+**Verified:**
+- `bash -n` clean on all four shell scripts.
+- Manual `wiggum_emit` run confirms `feature` is always present, `trace_id` appears only with a trace set, and output stays valid JSON.
+- Full `lib` suite: 279 passed.
+
+The first remaining unchecked task is now T044 (startup/status telemetry states).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 40 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 35 / 120  2026-08-10T12:54:38+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. Completed **T044** — startup and status output now distinguish the four telemetry receiver states instead of collapsing them into the forbidden `telemetry: true`.
+
+What changed:
+
+- **`lib/telemetry_delivery.py`** — extended the existing single-source-of-truth module (already home to `ReceiverState`) with three additions: `highest_from_records()` elevates a sink's claimed state from local `telemetry_delivery` evidence (accepted → *request accepted*, query round-trip → *query verified*; failures never elevate), `probe_reachable()` does an honest best-effort TCP reachability probe, and a tiny `_cli` (`line` / `probe`) so the bash surfaces delegate here the same way they delegate spec grammar to `wiggum_spec.py`.
+- **`wiggum-lib.sh`** — added `wiggum_telemetry_status_line`, a shim that renders one `<sink>: <phrase> (<url>)` line at the highest honestly-provable state, with a plain fallback if Python is unavailable.
+- **`orchestrator.sh`** — replaced the collapsed `telemetry: true -> URL` banner line with per-sink status lines (loki + otel) that show *export configured* → *endpoint reachable*, and an explicit `off` when disabled.
+- **`wiggum`** — `wiggum status` now prints a `telemetry:` section for whichever sinks the feature's `last-run.conf` enabled, elevating past *reachable* when the run's events.jsonl carries delivery evidence.
+
+Verification: `bash -n` clean on all four scripts, `py_compile` clean, and `test_telemetry_delivery.py` (10), `test_telemetry_parity.py` + `test_agent_stream.py` (18) all pass. The startup can honestly claim only up to *reachable* (a probe); *request accepted* / *query verified* come from runtime JSONL evidence, matching the contract in `telemetry-v1.md §Receiver State Language`.
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+GATE FAIL: 39 task(s) still unchecked in tasks.md
+----- gate not satisfied (continuing) -----
+
+===== ITER 36 / 120  2026-08-10T13:00:54+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors

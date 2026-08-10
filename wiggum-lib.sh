@@ -49,6 +49,13 @@ wiggum_emit() {
   [[ -n "${WIGGUM_RUN_ID:-}" ]]        && line+=",\"run_id\":\"$(wiggum_json_escape "$WIGGUM_RUN_ID")\""
   [[ -n "${WIGGUM_TASK:-}" ]]          && line+=",\"task\":\"$(wiggum_json_escape "$WIGGUM_TASK")\""
   [[ -n "${WIGGUM_BACKEND_LABEL:-}" ]] && line+=",\"backend\":\"$(wiggum_json_escape "$WIGGUM_BACKEND_LABEL")\""
+  # Ambient correlation the orchestrator exports once per run so every lifecycle
+  # event carries it without each call site repeating it. `feature` lets remote
+  # copies be queried per Prime run (FR-032). `trace_id` is OPTIONAL distributed-
+  # trace context (FR-033): emitted only when a trace already exists upstream —
+  # never synthesized here, so local recording never depends on trace creation.
+  [[ -n "${WIGGUM_FEATURE:-}" ]]       && line+=",\"feature\":\"$(wiggum_json_escape "$WIGGUM_FEATURE")\""
+  [[ -n "${WIGGUM_TRACE_ID:-}" ]]      && line+=",\"trace_id\":\"$(wiggum_json_escape "$WIGGUM_TRACE_ID")\""
   # remaining args are key/value pairs
   while [[ $# -gt 1 ]]; do
     local k="$1" v="$2"; shift 2
@@ -92,6 +99,26 @@ wiggum_emit() {
 # ─────────────────────────────────────────────────────────────────────────────
 _WIGGUM_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _WIGGUM_SPEC_PY="$_WIGGUM_LIB_DIR/lib/wiggum_spec.py"
+_WIGGUM_TELEMETRY_PY="$_WIGGUM_LIB_DIR/lib/telemetry_delivery.py"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Telemetry receiver state — thin shim over lib/telemetry_delivery.py, the SINGLE
+#  source of truth for the four escalating, user-visible states (FR-036). Startup
+#  and `wiggum status` MUST distinguish configured / reachable / request-accepted /
+#  query-verified and never collapse them into a generic `telemetry: true`.
+#
+#  Prints one `<sink>: <phrase> (<url>)` line, choosing the highest state honestly
+#  provable: `configured` by default, `reachable` if a TCP probe connects, and up
+#  to `request accepted` / `query verified` when an events.jsonl carries delivery
+#  evidence. Pass the events file (optional) so a live run's status can elevate.
+# ─────────────────────────────────────────────────────────────────────────────
+wiggum_telemetry_status_line() {
+  local name="$1" url="$2" events="${3:-}"
+  local args=(probe "$name" "$url")
+  [[ -n "$events" && -f "$events" ]] && args+=(--events "$events")
+  python3 "$_WIGGUM_TELEMETRY_PY" "${args[@]}" 2>/dev/null \
+    || printf '%s: export configured (%s)\n' "$name" "$url"
+}
 
 # WIGGUM_SPEC_FORMAT (optional) forces an adapter; empty = auto-detect. Passed
 # through as --format so an explicit orchestrator choice always wins.

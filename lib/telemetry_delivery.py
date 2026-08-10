@@ -114,3 +114,130 @@ class ReceiverState:
     def status_line(cls, name, state):
         """One-line ``<sink>: <phrase>`` status, e.g. ``loki: export configured``."""
         return "%s: %s" % (name, cls.PHRASES[state])
+
+    @classmethod
+    def highest_from_records(cls, name, records):
+        """Elevate ``name``'s state from local ``telemetry_delivery`` records.
+
+        Startup can only prove up to *reachable* (a probe). Runtime evidence in the
+        JSONL raises the claim: a batch the receiver accepted → *request accepted*,
+        a correlation-query round-trip → *query verified*. Records that describe
+        other sinks, or report failure, never elevate this sink. Returns ``None``
+        when nothing in ``records`` speaks to ``name``.
+        """
+        best = None
+        best_rank = -1
+        for rec in records or ():
+            if not isinstance(rec, dict) or rec.get("sink") != name:
+                continue
+            status = rec.get("status")
+            if status == "accepted":
+                candidate = cls.QUERY_VERIFIED if rec.get("query_verified") else cls.REQUEST_ACCEPTED
+            else:
+                # attempted / failed / unknown do not prove acceptance.
+                continue
+            rank = cls.ORDER.index(candidate)
+            if rank > best_rank:
+                best, best_rank = candidate, rank
+        return best
+
+
+def probe_reachable(url, timeout=1.5):
+    """Best-effort network reachability probe for a telemetry endpoint.
+
+    Returns ``True`` if a TCP connection to the URL's host/port succeeds within
+    ``timeout`` seconds — the honest evidence behind the *reachable* state, distinct
+    from *configured* (we only wrote a URL down) and from *request accepted* (a
+    batch actually landed). Never raises; a probe failure is just ``False``.
+    """
+    import socket
+    try:
+        from urllib.parse import urlsplit
+    except ImportError:  # pragma: no cover - Py2 fallback, not used
+        from urlparse import urlsplit
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        if not host:
+            return False
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001 - any failure means "not reachable"
+        return False
+
+
+def _load_delivery_records(events_path):
+    """Read ``telemetry_delivery`` records from an events.jsonl, newest last.
+
+    Tolerates a missing file and malformed lines — telemetry status is advisory
+    and must never crash a ``wiggum status`` call.
+    """
+    import json
+    records = []
+    try:
+        with open(events_path) as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if obj.get("event") == DELIVERY_EVENT:
+                    records.append(obj)
+    except OSError:
+        pass
+    return records
+
+
+def _cli(argv):
+    """Tiny CLI so the bash surfaces render receiver state through this module.
+
+    Usage:
+      telemetry_delivery.py line  <name> <state>
+      telemetry_delivery.py probe <name> <url> [--events FILE] [--no-probe]
+
+    ``probe`` prints the single highest honestly-achievable status line for the
+    sink: *configured* by default, *reachable* if the probe connects, and up to
+    *request accepted* / *query verified* when an events.jsonl supplies evidence.
+    """
+    args = list(argv)
+    if not args:
+        return 2
+    cmd = args.pop(0)
+    if cmd == "line":
+        if len(args) != 2 or args[1] not in ReceiverState.PHRASES:
+            return 2
+        print(ReceiverState.status_line(args[0], args[1]))
+        return 0
+    if cmd == "probe":
+        if len(args) < 2:
+            return 2
+        name, url = args[0], args[1]
+        events_path = None
+        do_probe = True
+        rest = args[2:]
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--events" and i + 1 < len(rest):
+                events_path = rest[i + 1]
+                i += 2
+            elif rest[i] == "--no-probe":
+                do_probe = False
+                i += 1
+            else:
+                return 2
+        state = ReceiverState.CONFIGURED
+        if do_probe and probe_reachable(url):
+            state = ReceiverState.REACHABLE
+        if events_path:
+            elevated = ReceiverState.highest_from_records(name, _load_delivery_records(events_path))
+            if elevated is not None and ReceiverState.ORDER.index(elevated) > ReceiverState.ORDER.index(state):
+                state = elevated
+        print("%s (%s)" % (ReceiverState.status_line(name, state), url))
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli(sys.argv[1:]))
