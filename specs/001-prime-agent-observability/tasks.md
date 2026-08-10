@@ -65,9 +65,9 @@
 
 - [x] T019 [US1] Implement Prime session/message/turn/retry/error/usage schema-v3 parsing and text coalescing in `lib/prime_stream.py`
 - [x] T020 [US1] Implement Prime tool proposal/execution correlation, bounded progress/result summaries, abandoned-tool diagnostics, and exact expected-evidence detection in `lib/prime_stream.py`
-- [ ] T021 [US1] Register `prime-v3` adapter selection and normalized `agent_init`, `agent_text`, `agent_tool`, `evidence_writing`, `agent_diagnostic`, and terminal-observation output in `lib/agent_stream.py`
-- [ ] T022 [US1] Route stock `prime-agent` and fleet `prime <variant>` proposers through `--mode json` and the Prime adapter when structured capture is requested, while preserving prompt stdin and text fallback in `proposer.sh`
-- [ ] T023 [US1] Pass run, feature, proposer role, phase, attempt, iteration, invocation ID, and exact evidence path from `orchestrator.sh` through `proposer.sh` into normalized events and invocation artifacts
+- [x] T021 [US1] Register `prime-v3` adapter selection and normalized `agent_init`, `agent_text`, `agent_tool`, `evidence_writing`, `agent_diagnostic`, and terminal-observation output in `lib/agent_stream.py`
+- [x] T022 [US1] Route stock `prime-agent` and fleet `prime <variant>` proposers through `--mode json` and the Prime adapter when structured capture is requested, while preserving prompt stdin and text fallback in `proposer.sh`
+- [x] T023 [US1] Pass run, feature, proposer role, phase, attempt, iteration, invocation ID, and exact evidence path from `orchestrator.sh` through `proposer.sh` into normalized events and invocation artifacts
 - [ ] T024 [US1] Render provider-neutral Prime initialization, coherent text, tool lifecycle, evidence activity, and result fields at the existing detail levels in `lib/present.py`
 - [ ] T025 [US1] Validate both fake stock/fleet proposer journeys and fixture replay against the US1 independent test, fixing only US1 contract deviations in `lib/test_prime_stream.py`, `lib/test_prime_backend.py`, and `lib/test_present.py`
 

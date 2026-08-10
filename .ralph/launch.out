@@ -172,3 +172,54 @@ The implementation already existed on disk (T019 and T020 both target `prime_str
 
 ===== ITER 12 / 120  2026-08-10T09:40:18+04:00 =====
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T021 is complete and checked off.
+
+**What T021 required:** register the `prime-v3` adapter in `lib/agent_stream.py` and emit the six normalized outputs.
+
+**What I found:** the wiring was already implemented in a prior iteration — `select_provider_adapter` maps `"prime-v3"` → `PrimeAdapter` (`agent_stream.py:234`), the main loop routes malformed lines through `adapter.consume_raw` and calls `adapter.finish()` for terminal/abandoned-tool observations, and terminal outcomes flow into the `agent_result` event and telemetry. The checkbox had simply been left unflipped.
+
+**How I verified it** rather than trusting the checkbox alone:
+- All 36 US1-related tests pass (`test_agent_stream`, `test_prime_stream`, `test_prime_stream_tools`, `test_prime_evidence`, `test_prime_backend`, `test_present`), including `test_provider_adapter_selection_is_explicit` which asserts `select_provider_adapter("prime-v3", policy)` returns a `PrimeAdapter`.
+- End-to-end fixture replays through the CLI confirmed each normalized output actually emits: `fleet-evidence.jsonl` produced `agent_init`, `agent_tool`, `evidence_writing`, and terminal `agent_result` (evidence match required the correct `--expected-evidence` resolving against the fixture's `/work/project` cwd); `stock-auth-error.jsonl` produced `agent_diagnostic` and terminal output. `agent_text` coalescing is covered by the passing stream tests.
+- `python3 -m py_compile lib/agent_stream.py lib/prime_stream.py` clean.
+
+The tree is consistent. Next unchecked task is T022 (route proposers through `--mode json` in `proposer.sh`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 13 / 120  2026-08-10T09:43:02+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+T022 is complete. Here's what I found and did this iteration:
+
+**T022 — Route Prime proposers through `--mode json`** — the implementation was already fully present in `proposer.sh` from a prior pass, but its checkbox was still unchecked. I verified it against the contract and flipped the box to `- [x]`.
+
+What the code does (all confirmed by the tests):
+- `PRIME_STRUCTURED` gate (`proposer.sh:166-170`) turns on JSON capture only when the backend is `prime`/`prime:*` **and** `WIGGUM_AGENT_STREAM=true` or `-j` is set.
+- Stock `prime` uses `-p --mode json --no-session --cwd $WORKDIR` (falls back to `--mode text` when structured capture is off), prompt still piped on stdin (`proposer.sh:192-202`).
+- Fleet `prime:<variant>` uses `<variant> -p --mode json --no-session --cwd $WORKDIR`, same stdin path (`proposer.sh:203-213`).
+- Explicit text fallback (`WIGGUM_AGENT_STREAM=false`) preserves stdin and emits no structured events/metadata.
+
+Verification:
+- `python3 -m pytest -q lib/test_prime_backend.py` → **7 passed** (covers both stock/fleet JSON-adapter argv, correlated context, and text fallback).
+- `bash -n proposer.sh` → clean.
+
+The tree is consistent: one checkbox flipped, tests green. The next unchecked task is T023 (passing the correlation context from `orchestrator.sh` — note the proposer side already accepts these flags; the remaining work is the orchestrator wiring).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 14 / 120  2026-08-10T09:44:28+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+Done. Completed **T023** this iteration.
+
+**What T023 required:** thread run/feature/role/phase/attempt/iteration/invocation-id and the exact evidence path from `orchestrator.sh` through `proposer.sh` into normalized events and invocation artifacts.
+
+**Finding:** the wiring was already in place from the T021/T022 implementation work — orchestrator.sh passes all eight fields to proposer.sh, which forwards them to the `agent_stream.py` tap (stamping every normalized event) and writes a per-invocation `metadata.json` with `expected_evidence` resolved to an absolute path. I verified rather than re-implemented, since the task is satisfied and its contract tests (`test_prime_backend.py`) exercise exactly these assertions.
+
+**Verification:** `test_prime_backend.py`, `test_prime_stream.py`, and `test_agent_stream.py` all pass (22 passed); `bash -n orchestrator.sh proposer.sh` is clean. Checkbox flipped to `- [x]`.
+
+Next unchecked task is T024 (render provider-neutral Prime fields in `lib/present.py`).
+----- gate (rung 1): /root/wiggum/specs/001-prime-agent-observability/check-done.sh -----
+----- gate not satisfied (continuing) -----
+
+===== ITER 15 / 120  2026-08-10T09:46:30+04:00 =====
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
