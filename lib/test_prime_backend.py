@@ -49,6 +49,37 @@ def test_prime_provider_variant_resolution():
     call.assert_called_once_with("prompt", "qwen", 9, None)
 
 
+def test_dsh_provider_dispatches_headless_harness():
+    with mock.patch.object(critic, "call_dsh_shell", return_value="ok") as call:
+        assert critic.critic_call("dsh", "prompt", 9, "/tmp/wt") == "ok"
+    call.assert_called_once_with("prompt", 9, "/tmp/wt")
+
+
+def test_dsh_critic_uses_tool_free_patch_and_target_cwd():
+    completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
+    env = {"WIGGUM_DSH_BIN": "/bin/dsh", "WIGGUM_DSH_PROFILE": "headless"}
+    captured_patch = ""
+
+    def fake_run(argv, **kwargs):
+        nonlocal captured_patch
+        patch_path = argv[argv.index("--patch") + 1]
+        captured_patch = Path(patch_path).read_text()
+        return completed
+
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", side_effect=fake_run) as run:
+        reply = critic.call_dsh_shell("large prompt", 42, "/tmp/work tree")
+    assert reply == "VERDICT token: APPROVED\n"
+    argv = run.call_args.args[0]
+    assert argv[:5] == ["/bin/dsh", "--profile", "headless", "--patch", argv[4]]
+    assert argv[-1] == "large prompt"
+    assert run.call_args.kwargs["cwd"] == "/tmp/work tree"
+    assert run.call_args.kwargs["timeout"] == 42
+    assert run.call_args.kwargs["env"]["DSH_PERMISSION_MODE"] == "read-only"
+    for tool_id in ("tool-bash", "tool-fs", "tool-web", "tool-subagent", "tool-workflow"):
+        assert "id: %s" % tool_id in captured_patch
+    assert captured_patch.count("disabled: true") >= 10
+
+
 def _run_fake_proposer(tmp_path, backend, executable_env, *, agent_stream="true"):
     evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
     events = tmp_path / "events.jsonl"
@@ -98,6 +129,40 @@ def _run_fake_proposer(tmp_path, backend, executable_env, *, agent_stream="true"
                      "invocations").rglob("metadata.json"))
     return ((tmp_path / "argv").read_text().splitlines(),
             (tmp_path / "stdin").read_text(), records, evidence, metadata)
+
+
+def test_dsh_proposer_uses_headless_profile_and_target_cwd(tmp_path):
+    evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("standing prompt")
+    fake = tmp_path / "fake-dsh"
+    fake.write_text(
+        "#!/bin/bash\n"
+        "pwd > \"$CAPTURE_CWD\"\n"
+        "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGV\"\n"
+        "mkdir -p \"$(dirname \"$TEST_EVIDENCE\")\"\n"
+        "echo ok > \"$TEST_EVIDENCE\"\n"
+    )
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "WIGGUM_DSH_BIN": str(fake),
+        "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_AGENT_STREAM": "false",
+        "CAPTURE_CWD": str(tmp_path / "cwd"),
+        "CAPTURE_ARGV": str(tmp_path / "argv"),
+        "TEST_EVIDENCE": str(evidence),
+    })
+    result = subprocess.run([
+        "bash", str(Path(__file__).parents[1] / "proposer.sh"),
+        "-w", str(tmp_path), "-e", str(evidence), "-f", str(prompt),
+        "--backend", "dsh", "-n", "1",
+    ], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "cwd").read_text().strip() == str(tmp_path)
+    assert (tmp_path / "argv").read_text().splitlines() == [
+        "--profile", "headless", "standing prompt",
+    ]
 
 
 def _assert_structured_context(records, backend):

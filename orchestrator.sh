@@ -55,9 +55,9 @@ OPTIONS
                         Default: the Spec Kit feature or OpenSpec change directory
                         basename, else "default". Also disambiguates multiple
                         discovered task specs. Also via WIGGUM_FEATURE.
-  --proposer BACKEND    Proposer backend: claude | codex | bebop[:name] |
-                        prime[:variant] (default: $WIGGUM_PROPOSER or claude).
-  --critic BACKEND      Critic provider: claude | codex | bebop | prime[:variant]
+  --proposer BACKEND    Proposer backend: dsh | claude | codex | bebop[:name] |
+                        prime[:variant] (default: $WIGGUM_PROPOSER or dsh).
+  --critic BACKEND      Critic provider: dsh | claude | codex | bebop | prime[:variant]
                         (default: $WIGGUM_CRITIC or claude).
   --max-rejects N       Critic REJECTs per phase before halting (default: 3).
   --max-iter N          Proposer passes per phase (default: 30).
@@ -126,7 +126,7 @@ SPEC_FORMAT="${WIGGUM_SPEC_FORMAT:-}"   # empty = auto-detect
 FEATURE="${WIGGUM_FEATURE:-}"           # explicit feature slug (Spec Kit multi-feature)
 START_PHASE=""
 DEBUG="false"
-PROPOSER_BACKEND="${WIGGUM_PROPOSER:-claude}"
+PROPOSER_BACKEND="${WIGGUM_PROPOSER:-dsh}"
 CRITIC_BACKEND="${WIGGUM_CRITIC:-claude}"
 MAX_REJECTS="${WIGGUM_MAX_REJECTS:-3}"
 MAX_ITER="${WIGGUM_MAX_ITER:-30}"

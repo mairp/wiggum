@@ -37,8 +37,8 @@ REQUIRED
   -f, --prompt-file FILE  File whose contents are the standing prompt each pass.
 
 OPTIONS
-  --backend NAME          Provider backend: claude | codex | bebop:<name> |
-                          prime:<variant> (default: $WIGGUM_PROPOSER or "claude").
+  --backend NAME          Provider backend: dsh | claude | codex | bebop:<name> |
+                          prime:<variant> (default: $WIGGUM_PROPOSER or "dsh").
                           Bare bebop uses WIGGUM_BEBOP_BACKEND; bare prime uses
                           stock prime-agent with its configured default model.
   --model MODEL           Model id (claude/codex only; selectors pick their own).
@@ -51,6 +51,9 @@ OPTIONS
   --debug                 Retain each pass's prompt.txt + response.txt in that
                           pass's own invocation dir (.wiggum/features/<f>/debug/
                           invocations/...), alongside its metadata/result/events.
+  DSH plugin requests     With backend dsh and WIGGUM_DSH_PLUGIN_ALLOWLIST set,
+                          the model may request exact allowlisted package@version
+                          plugins; Wiggum installs them between fresh passes.
   -h, --help              Show this help.
 
 Local agent-stream capture (tool calls, messages, cost -> events.jsonl) is ON by
@@ -75,7 +78,7 @@ EOF
 }
 
 WORKDIR="" EVIDENCE="" PROMPT_FILE=""
-BACKEND="${WIGGUM_PROPOSER:-claude}"
+BACKEND="${WIGGUM_PROPOSER:-dsh}"
 MODEL=""
 MAX_ITER="${WIGGUM_MAX_ITER:-30}"
 SLEEP_SECS=2
@@ -139,7 +142,11 @@ esac
 mkdir -p "$(dirname "$EVIDENCE")"
 
 STATE_DIR="$WORKDIR/.wiggum"
+mkdir -p "$STATE_DIR"
 : "${WIGGUM_EVENTS:=$STATE_DIR/events.jsonl}"
+DSH_PLUGIN_REQUEST="$STATE_DIR/features/${WIGGUM_FEATURE:-default}/dsh-plugin-request.json"
+DSH_PLUGIN_ARCHIVE="$STATE_DIR/features/${WIGGUM_FEATURE:-default}/plugin-installs"
+DSH_PLUGIN_PROCESSOR="$LIB_DIR/dsh_plugin_requests.py"
 export WIGGUM_EVENTS
 
 # Autonomous headless loops always pass --dangerously-skip-permissions, which Claude
@@ -185,6 +192,17 @@ run_agent() {
   local prompt="$1"; shift
   local -a args=( "$@" )
   case "$BACKEND" in
+    dsh)
+      # DeepSeek Harness one-shot profile. The profile selects the provider/model
+      # from $DSH_HOME/settings.yaml (SOL through Compass STAGE on this host).
+      # The current headless runner accepts the task as one positional argument.
+      local dsh_bin="${WIGGUM_DSH_BIN:-dsh}"
+      local dsh_profile="${WIGGUM_DSH_PROFILE:-headless}"
+      command -v "$dsh_bin" >/dev/null 2>&1 || { echo "proposer.sh: DeepSeek Harness not found: $dsh_bin (set \$WIGGUM_DSH_BIN)" >&2; return 127; }
+      [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with dsh; configure agent-default-model in \$DSH_HOME/settings.yaml" >&2; return 1; }
+      DSH_PERMISSION_MODE="${WIGGUM_DSH_PERMISSION_MODE:-${DSH_PERMISSION_MODE:-workspace-write}}" \
+        timeout "$TIMEOUT" "$dsh_bin" --profile "$dsh_profile" "$prompt"
+      ;;
     claude)
       [[ -n "$MODEL" ]] && args+=( --model "$MODEL" )
       timeout "$TIMEOUT" claude -p "$prompt" "${args[@]}"
@@ -239,7 +257,7 @@ run_agent() {
       return "$rc"
       ;;
     *)
-      echo "proposer.sh: unknown backend '$BACKEND' (claude | codex | bebop[:name] | prime[:variant])" >&2
+      echo "proposer.sh: unknown backend '$BACKEND' (dsh | claude | codex | bebop[:name] | prime[:variant])" >&2
       return 127
       ;;
   esac
@@ -464,6 +482,12 @@ fi
 
 PROMPT="$(cat "$PROMPT_FILE")"
 [[ -n "${PROMPT//[[:space:]]/}" ]] || { echo "proposer.sh: prompt is empty" >&2; exit 1; }
+if [[ "$BACKEND" == dsh && -n "${WIGGUM_DSH_PLUGIN_ALLOWLIST:-}" ]]; then
+  PROMPT+=$'\n\n## Optional DSH plugin request protocol\n'
+  PROMPT+="If—and only if—the current DSH tool surface cannot complete this phase, you may request a pre-approved DSH profile plugin. Write exactly one JSON object atomically (temporary file then mv) to: $DSH_PLUGIN_REQUEST"$'\n'
+  PROMPT+=$'Schema: {"contract":"wiggum-dsh-plugin-request/v1","plugins":["exact-package@1.2.3"],"reason":"why existing tools are insufficient"}\n'
+  PROMPT+="Allowed exact specs: ${WIGGUM_DSH_PLUGIN_ALLOWLIST}. Requests outside this exact allowlist, ranges/tags/URLs/paths, extra keys, or malformed JSON are rejected. After writing a request, STOP without writing gate evidence. Wiggum installs it between passes; the next fresh DSH pass sees the plugin. Do not run dsh plugin, pnpm, npm, or modify the DSH profile yourself."
+fi
 
 # Debug raw retention (prompt/response) is now invocation-scoped: run_iteration
 # writes each pass's prompt.txt/response.txt into that pass's own collision-free
@@ -514,6 +538,40 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   echo "$PASS_PID" > "$PIDFILE" 2>/dev/null || true
   wait "$PASS_PID" || true
   rm -f "$PIDFILE"
+
+  # A DSH proposer may request one pre-approved profile plugin through the fixed
+  # JSON artifact. The controller validates exact package@semver values and invokes
+  # dsh with an argv array (never a shell), then starts the next fresh pass so the
+  # newly composed profile is active. Invalid/denied/failed requests halt visibly.
+  if [[ "$BACKEND" == dsh && -f "$DSH_PLUGIN_REQUEST" ]]; then
+    if [[ -z "${WIGGUM_DSH_PLUGIN_ALLOWLIST:-}" ]]; then
+      echo "proposer.sh: DSH plugin request found but WIGGUM_DSH_PLUGIN_ALLOWLIST is empty" >&2
+      wiggum_emit plugin_install_denied iter "$i" reason allowlist_empty
+      exit 7
+    fi
+    echo "proposer.sh: validating DSH plugin request after pass $i" >&2
+    plugin_result="$(python3 "$DSH_PLUGIN_PROCESSOR" \
+      --request "$DSH_PLUGIN_REQUEST" --archive-dir "$DSH_PLUGIN_ARCHIVE" \
+      --allowlist "$WIGGUM_DSH_PLUGIN_ALLOWLIST" \
+      --dsh-bin "${WIGGUM_DSH_BIN:-dsh}" --profile "${WIGGUM_DSH_PROFILE:-headless}" \
+      --timeout "${WIGGUM_DSH_PLUGIN_TIMEOUT:-600}" 2>&1)"
+    plugin_rc=$?
+    if [[ "$plugin_rc" -ne 0 ]]; then
+      echo "proposer.sh: $plugin_result" >&2
+      wiggum_emit plugin_install_failed iter "$i" reason "$plugin_result"
+      exit 7
+    fi
+    plugin_names="$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1]).get("plugins", [])))' "$plugin_result" 2>/dev/null || true)"
+    echo "proposer.sh: installed DSH plugin(s): $plugin_names; restarting with fresh profile" >&2
+    wiggum_emit plugin_installed iter "$i" profile "${WIGGUM_DSH_PROFILE:-headless}" plugins "$plugin_names"
+    if (( i >= MAX_ITER )); then
+      echo "proposer.sh: plugin installed on final pass; raise --max-iter to allow a restarted DSH pass" >&2
+      exit 4
+    fi
+    wiggum_emit iter_done iter "$i" evidence missing plugin_restart true
+    sleep "$SLEEP_SECS"
+    continue
+  fi
 
   # Evidence wins outright — a pass that produced the gate file is a success
   # regardless of how the agent's result was labelled.

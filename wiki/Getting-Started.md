@@ -6,9 +6,9 @@ your project with `-w/--workdir` and (optionally) `-s/--specs`.
 ## Requirements
 
 - `bash` and `python3` (stdlib only — no pip, no dependency manager)
-- An LLM backend key. On `main` both roles default to **`claude`** (Claude Code CLI for the
-  proposer, the Claude Messages API for the critic), so a clone plus an Anthropic key runs
-  out of the box.
+- An LLM backend key. On `main` the proposer defaults to **`dsh`** (DeepSeek Harness's
+  configured model), while the critic defaults to **`claude`** (Messages API). Configure
+  `$DSH_HOME/settings.yaml` and the corresponding provider credentials.
 
 ## Quick start
 

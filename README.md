@@ -283,9 +283,9 @@ wiggum run -w /tmp/wiggum-demo
 `"$WIGGUM_HOME"/wiggum run -w /tmp/wiggum-demo` — or `./wiggum run -w
 /tmp/wiggum-demo` from inside the clone.)
 
-`main` defaults both roles to **`claude`** (Claude Code CLI for the proposer,
-the Claude Messages API for the critic), so a clone plus an Anthropic key runs
-out of the box. The bundled `SPECS.example.md` is two trivial, verifiable phases
+The proposer defaults to **`dsh`**, using DeepSeek Harness's headless profile and
+its configured default model (SOL through Compass STAGE on this installation).
+The critic remains independently configurable and defaults to **`claude`**. The bundled `SPECS.example.md` is two trivial, verifiable phases
 so you can watch the whole loop — including a reject-and-fix — end to end.
 
 ### Default run (this install)
@@ -593,8 +593,12 @@ Wiggum never writes checkbox state back into `tasks.md`; approvals stay in
 Everything is set in `.env` (copy from `.env.example`; the real `.env` is
 gitignored). Precedence: **built-in defaults < `.env` < CLI flags**.
 
-Pick a backend per role — `claude | codex | bebop | prime[:variant]`:
+Pick a backend per role — `dsh | claude | codex | bebop | prime[:variant]`:
 
+- **`dsh`** — DeepSeek Harness's `headless` profile, using the provider/model in
+  `$DSH_HOME/settings.yaml`. It is the default proposer; as critic it runs with
+  model-facing tools disabled. The proposer may request persistent profile plugins
+  when `WIGGUM_DSH_PLUGIN_ALLOWLIST` names exact approved `package@semver` specs.
 - **`claude`** — Anthropic. Claude Code CLI (proposer) + Messages API (critic).
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic).
   Ships, but **UNVERIFIED** (no Codex CLI on the author's host to test against).
@@ -603,6 +607,28 @@ Pick a backend per role — `claude | codex | bebop | prime[:variant]`:
   its configured default model, so no custom variants are required. If an optional
   `prime <variant>` fleet launcher is installed, select it with `prime:sol`,
   `prime:judge`, etc. Proposer passes are fresh; Prime critics run without tools.
+
+**Allowlisted DSH plugin installation.** Set `WIGGUM_DSH_PLUGIN_ALLOWLIST` to a
+comma-separated list of exact registry `package@semver` specs. When a DSH proposer
+cannot complete a phase with existing tools, it may write the documented
+`wiggum-dsh-plugin-request/v1` artifact and stop. Wiggum validates the request,
+runs `dsh plugin --profile <profile> add --save-exact` without a shell, archives
+an audit receipt, emits `plugin_installed`, and restarts a fresh pass. Unlisted or
+non-pinned specs halt visibly. Installed plugins persist in the DSH profile; the
+DSH critic remains tool-free and cannot request them. See
+[Configuration](wiki/Configuration.md#model-requested-dsh-plugins).
+
+**Finding plugins safely.** There is no curated DSH marketplace whose contents
+are automatically trusted. Prefer, in order: bundles shipped or explicitly linked
+by the official [DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness),
+official [`@deepseek-ai` npm packages](https://www.npmjs.com/org/deepseek-ai), or
+internally reviewed bundles published to your private npm registry. Before adding
+an exact version to the allowlist, inspect its repository, `package.json`,
+`dsh.bundle.patch`, lifecycle scripts, dependencies, and `cordis.patch.yml`; use
+`npm pack package@version` to review the tarball without installing it. Test new
+plugins in a disposable DSH profile first. An npm listing, download count, or
+allowlist entry is not proof that third-party code is safe—especially on hosts
+where the DSH proposer runs with `danger-full-access`.
 
 **Observability parity.** A Prime invocation emits the same signal classes as
 Claude — `init`, `text`, `tool`, `evidence`, `result` — when its structured JSON
@@ -724,6 +750,6 @@ seam and is covered by unit, characterization, and old-vs-new **parity** tests
 Code is provider-agnostic and lives entirely on `main`. Branches differ *only* in
 `.env` defaults:
 
-- **`main`** — defaults to `claude`; clone + Anthropic key runs.
+- **`main`** — defaults the proposer to `dsh` and the critic to `claude`.
 - **`bebop`** — overlay; defaults both roles to `bebop compass` (author's host).
 - **`codex-demo`** — overlay; defaults both roles to `codex` (OpenAI-only demo).

@@ -8,8 +8,12 @@ values), so `WIGGUM_PROPOSER_TIMEOUT=… wiggum run …` is honored.
 
 ## Backends (pick one per role)
 
-Choose `claude | codex | bebop | prime[:variant]` for the proposer and critic independently:
+Choose `dsh | claude | codex | bebop | prime[:variant]` for the proposer and critic independently:
 
+- **`dsh`** — DeepSeek Harness's `headless` profile. It uses the provider/model in
+  `$DSH_HOME/settings.yaml` (this host selects `gpt-5.6-sol` through Compass STAGE).
+  The proposer gets the normal harness tools; the critic runs with a temporary
+  tool-disabling patch. This is the default proposer backend.
 - **`claude`** — Anthropic. Claude Code CLI (proposer) + Messages API (critic). The `main`
   default; a clone plus an Anthropic key runs out of the box.
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic). Ships, but
@@ -22,6 +26,36 @@ Choose `claude | codex | bebop | prime[:variant]` for the proposer and critic in
 
 Portable example: `wiggum run --proposer prime --critic prime`. Fleet example:
 `wiggum run --proposer prime:sol --critic prime:judge`.
+
+### Model-requested DSH plugins
+
+A DSH proposer can request installation of a missing profile plugin, but only from
+an operator-owned exact allowlist. Enable it with comma-separated, version-pinned
+registry specs:
+
+```bash
+WIGGUM_DSH_PLUGIN_ALLOWLIST='@acme/dsh-browser@1.4.2,@acme/dsh-db@2.0.1' \
+  wiggum run --proposer dsh ...
+```
+
+When existing tools are insufficient, the model writes the fixed contract
+`wiggum-dsh-plugin-request/v1` to the active feature's
+`.wiggum/features/<feature>/dsh-plugin-request.json` and stops. Between passes,
+Wiggum validates the JSON and literal package specs, then executes:
+
+```bash
+dsh plugin --profile headless add --save-exact <approved-specs...>
+```
+
+Wiggum never evaluates request content through a shell. Package ranges, tags,
+URLs, git references, paths, unlisted specs, duplicate entries, extra JSON keys,
+symlinks, and oversized requests are rejected and halt the proposer visibly.
+Successful requests and receipts are archived below
+`.wiggum/features/<feature>/plugin-installs/`; a `plugin_installed` event records
+the profile and packages. Installation changes the persistent DSH profile, so the
+plugin is available to the next fresh proposer pass and later DSH sessions. Review
+plugin provenance and lifecycle scripts before adding a spec to the allowlist.
+The tool-free DSH critic never receives this request protocol.
 
 ### Prime observability parity
 
@@ -46,7 +80,10 @@ See `.env.example` for the full set. The load-bearing ones:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `WIGGUM_PROPOSER` / `WIGGUM_CRITIC` | `claude` | backend per role |
+| `WIGGUM_PROPOSER` / `WIGGUM_CRITIC` | `dsh` / `claude` | backend per role |
+| `WIGGUM_DSH_BIN` / `WIGGUM_DSH_PROFILE` | `dsh` / `headless` | DeepSeek Harness executable and profile |
+| `WIGGUM_DSH_PLUGIN_ALLOWLIST` | empty | comma-separated exact `package@semver` specs the DSH proposer may request and install |
+| `WIGGUM_DSH_PLUGIN_TIMEOUT` | `600` | timeout in seconds for one approved profile installation |
 | `WIGGUM_PRIME_AGENT_BIN` | `prime-agent` | standard Prime Agent executable used by bare `prime` |
 | `WIGGUM_PRIME_FLEET_BIN` | `prime` | optional fleet launcher used by `prime:<variant>` |
 | `WIGGUM_PRIME_BIN` | — | legacy alias for the fleet launcher override |
@@ -107,7 +144,7 @@ scaffolds). All operator-supplied paths must be absolute. See [Getting Started](
 Code is provider-agnostic and lives entirely on `main`. Branches differ *only* in `.env`
 defaults:
 
-- **`main`** — defaults to `claude`; clone + Anthropic key runs.
+- **`main`** — defaults the proposer to `dsh` and the critic to `claude`.
 - **`bebop`** — overlay; defaults both roles to `bebop compass` (author's host).
 - **`codex-demo`** — overlay; defaults both roles to `codex` (OpenAI-only demo).
 

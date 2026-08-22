@@ -14,8 +14,9 @@ in the evidence can never approve the gate. Missing / duplicated / wrong-nonce /
 absent verdict all fail SAFE (counted as REJECTED, recorded malformed): an
 unattended approve-your-own-work loop must never auto-approve on ambiguity.
 
-Provider is chosen by WIGGUM_CRITIC = claude | codex | bebop |
-prime[:variant]. HTTP paths use stdlib urllib. No pip installs.
+Provider is chosen by WIGGUM_CRITIC = dsh | claude | codex | bebop |
+prime[:variant]. DSH runs a fresh, tool-free DeepSeek Harness headless turn;
+HTTP paths use stdlib urllib. No pip installs.
 
 Exit codes:  0 APPROVED · 10 REJECTED · 3 bad config/usage · 1 internal error.
 The orchestrator maps these onto phase advancement; the marker files are the
@@ -1071,6 +1072,83 @@ def call_bebop_shell(prompt, backend, timeout):
     return out.stdout
 
 
+def call_dsh_shell(prompt, timeout, workdir=None):
+    """Run a fresh DeepSeek Harness headless turn as a tool-free critic.
+
+    DSH's headless profile uses its configured ``agent-default-model`` selection
+    (SOL through Compass STAGE on this host). A temporary patch disables every
+    model-facing tool so the critic can only evaluate the grounded prompt.
+    """
+    import subprocess
+    import tempfile
+    launcher = os.environ.get("WIGGUM_DSH_BIN", "dsh")
+    profile = os.environ.get("WIGGUM_DSH_PROFILE", "headless")
+    patch = """\
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-report
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-str-replace-editor
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: user-questions
+  disabled: true
+"""
+    patch_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as fh:
+            fh.write(patch)
+            patch_path = fh.name
+        argv = [launcher, "--profile", profile, "--patch", patch_path, prompt]
+        env = dict(os.environ)
+        env["DSH_PERMISSION_MODE"] = "read-only"
+        out = subprocess.run(argv, cwd=workdir, capture_output=True, text=True,
+                             timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("DeepSeek Harness critic timed out after %ss" % timeout)
+    except OSError as exc:
+        raise RuntimeError("DeepSeek Harness launcher failed: %s" % exc)
+    finally:
+        if patch_path:
+            try:
+                os.unlink(patch_path)
+            except OSError:
+                pass
+    if out.returncode != 0:
+        raise RuntimeError("DeepSeek Harness critic exit %d: %s" %
+                           (out.returncode, (out.stderr or "")[:300]))
+    if not out.stdout.strip():
+        raise RuntimeError("DeepSeek Harness critic returned empty stdout")
+    return out.stdout
+
+
 def call_prime_shell(prompt, variant, timeout, workdir=None):
     """Run a fresh, isolated, tool-free Prime Agent critic turn.
 
@@ -1229,6 +1307,8 @@ def call_prime_critic(prompt, variant, timeout, workdir=None):
 
 
 def critic_call(provider, prompt, timeout, workdir=None):
+    if provider == "dsh":
+        return call_dsh_shell(prompt, timeout, workdir)
     if provider == "claude":
         model = os.environ.get("WIGGUM_CLAUDE_CRITIC_MODEL", "claude-opus-4-8")
         return call_claude(prompt, model, timeout)
@@ -1267,7 +1347,7 @@ def critic_call(provider, prompt, timeout, workdir=None):
                     "(no hardcoded default — the model is env-controlled)")
             return call_openai_chat(prompt, model, timeout, base, key, "WIGGUM_COMPASS_KEY")
         return call_bebop_shell(prompt, backend, timeout)
-    raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (claude|codex|bebop|prime[:variant])" % provider)
+    raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (dsh|claude|codex|bebop|prime[:variant])" % provider)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
