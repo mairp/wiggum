@@ -70,7 +70,7 @@ def test_dsh_critic_uses_tool_free_patch_and_target_cwd():
         reply = critic.call_dsh_shell("large prompt", 42, "/tmp/work tree")
     assert reply == "VERDICT token: APPROVED\n"
     argv = run.call_args.args[0]
-    assert argv[:5] == ["/bin/dsh", "--profile", "headless", "--patch", argv[4]]
+    assert argv[:6] == ["/bin/dsh", "--profile", "headless", "--patch", argv[4], "--"]
     assert argv[-1] == "large prompt"
     assert run.call_args.kwargs["cwd"] == "/tmp/work tree"
     assert run.call_args.kwargs["timeout"] == 42
@@ -78,6 +78,24 @@ def test_dsh_critic_uses_tool_free_patch_and_target_cwd():
     for tool_id in ("tool-bash", "tool-fs", "tool-web", "tool-subagent", "tool-workflow"):
         assert "id: %s" % tool_id in captured_patch
     assert captured_patch.count("disabled: true") >= 10
+
+
+def test_dsh_critic_splits_oversized_prompt_without_changing_task():
+    completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
+    prompt = ("grounded evidence \n" * 12000) + "final marker"
+
+    with mock.patch("subprocess.run", return_value=completed) as run:
+        critic.call_dsh_shell(prompt, 42)
+
+    argv = run.call_args.args[0]
+    task_args = argv[argv.index("--") + 1:]
+    assert len(task_args) > 1
+    assert " ".join(task_args) == prompt
+    assert all(len(arg.encode("utf-8")) <= critic._DSH_TASK_ARG_MAX_BYTES
+               for arg in task_args)
+    assert all(len(arg.encode("utf-8")) < os.sysconf("SC_PAGESIZE") * 32
+               for arg in argv)
+    assert run.call_args.kwargs.get("input") is None
 
 
 def _run_fake_proposer(tmp_path, backend, executable_env, *, agent_stream="true"):

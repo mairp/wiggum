@@ -1072,6 +1072,36 @@ def call_bebop_shell(prompt, backend, timeout):
     return out.stdout
 
 
+_DSH_TASK_ARG_MAX_BYTES = 120 * 1024
+
+
+def _dsh_task_args(prompt):
+    """Split a task without changing what DSH reconstructs from its argv.
+
+    DSH headless joins its variadic task arguments with one ASCII space. Splitting
+    only at existing ASCII spaces therefore preserves the prompt byte-for-byte while
+    keeping every argument below Linux's 128 KiB ``MAX_ARG_STRLEN`` ceiling.
+    """
+    tokens = prompt.split(" ")
+    args = []
+    current = tokens[0]
+    if len(current.encode("utf-8")) > _DSH_TASK_ARG_MAX_BYTES:
+        raise RuntimeError("DeepSeek Harness critic prompt contains a task token over %d bytes" %
+                           _DSH_TASK_ARG_MAX_BYTES)
+    for token in tokens[1:]:
+        if len(token.encode("utf-8")) > _DSH_TASK_ARG_MAX_BYTES:
+            raise RuntimeError("DeepSeek Harness critic prompt contains a task token over %d bytes" %
+                               _DSH_TASK_ARG_MAX_BYTES)
+        candidate = current + " " + token
+        if len(candidate.encode("utf-8")) <= _DSH_TASK_ARG_MAX_BYTES:
+            current = candidate
+        else:
+            args.append(current)
+            current = token
+    args.append(current)
+    return args
+
+
 def call_dsh_shell(prompt, timeout, workdir=None):
     """Run a fresh DeepSeek Harness headless turn as a tool-free critic.
 
@@ -1126,7 +1156,8 @@ def call_dsh_shell(prompt, timeout, workdir=None):
         with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as fh:
             fh.write(patch)
             patch_path = fh.name
-        argv = [launcher, "--profile", profile, "--patch", patch_path, prompt]
+        argv = ([launcher, "--profile", profile, "--patch", patch_path, "--"]
+                + _dsh_task_args(prompt))
         env = dict(os.environ)
         env["DSH_PERMISSION_MODE"] = "read-only"
         out = subprocess.run(argv, cwd=workdir, capture_output=True, text=True,
