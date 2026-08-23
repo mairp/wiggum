@@ -22,9 +22,10 @@
 #                                        agent pass). Rerun/resume picks up after.
 #   wiggum resume    [-w DIR] [--feature S] [overrides…]  relaunch the orchestrator
 #                                        from the saved config of the last run.
-# Launch can opt into `--verification plan|required --test-plan /absolute/path`
-# and safe `--generate-tests /absolute/directory` scaffolding;
-# resume preserves those resolved settings unless explicitly overridden.
+# Launch defaults to required verification with feature-scoped TEST_PLAN.md and
+# generated scaffolds; `--verification plan|off` changes that behavior. Explicit
+# `--test-plan`/`--generate-tests` paths override defaults, and resume preserves
+# resolved settings unless explicitly overridden.
 #
 # All other subcommands are read-only. -w points at the project workdir (default:
 # $PWD); -s at its spec file (default: <workdir>/SPECS.md). --feature SLUG selects a

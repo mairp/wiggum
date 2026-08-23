@@ -133,11 +133,13 @@ automatically if `lib/agent_stream.py` or `python3` is missing.
 
 ## Verification (pre-loop test automation)
 
-`--verification off | plan | required` (or the equivalent env). `plan` derives a
-`VerificationPlan v1` and injects its obligations into proposer + critic; `required` also runs
-fixed-argv tests before each approval and a cumulative release gate. Pair with `--test-plan
-/abs/path` (human-readable projection) and `--generate-tests /abs/dir` (safe, non-overwriting
-scaffolds). All operator-supplied paths must be absolute. See [Getting Started](Getting-Started).
+`--verification off | plan | required` (or the equivalent env); `required` is the default.
+It derives a `VerificationPlan v1`, injects its obligations into proposer + critic, runs
+fixed-argv tests before each approval, and runs a cumulative release gate. `plan` skips gate
+execution; `off` disables verification explicitly. The default human projection and safe,
+non-overwriting scaffolds live under `<workdir>/testautomation/<feature>/`. Overrides via
+`--test-plan /abs/path` and `--generate-tests /abs/dir` must be absolute, resolve inside the
+workdir, and not target a final-path symlink. See [Getting Started](Getting-Started).
 
 ## Branches
 

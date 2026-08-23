@@ -39,8 +39,8 @@ the full launch-flag list. Common launch flags:
 | `--feature SLUG` | feature namespace under `.wiggum/features/` |
 | `--spec-format native\|speckit-tasks\|openspec-change` | force the spec format (else auto-detected) |
 | `--start-phase N` | override the derived starting phase |
-| `--verification off\|plan\|required` | pre-loop test automation (see [Configuration](Configuration)) |
-| `--test-plan /abs/path` · `--generate-tests /abs/dir` | plan projection + safe test scaffolds (absolute paths) |
+| `--verification off\|plan\|required` | pre-loop test automation; default `required` (see [Configuration](Configuration)) |
+| `--test-plan /abs/path` · `--generate-tests /abs/dir` | override feature-scoped projection/scaffolds; paths must resolve inside workdir |
 | `--live` / `--no-live` · `--no-color` | live presenter control |
 | `--debug` · `--telemetry` · `--loki-url URL` · `--otel` · `--otel-url URL` | debug + [Telemetry](Telemetry) |
 

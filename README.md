@@ -90,14 +90,16 @@ Wiggum can derive a Lisa-compatible `VerificationPlan v1` before the first
 proposer pass. The canonical JSON is hash-bound to the authoritative
 specification, while `TEST_PLAN.md` is its human-readable projection.
 
-- `--verification off` preserves the legacy loop.
-- `--verification plan` creates the plan and injects its obligations into the
-  proposer and critic.
-- `--verification required` additionally runs fixed-argv tests before each
-  approval and runs a cumulative release gate, including on an already-approved
-  resumed workspace.
+- `--verification required` is the default. It creates the plan, injects its
+  obligations into proposer and critic, runs fixed-argv tests before each approval,
+  and runs a cumulative release gate (including on an already-approved resume).
+- `--verification plan` creates and injects the plan without executing its gates.
+- `--verification off` explicitly disables test-plan creation and execution.
 
-All operator-supplied filesystem paths must be absolute. A maximum-observability
+By default, each feature gets isolated artifacts at
+`<workdir>/testautomation/<feature>/TEST_PLAN.md` and
+`<workdir>/testautomation/<feature>/generated/`. Operator overrides must be absolute,
+resolve inside the workdir, and not target a final-path symlink. A maximum-observability
 run against Lisa is:
 
 ```bash
@@ -108,8 +110,8 @@ WIGGUM_AGENT_STREAM=true WIGGUM_LIVE_DETAIL=full \
   --spec-format native \
   --feature specification-bundle-v2 \
   --verification required \
-  --test-plan /home/marlon.lopez/lisa/testautomation/AUTO_TEST_PLAN.md \
-  --generate-tests /home/marlon.lopez/lisa/testautomation/generated \
+  --test-plan /home/marlon.lopez/lisa/testautomation/specification-bundle-v2/TEST_PLAN.md \
+  --generate-tests /home/marlon.lopez/lisa/testautomation/specification-bundle-v2/generated \
   --live \
   --debug \
   --telemetry \
@@ -126,9 +128,9 @@ Planning can also be run independently, before any loop:
   --workdir /home/marlon.lopez/lisa \
   --specs /home/marlon.lopez/lisa/SPECS.md \
   --format native \
-  --output /home/marlon.lopez/lisa/testautomation/AUTO_TEST_PLAN.md \
+  --output /home/marlon.lopez/lisa/testautomation/specification-bundle-v2/TEST_PLAN.md \
   --json-output /home/marlon.lopez/lisa/.wiggum/verification/verification-plan.json \
-  --generate-tests /home/marlon.lopez/lisa/testautomation/generated \
+  --generate-tests /home/marlon.lopez/lisa/testautomation/specification-bundle-v2/generated \
   --required
 ```
 

@@ -65,11 +65,12 @@ OPTIONS
   --verification MODE   Verification lifecycle: off | plan | required.
                         plan creates/attaches a hash-bound TEST_PLAN.md before the
                         proposer loop; required also executes fixed-argv phase and
-                        release gates. Default: off. Also WIGGUM_VERIFICATION.
+                        release gates. Default: required. Also WIGGUM_VERIFICATION.
   --test-plan FILE      Absolute TEST_PLAN.md projection path (default when
-                        verification is enabled: <workdir>/testautomation/TEST_PLAN.md).
+                        verification is enabled: <workdir>/testautomation/<feature>/TEST_PLAN.md).
                         Also WIGGUM_TEST_PLAN.
-  --generate-tests DIR  Safely scaffold tests below this absolute directory.
+  --generate-tests DIR  Safely scaffold tests below this absolute directory (default:
+                         <workdir>/testautomation/<feature>/generated).
                         Existing changed artifacts are never overwritten. Supplying
                         this flag enables plan mode. Also WIGGUM_GENERATE_TESTS.
   --telemetry           Ship the event stream to Loki (off by default). Receiver
@@ -140,7 +141,7 @@ PROPOSER_TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
 CRITIC_TIMEOUT="${WIGGUM_CRITIC_TIMEOUT:-300}"
 MAX_WALL_MIN="${WIGGUM_MAX_WALL_MIN:-0}"
 GIT_COMMITS="${WIGGUM_GIT_COMMITS:-auto}"
-VERIFICATION="${WIGGUM_VERIFICATION:-off}"
+VERIFICATION="${WIGGUM_VERIFICATION:-required}"
 TEST_PLAN="${WIGGUM_TEST_PLAN:-}"
 GENERATE_TESTS="${WIGGUM_GENERATE_TESTS:-}"
 
@@ -205,8 +206,7 @@ if [[ -n "$GENERATE_TESTS" ]]; then
   esac
   [[ "$VERIFICATION" == "off" ]] && VERIFICATION="plan"
 fi
-if [[ "$VERIFICATION" != "off" ]]; then
-  TEST_PLAN="${TEST_PLAN:-$WORKDIR/testautomation/TEST_PLAN.md}"
+if [[ "$VERIFICATION" != "off" && -n "$TEST_PLAN" ]]; then
   case "$TEST_PLAN" in
     /*) ;;
     *) echo "orchestrator.sh: --test-plan must be an absolute path: $TEST_PLAN" >&2
@@ -332,6 +332,15 @@ else
   [[ -n "$SLUG" ]] || SLUG="default"
 fi
 FEATURE_DIR="$STATE_DIR/features/$SLUG"
+# Human-readable verification artifacts are feature-scoped too. Resolve these only
+# after the final sanitized slug is known, so two specifications can never overwrite
+# each other's TEST_PLAN.md or generated test scaffolds. Explicit absolute paths and
+# environment overrides remain supported.
+if [[ "$VERIFICATION" != "off" ]]; then
+  TEST_AUTOMATION_DIR="$WORKDIR/testautomation/$SLUG"
+  TEST_PLAN="${TEST_PLAN:-$TEST_AUTOMATION_DIR/TEST_PLAN.md}"
+  GENERATE_TESTS="${GENERATE_TESTS:-$TEST_AUTOMATION_DIR/generated}"
+fi
 # Wiggum-generated phase files (GATE<N>-EVIDENCE/APPROVED/FEEDBACK) live in the
 # feature's gates/ folder; PROGRESS.md lives directly under the feature dir. All
 # out of the project root, so the workdir holds only the user's real artifacts.

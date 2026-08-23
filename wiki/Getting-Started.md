@@ -95,16 +95,19 @@ each assistant thinking/narration line on top of the tool calls:
 WIGGUM_LIVE_DETAIL=full wiggum run -w ~/projects/foo --live
 ```
 
-## Pre-loop test automation (optional)
+## Pre-loop test automation
 
-Wiggum can derive a Lisa-compatible `VerificationPlan v1` before the first proposer pass:
+Wiggum derives and executes a Lisa-compatible `VerificationPlan v1` by default before the
+first proposer pass:
 
-- `--verification off` — legacy loop (default).
-- `--verification plan` — creates the plan and injects its obligations into proposer + critic.
-- `--verification required` — also runs fixed-argv tests before each approval and a
-  cumulative release gate (even on an already-approved resumed workspace).
+- `--verification required` — the default; creates the plan, injects its obligations, runs
+  fixed-argv tests before approval, and runs the cumulative release gate.
+- `--verification plan` — creates and injects the plan without executing its gates.
+- `--verification off` — explicitly disables verification.
 
-All operator-supplied filesystem paths must be absolute. Planning can also run independently
+Default projections and scaffolds are isolated under
+`<workdir>/testautomation/<feature>/`. Operator overrides must be absolute, resolve inside
+that workdir, and not target a final-path symlink. Planning can also run independently
 via `lib/verification_plan.py create …` before any loop. See [Configuration](Configuration).
 
 Next: [CLI Reference](CLI-Reference) · [Spec Formats](Spec-Formats)

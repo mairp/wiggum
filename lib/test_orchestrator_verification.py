@@ -301,3 +301,61 @@ def test_required_verification_runs_release_gate_when_phases_are_already_approve
     evidence = json.loads(release.read_text())
     assert set(plan["source"]) == {"bundleId", "contentHash", "specPath"}
     assert evidence["passed"] is True
+
+
+def test_default_verification_executes_and_isolates_artifacts_by_feature(tmp_path):
+    """Verification is required by default and its projections never collide across features."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    specs = tmp_path / "SPECS.md"
+    specs.write_text(SPEC)
+    (workdir / "package.json").write_text(
+        json.dumps({"packageManager": "npm@10.0.0", "scripts": {"test": "fixture"}})
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    npm = fake_bin / "npm"
+    npm.write_text("#!/bin/sh\nexit 0\n")
+    npm.chmod(npm.stat().st_mode | stat.S_IXUSR)
+    env = dict(os.environ)
+    env["PATH"] = "%s:/usr/bin:/bin" % fake_bin
+    env.pop("WIGGUM_VERIFICATION", None)
+    env.pop("WIGGUM_TEST_PLAN", None)
+    env.pop("WIGGUM_GENERATE_TESTS", None)
+
+    for raw_feature, slug in (("001/alpha", "001-alpha"), ("002-beta", "002-beta")):
+        gates = workdir / ".wiggum" / "features" / slug / "gates"
+        gates.mkdir(parents=True)
+        (gates / "GATE1-APPROVED").write_text("")
+        result = subprocess.run(
+            [
+                "/usr/bin/bash", ORCHESTRATOR,
+                "--workdir", str(workdir),
+                "--specs", str(specs),
+                "--feature", raw_feature,
+                "--no-live",
+            ],
+            cwd=str(workdir), env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False,
+        )
+        assert result.returncode == 0, result.stdout + "\n" + result.stderr
+
+        artifact_dir = workdir / "testautomation" / slug
+        assert (artifact_dir / "TEST_PLAN.md").is_file()
+        assert (artifact_dir / "generated" / "verification.generated.json").is_file()
+
+        runs = list((workdir / ".wiggum" / "features" / slug / "runs").iterdir())
+        assert len(runs) == 1
+        assert (runs[0] / "verification" / "verification-plan.json").is_file()
+        assert (runs[0] / "verification" / "release.json").is_file()
+
+        config = (workdir / ".wiggum" / "features" / slug / "last-run.conf").read_text()
+        assert "VERIFICATION=required" in config
+        assert "TEST_PLAN=%s" % (artifact_dir / "TEST_PLAN.md") in config
+        assert "GENERATE_TESTS=%s" % (artifact_dir / "generated") in config
+
+    assert (workdir / "testautomation" / "001-alpha" / "TEST_PLAN.md").is_file()
+    assert (workdir / "testautomation" / "002-beta" / "TEST_PLAN.md").is_file()
+    root_config = (workdir / ".wiggum" / "last-run.conf").read_text()
+    assert "FEATURE=002-beta" in root_config
