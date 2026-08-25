@@ -776,11 +776,14 @@ check_oscillation() {
   # the current (not-yet-archived) attempt's feedback lives in the gates dir
   [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && fbs+=( "$GATES_DIR/GATE${n}-FEEDBACK.md" )
   (( ${#fbs[@]} >= 4 )) || return 0   # a flip-flop needs several attempts to appear
-  python3 - "$WIGGUM_OSC_MAX" "${fbs[@]}" <<'PY'
-import re, sys
+  python3 - "$WIGGUM_OSC_MAX" "$START_EPOCH" "${fbs[@]}" <<'PY'
+import os, re, sys
 thresh = int(sys.argv[1])
-files = sys.argv[2:]
-# ordered list of unmet-criterion ID sets, one per attempt
+run_started = int(sys.argv[2])
+# A resumed run is a new convergence window: feedback from earlier runs must not
+# make its first rejection look like an immediate oscillation.
+files = [f for f in sys.argv[3:] if os.path.getmtime(f) >= run_started]
+# ordered list of unmet-criterion ID sets, one per attempt in this run
 seqs = []
 for f in files:
     try:
@@ -815,6 +818,11 @@ PY
 archive_attempt() {
   local n="$1" attempt="$2"
   local dir="$FEATURE_DIR/attempts/phase${n}/attempt${attempt}"
+  # Attempts restart at 1 on resume. Never overwrite audit history from an older
+  # run that used the same phase-local attempt number.
+  if [[ -e "$dir" ]]; then
+    dir="$FEATURE_DIR/attempts/phase${n}/attempt${attempt}-${WIGGUM_RUN_ID}"
+  fi
   mkdir -p "$dir"
   [[ -f "$GATES_DIR/GATE${n}-EVIDENCE.md" ]] && mv "$GATES_DIR/GATE${n}-EVIDENCE.md" "$dir/GATE${n}-EVIDENCE.md"
   [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && cp "$GATES_DIR/GATE${n}-FEEDBACK.md" "$dir/GATE${n}-FEEDBACK.md"
@@ -918,7 +926,7 @@ build_proposer_prompt() {
         printf '%s\n' "$verification_block"
       fi
     fi
-    if [[ "$attempt" -gt 1 && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
+    if [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
       echo
       echo "## A PRIOR ATTEMPT WAS REJECTED — this is attempt $attempt of $MAX_REJECTS"
       echo "The critic rejected your last evidence. Read the feedback below and address"
@@ -957,6 +965,14 @@ run_phase() {
   log ""
   log "===== PHASE $n${title:+ — $title}  ($(date -Is)) ====="
   sweep_stray_progress
+
+  # A halted rejection can leave both feedback and its rejected evidence in the
+  # live gates directory (notably the oscillation early-exit path in older runs).
+  # Archive that evidence before invoking the proposer so resume cannot treat it
+  # as newly completed work. Keep the feedback available for the repair prompt.
+  if [[ -f "$GATES_DIR/GATE${n}-EVIDENCE.md" && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
+    archive_attempt "$n" "resume-${WIGGUM_RUN_ID}"
+  fi
 
   while (( attempt <= MAX_REJECTS + 1 )); do
     # stop.flag / budget checks at each phase-boundary step
@@ -1134,6 +1150,10 @@ run_phase() {
       local osc_id osc_ct
       osc_id="$(awk '{print $2}' <<<"$osc")"
       osc_ct="$(awk '{print $3}' <<<"$osc")"
+      # Preserve the stale-evidence invariant even on this early-exit path. Without
+      # archiving, a later resume sees the rejected evidence, skips the proposer,
+      # and sends the unchanged document straight back to the critic.
+      archive_attempt "$n" "$attempt"
       log ""
       log "############################################################"
       log "# HALT — phase $n is OSCILLATING (exit $E_REJECTS). Not converging."

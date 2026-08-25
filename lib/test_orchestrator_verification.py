@@ -230,6 +230,60 @@ def test_critic_rejection_halts_at_max_rejects_without_approval(tmp_path):
     assert not (gates / "GATE1-APPROVED").exists()
 
 
+def _feature_paths(workdir):
+    feature = workdir / ".wiggum" / "features" / "obs-lifecycle"
+    return feature, feature / "gates", feature / "attempts" / "phase1"
+
+
+def test_resume_archives_rejected_live_evidence_before_proposer(tmp_path):
+    """A halted rejection must not let stale live evidence bypass the proposer on resume."""
+    workdir = tmp_path / "work"
+    _feature, gates, attempts = _feature_paths(workdir)
+    gates.mkdir(parents=True)
+    stale = "# Stale rejected evidence\nThis must not reach the critic again.\n"
+    feedback = "# Phase 1 feedback\nT999 remains unmet.\n"
+    (gates / "GATE1-EVIDENCE.md").write_text(stale)
+    (gates / "GATE1-FEEDBACK.md").write_text(feedback)
+
+    result, _workdir, events = _run_orchestrator(tmp_path, verdict="APPROVED")
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
+
+    # Resume archives the rejected document before proposer.sh checks for evidence.
+    archived = list(attempts.glob("attemptresume-*/GATE1-EVIDENCE.md"))
+    assert len(archived) == 1
+    assert archived[0].read_text() == stale
+    assert (gates / "GATE1-EVIDENCE.md").read_text() != stale
+    assert (gates / "GATE1-APPROVED").is_file()
+    archive_events = [e for e in events if e["event"] == "attempt_archived"]
+    assert archive_events and archive_events[0]["attempt"].startswith("resume-")
+
+
+def test_resume_ignores_oscillation_history_from_previous_runs(tmp_path):
+    """Old flip-flops must not make a new run halt on its first rejection."""
+    workdir = tmp_path / "work"
+    _feature, gates, attempts = _feature_paths(workdir)
+    gates.mkdir(parents=True)
+    attempts.mkdir(parents=True)
+
+    # Three historical present→absent→present cycles would trip the old detector.
+    for number in range(1, 8):
+        directory = attempts / f"attempt{number}"
+        directory.mkdir()
+        text = "T999 remains unmet.\n" if number % 2 else "A different gap remains.\n"
+        (directory / "GATE1-FEEDBACK.md").write_text(text)
+    old = 1_600_000_000
+    for path in attempts.rglob("GATE1-FEEDBACK.md"):
+        os.utime(path, (old, old))
+
+    result, _workdir, events = _run_orchestrator(
+        tmp_path, verdict="REJECTED", max_iter="1", max_rejects="1")
+    assert result.returncode == 2, result.stdout + "\n" + result.stderr
+
+    stops = [e for e in events if e["event"] == "run_stop"]
+    assert stops and stops[-1]["reason"] == "max_rejects"
+    assert not any(e["event"] == "gate_oscillation" for e in events)
+
+
 def test_required_verification_runs_release_gate_when_phases_are_already_approved(
     tmp_path,
 ):
