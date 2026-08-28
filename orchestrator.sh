@@ -749,6 +749,13 @@ feedback_gist() {
   # criterion (e.g. "exit 2, missing palette") and would mis-anchor on it.
   g="$(grep -m1 -iE 'NOT (MET|VERIFIED|SUBSTANTIATED)|is not (met|verified|substantiated)' "$f" 2>/dev/null | sed 's/^[[:space:]*_-]*//' | cut -c1-160)"
   if [[ -z "$g" ]]; then
+    # Deterministic-gate rejections carry no verdict token; their signal is the
+    # failing-test roster the digest hoists. Without this the HALT trail and the
+    # anti-fixation digest read "verification gate failed (exit 10)" N times, which
+    # tells a human (and the proposer) nothing about WHICH check is red.
+    g="$(grep -m1 -E '^- `(FAILED|ERROR) ' "$f" 2>/dev/null | sed 's/^- `//; s/`$//' | cut -c1-160)"
+  fi
+  if [[ -z "$g" ]]; then
     # No explicit verdict token: fall back to the first substantive line, skipping
     # headings, blockquotes, and the generic "The following must be addressed…".
     g="$(grep -m1 -E '^[^#>[:space:]]' "$f" 2>/dev/null \
@@ -1067,7 +1074,20 @@ run_phase() {
         {
           echo "# Phase $n deterministic verification gate rejected"
           echo
-          echo "The fixed-argv verification gate failed (exit $vrc)."
+          echo "The fixed-argv verification gate failed (exit $vrc). The failing command"
+          echo "below is the ONLY thing that can clear this gate. Fix the CODE it points"
+          echo "at. Re-writing ${GATES_REL}/GATE${n}-EVIDENCE.md, regenerating proofs, or"
+          echo "restating that the work is done will NOT change this result."
+          echo
+          echo "## What actually failed"
+          echo
+          # Without the failing argv, the failing-test roster, and the output tails the
+          # proposer has nothing to act on: it re-asserts its evidence every attempt and
+          # the loop burns to MAX_REJECTS on an unchanged failure. Best-effort by design.
+          python3 "$LIB_DIR/verification_failure_digest.py" "$verification_evidence" 2>/dev/null \
+            || echo "(failure digest unavailable — read the evidence document below)"
+          echo
+          echo "## References"
           echo
           echo "- Canonical verification plan: \`$VERIFICATION_JSON\`"
           echo "- Verification evidence: \`$verification_evidence\`"
