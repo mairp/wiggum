@@ -92,6 +92,26 @@ OPTIONS
                         prompt/response alongside its metadata/result/events under
                         <feature-dir>/debug/invocations/... for both proposer and
                         critic (off by default; retention is opt-in).
+  --long-job-phase N    Phase that owns a long-running setup/verification command
+                        (e.g. an integration test runner) which can outlive a
+                        single proposer pass. Also WIGGUM_LONG_JOB_PHASE.
+  --long-job-cmd CMD    Shell command to run for --long-job-phase. The
+                        orchestrator launches it fully detached (setsid, own
+                        session, reparented to init) BEFORE each proposer pass
+                        for that phase — immune to the per-pass --timeout and
+                        to the proposer agent's own process exiting, both of
+                        which kill any job the agent spawns as a child of
+                        itself. Launched at most ONCE per attempt: a live
+                        instance is left alone (PID-file check), and once it
+                        has ended (success or crash) it is never silently
+                        relaunched — many jobs (e.g. a runner that truncates
+                        its own log on start) would lose their completed
+                        result if re-triggered automatically. A NEW attempt
+                        (after a critic REJECT) does get a fresh run. State
+                        lives under <feature-dir>/long-jobs/phase<N>-attempt<M>.
+                        {pid,log,done}; the log path is also exported as
+                        WIGGUM_LONG_JOB_LOG so the proposer prompt can point
+                        the agent at it. Also WIGGUM_LONG_JOB_CMD.
   -h, --help            Show this help.
 
 Each agent invocation records a capability mode — structured / raw-text / degraded
@@ -145,6 +165,8 @@ GIT_COMMITS="${WIGGUM_GIT_COMMITS:-auto}"
 VERIFICATION="${WIGGUM_VERIFICATION:-required}"
 TEST_PLAN="${WIGGUM_TEST_PLAN:-}"
 GENERATE_TESTS="${WIGGUM_GENERATE_TESTS:-}"
+LONG_JOB_PHASE="${WIGGUM_LONG_JOB_PHASE:-}"
+LONG_JOB_CMD="${WIGGUM_LONG_JOB_CMD:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -167,6 +189,8 @@ while [[ $# -gt 0 ]]; do
     --live)         LIVE="true"; shift ;;
     --no-live)      LIVE="false"; shift ;;
     --debug)        DEBUG="true"; shift ;;
+    --long-job-phase) LONG_JOB_PHASE="${2:?}"; shift 2 ;;
+    --long-job-cmd)   LONG_JOB_CMD="${2:?}"; shift 2 ;;
     -h|--help)      usage; exit 0 ;;
     *)              echo "orchestrator.sh: unknown arg: $1" >&2; usage >&2; exit "$E_SPEC" ;;
   esac
@@ -964,6 +988,63 @@ build_proposer_prompt() {
   } > "$out"
 }
 
+# ── long-running phase jobs (survive across proposer passes) ────────────────
+# A phase can require a setup/verification job (e.g. an integration test
+# runner) that takes longer than one proposer pass. If the proposer itself
+# starts such a job, it dies the moment its pass ends: --timeout SIGTERMs the
+# proposer's whole process tree, and even a pass that ends on its own kills
+# any child job when the agent process exits (confirmed 2026-08-30: an
+# in-flight job's log stopped writing within seconds of iter_done, on a pass
+# that ended long before its --timeout). Every subsequent pass then restarts
+# the job from scratch, so it can never finish. Fix: the ORCHESTRATOR launches
+# and supervises the job — fully detached (setsid, its own session, reparented
+# to init) and idempotently (skipped if a PID file shows a live instance) —
+# so its lifetime is tied to the whole phase, not to any single pass.
+ensure_long_job() {
+  local n="$1" attempt="$2"
+  [[ "$LONG_JOB_PHASE" == "$n" && -n "$LONG_JOB_CMD" ]] || return 0
+
+  local dir="$FEATURE_DIR/long-jobs"
+  # Scoped per ATTEMPT, not just per phase: many passes share one attempt and
+  # must never re-trigger the job underneath it (see below); a NEW attempt
+  # (after a critic REJECT) is a deliberate, safe point to run it fresh.
+  local base="phase${n}-attempt${attempt}"
+  local pidfile="$dir/${base}.pid"
+  local logfile="$dir/${base}.log"
+  local donefile="$dir/${base}.done"
+  mkdir -p "$dir"
+  export WIGGUM_LONG_JOB_LOG="$logfile"
+
+  if [[ -f "$donefile" ]]; then
+    return 0   # already ran to completion (or was marked ended) this attempt — never touch it again
+  fi
+
+  if [[ -f "$pidfile" ]]; then
+    local existing_pid; existing_pid="$(cat "$pidfile" 2>/dev/null)"
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      return 0   # still running — leave it alone
+    fi
+    # PID file exists but the process is gone: it finished (success or crash)
+    # since the last pass. Relaunching here would silently re-run — and for
+    # any job that truncates its own log on start, silently DESTROY — a
+    # completed result. Never auto-restart a job that has already run; record
+    # that it ended and let the proposer's own prompt (pointed at the log via
+    # WIGGUM_LONG_JOB_LOG) read the outcome instead of guessing.
+    log ">>> long-job(phase $n attempt $attempt): process $existing_pid no longer running — treating as ended, NOT auto-restarting. See $logfile"
+    wiggum_emit long_job_ended phase "$n" attempt "$attempt" log "$logfile"
+    : > "$donefile"
+    return 0
+  fi
+
+  log ">>> long-job(phase $n attempt $attempt): launching detached — $LONG_JOB_CMD"
+  # setsid+nohup fully detaches the job into its own session, immune to SIGHUP
+  # and to signals aimed at this script's or any proposer pass's process group.
+  # The subshell backgrounds it and captures $! before exiting; nothing here
+  # blocks the orchestrator.
+  ( cd "$WORKDIR" && setsid nohup bash -c "$LONG_JOB_CMD" > "$logfile" 2>&1 < /dev/null & echo $! > "$pidfile" )
+  wiggum_emit long_job_start phase "$n" attempt "$attempt" cmd "$LONG_JOB_CMD" log "$logfile"
+}
+
 # ── the phase loop ───────────────────────────────────────────────────────────
 run_phase() {
   local n="$1"
@@ -995,6 +1076,8 @@ run_phase() {
       wiggum_emit run_stop reason wall_budget phase "$n"
       exit "$E_BUDGET"
     fi
+
+    ensure_long_job "$n" "$attempt"
 
     local prompt_file="$FEATURE_DIR/proposer-prompt.phase${n}.txt"
     build_proposer_prompt "$n" "$attempt" "$prompt_file"
