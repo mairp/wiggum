@@ -14,9 +14,9 @@ in the evidence can never approve the gate. Missing / duplicated / wrong-nonce /
 absent verdict all fail SAFE (counted as REJECTED, recorded malformed): an
 unattended approve-your-own-work loop must never auto-approve on ambiguity.
 
-Provider is chosen by WIGGUM_CRITIC = dsh | claude | codex | bebop |
-prime[:variant]. DSH runs a fresh, tool-free DeepSeek Harness headless turn;
-HTTP paths use stdlib urllib. No pip installs.
+Provider is chosen by WIGGUM_CRITIC = dsh[:provider/model] | claude | codex |
+bebop | prime[:variant]. DSH runs a fresh, tool-free DeepSeek Harness headless
+turn; HTTP paths use stdlib urllib. No pip installs.
 
 Exit codes:  0 APPROVED · 10 REJECTED · 3 bad config/usage · 1 internal error.
 The orchestrator maps these onto phase advancement; the marker files are the
@@ -1075,6 +1075,56 @@ def call_bebop_shell(prompt, backend, timeout):
 _DSH_TASK_ARG_MAX_BYTES = 120 * 1024
 
 
+def _resolve_dsh_model_ref(model_ref, provider=None):
+    """Return (provider, model) for a DSH model override.
+
+    ``provider/model`` is accepted directly. Bare ``glm-*`` ids map to the Z.AI
+    provider because the GLM catalog is provider-owned by ``zai`` in DSH. The
+    local Qwen 3.8 27B aliases map to DSH's LiteLLM-backed ``local-high`` route.
+    """
+    if not model_ref:
+        return (None, None)
+    provider = provider or os.environ.get("WIGGUM_DSH_PROVIDER", "")
+    model = model_ref
+    if "/" in model:
+        embedded_provider, model = model.split("/", 1)
+        if provider and provider != embedded_provider:
+            raise RuntimeError(
+                "conflicting DSH providers: WIGGUM_DSH_PROVIDER=%s but model ref uses %s" %
+                (provider, embedded_provider))
+        provider = embedded_provider
+    elif not provider and model.startswith("glm-"):
+        provider = "zai"
+    elif not provider and model in ("qwen3.8-27b", "qwen3.8-27b-q5"):
+        provider = "local-high"
+        model = "qwen3.8-27b-q5"
+    if not provider:
+        raise RuntimeError(
+            "DSH model '%s' needs a provider; use provider/model or set WIGGUM_DSH_PROVIDER" %
+            model_ref)
+    import re
+    if not re.match(r"^[A-Za-z0-9._-]+$", provider) or not re.match(r"^[A-Za-z0-9._:-]+$", model):
+        raise RuntimeError("invalid DSH model ref '%s'" % model_ref)
+    return (provider, model)
+
+
+def _dsh_model_patch(model_ref, provider=None):
+    provider, model = _resolve_dsh_model_ref(model_ref, provider)
+    if not provider:
+        return ""
+    lines = [
+        "- id: agent-default-model",
+        "  config:",
+        "    provider: %s" % provider,
+        "    model: %s" % model,
+    ]
+    reasoning = os.environ.get("WIGGUM_DSH_CRITIC_REASONING_EFFORT") \
+        or os.environ.get("WIGGUM_DSH_REASONING_EFFORT")
+    if reasoning:
+        lines.append("    reasoningEffort: %s" % reasoning)
+    return "\n".join(lines) + "\n"
+
+
 def _dsh_task_args(prompt):
     """Split a task without changing what DSH reconstructs from its argv.
 
@@ -1102,11 +1152,11 @@ def _dsh_task_args(prompt):
     return args
 
 
-def call_dsh_shell(prompt, timeout, workdir=None):
+def call_dsh_shell(prompt, timeout, workdir=None, model_ref=None):
     """Run a fresh DeepSeek Harness headless turn as a tool-free critic.
 
     DSH's headless profile uses its configured ``agent-default-model`` selection
-    (SOL through Compass STAGE on this host). A temporary patch disables every
+    unless a DSH model override is supplied. A temporary patch disables every
     model-facing tool so the critic can only evaluate the grounded prompt.
     """
     import subprocess
@@ -1151,6 +1201,14 @@ def call_dsh_shell(prompt, timeout, workdir=None):
 - id: user-questions
   disabled: true
 """
+    model_patch = _dsh_model_patch(
+        model_ref or os.environ.get("WIGGUM_DSH_CRITIC_MODEL")
+        or os.environ.get("WIGGUM_DSH_MODEL"),
+        os.environ.get("WIGGUM_DSH_CRITIC_PROVIDER")
+        or os.environ.get("WIGGUM_DSH_PROVIDER"),
+    )
+    if model_patch:
+        patch += model_patch
     patch_path = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as fh:
@@ -1338,8 +1396,9 @@ def call_prime_critic(prompt, variant, timeout, workdir=None):
 
 
 def critic_call(provider, prompt, timeout, workdir=None):
-    if provider == "dsh":
-        return call_dsh_shell(prompt, timeout, workdir)
+    if provider == "dsh" or provider.startswith("dsh:"):
+        model_ref = provider.partition(":")[2] if provider.startswith("dsh:") else None
+        return call_dsh_shell(prompt, timeout, workdir, model_ref or None)
     if provider == "claude":
         model = os.environ.get("WIGGUM_CLAUDE_CRITIC_MODEL", "claude-opus-4-8")
         return call_claude(prompt, model, timeout)
@@ -1378,7 +1437,7 @@ def critic_call(provider, prompt, timeout, workdir=None):
                     "(no hardcoded default — the model is env-controlled)")
             return call_openai_chat(prompt, model, timeout, base, key, "WIGGUM_COMPASS_KEY")
         return call_bebop_shell(prompt, backend, timeout)
-    raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (dsh|claude|codex|bebop|prime[:variant])" % provider)
+    raise RuntimeError("unknown WIGGUM_CRITIC provider: %s (dsh[:provider/model]|claude|codex|bebop|prime[:variant])" % provider)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1425,7 +1484,8 @@ def main():
     ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--max-rejects", type=int,
                     default=int(os.environ.get("WIGGUM_MAX_REJECTS", "3")))
-    ap.add_argument("--provider", default=os.environ.get("WIGGUM_CRITIC", "claude"))
+    ap.add_argument("--provider", default=os.environ.get("WIGGUM_CRITIC", "claude"),
+                    help="critic provider: dsh[:provider/model]|claude|codex|bebop|prime[:variant]")
     ap.add_argument("--timeout", type=int,
                     default=int(os.environ.get("WIGGUM_CRITIC_TIMEOUT", "300")))
     ap.add_argument("--grounding", default=os.environ.get("WIGGUM_CRITIC_GROUNDING", "true"))

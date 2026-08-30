@@ -37,11 +37,14 @@ REQUIRED
   -f, --prompt-file FILE  File whose contents are the standing prompt each pass.
 
 OPTIONS
-  --backend NAME          Provider backend: dsh | claude | codex | bebop:<name> |
-                          prime:<variant> (default: $WIGGUM_PROPOSER or "dsh").
+  --backend NAME          Provider backend: dsh[:provider/model] | claude | codex |
+                          bebop:<name> | prime:<variant>
+                          (default: $WIGGUM_PROPOSER or "dsh").
                           Bare bebop uses WIGGUM_BEBOP_BACKEND; bare prime uses
                           stock prime-agent with its configured default model.
-  --model MODEL           Model id (claude/codex only; selectors pick their own).
+  --model MODEL           Model id. For dsh, use provider/model, a glm-* id
+                          (mapped to zai), or qwen3.8-27b[-q5]
+                          (mapped to local-high/qwen3.8-27b-q5).
   -n, --max-iter N        Max passes before giving up (default: 30).
   -s, --sleep SECONDS     Sleep between passes (default: 2).
   --timeout SECONDS       Hard timeout on a single agent pass (default: 1800).
@@ -188,20 +191,88 @@ fi
 #  single case arm. Reads the prompt on stdin-free: passed as -p argument.
 #  Args: $1 = prompt text; the rest are shared agent args (skip-permissions, etc.)
 # ─────────────────────────────────────────────────────────────────────────────
+dsh_resolve_model_ref() {
+  local raw="${1:-}"
+  local provider="${WIGGUM_DSH_PROVIDER:-}"
+  local model="$raw"
+  [[ -n "$model" ]] || return 0
+  if [[ "$model" == */* ]]; then
+    local embedded_provider="${model%%/*}"
+    model="${model#*/}"
+    if [[ -n "$provider" && "$provider" != "$embedded_provider" ]]; then
+      echo "proposer.sh: conflicting DSH providers: WIGGUM_DSH_PROVIDER=$provider but model ref uses $embedded_provider" >&2
+      return 1
+    fi
+    provider="$embedded_provider"
+  elif [[ -z "$provider" ]]; then
+    case "$model" in
+      glm-*) provider="zai" ;;
+      qwen3.8-27b|qwen3.8-27b-q5)
+        provider="local-high"
+        model="qwen3.8-27b-q5"
+        ;;
+    esac
+  fi
+  [[ -n "$provider" ]] || {
+    echo "proposer.sh: DSH model '$raw' needs a provider; use provider/model or set WIGGUM_DSH_PROVIDER" >&2
+    return 1
+  }
+  [[ "$provider" =~ ^[A-Za-z0-9._-]+$ && "$model" =~ ^[A-Za-z0-9._:-]+$ ]] || {
+    echo "proposer.sh: invalid DSH model ref '$raw'" >&2
+    return 1
+  }
+  printf '%s/%s\n' "$provider" "$model"
+}
+
+dsh_write_model_patch() {
+  local provider="$1" model="$2" patch_path="$3"
+  local reasoning="${WIGGUM_DSH_REASONING_EFFORT:-}"
+  {
+    printf '%s\n' "- id: agent-default-model"
+    printf '%s\n' "  config:"
+    printf '    provider: %s\n' "$provider"
+    printf '    model: %s\n' "$model"
+    if [[ -n "$reasoning" ]]; then
+      printf '    reasoningEffort: %s\n' "$reasoning"
+    fi
+  } > "$patch_path"
+}
+
 run_agent() {
   local prompt="$1"; shift
   local -a args=( "$@" )
   case "$BACKEND" in
-    dsh)
+    dsh|dsh:*)
       # DeepSeek Harness one-shot profile. The profile selects the provider/model
-      # from $DSH_HOME/settings.yaml (SOL through Compass STAGE on this host).
+      # from $DSH_HOME/settings.yaml unless a DSH model override is supplied.
       # The current headless runner accepts the task as one positional argument.
       local dsh_bin="${WIGGUM_DSH_BIN:-dsh}"
       local dsh_profile="${WIGGUM_DSH_PROFILE:-headless}"
+      local backend_model=""
+      [[ "$BACKEND" == dsh:* ]] && backend_model="${BACKEND#dsh:}"
+      if [[ -n "$backend_model" && -n "$MODEL" ]]; then
+        echo "proposer.sh: use either --backend dsh:<provider/model> or --model, not both" >&2
+        return 1
+      fi
+      local dsh_model_ref="${MODEL:-${WIGGUM_DSH_MODEL:-$backend_model}}"
+      local resolved_model_ref provider model patch_path rc
       command -v "$dsh_bin" >/dev/null 2>&1 || { echo "proposer.sh: DeepSeek Harness not found: $dsh_bin (set \$WIGGUM_DSH_BIN)" >&2; return 127; }
-      [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with dsh; configure agent-default-model in \$DSH_HOME/settings.yaml" >&2; return 1; }
+      local -a dsh_args=( --profile "$dsh_profile" )
+      if [[ -n "$dsh_model_ref" ]]; then
+        resolved_model_ref="$(dsh_resolve_model_ref "$dsh_model_ref")" || return 1
+        provider="${resolved_model_ref%%/*}"
+        model="${resolved_model_ref#*/}"
+        patch_path="$(mktemp "${TMPDIR:-/tmp}/wiggum-dsh-model.XXXXXX.yml")" || return 1
+        dsh_write_model_patch "$provider" "$model" "$patch_path"
+        dsh_args+=( --patch "$patch_path" )
+      fi
       DSH_PERMISSION_MODE="${WIGGUM_DSH_PERMISSION_MODE:-${DSH_PERMISSION_MODE:-workspace-write}}" \
-        timeout "$TIMEOUT" "$dsh_bin" --profile "$dsh_profile" "$prompt"
+        timeout "$TIMEOUT" "$dsh_bin" "${dsh_args[@]}" "$prompt"
+      rc=$?
+      if [[ -n "${patch_path:-}" ]]; then
+        rm -f "$patch_path"
+      fi
+      return "$rc"
       ;;
     claude)
       [[ -n "$MODEL" ]] && args+=( --model "$MODEL" )

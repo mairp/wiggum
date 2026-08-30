@@ -82,6 +82,9 @@ See `.env.example` for the full set. The load-bearing ones:
 |---|---|---|
 | `WIGGUM_PROPOSER` / `WIGGUM_CRITIC` | `dsh` / `claude` | backend per role |
 | `WIGGUM_DSH_BIN` / `WIGGUM_DSH_PROFILE` | `dsh` / `headless` | DeepSeek Harness executable and profile |
+| `WIGGUM_DSH_MODEL` / `WIGGUM_DSH_CRITIC_MODEL` | empty | optional DSH model override, e.g. `zai/glm-5.3`; bare `glm-*` maps to `zai`, `qwen3.8-27b` maps to LiteLLM `local-high/qwen3.8-27b-q5` |
+| `WIGGUM_DSH_PROVIDER` / `WIGGUM_DSH_CRITIC_PROVIDER` | empty | provider for bare DSH model ids when they are not `glm-*` |
+| `WIGGUM_DSH_REASONING_EFFORT` / `WIGGUM_DSH_CRITIC_REASONING_EFFORT` | empty | optional DSH reasoning override such as `high` or `max` |
 | `WIGGUM_DSH_PLUGIN_ALLOWLIST` | empty | comma-separated exact `package@semver` specs the DSH proposer may request and install |
 | `WIGGUM_DSH_PLUGIN_TIMEOUT` | `600` | timeout in seconds for one approved profile installation |
 | `WIGGUM_PRIME_AGENT_BIN` | `prime-agent` | standard Prime Agent executable used by bare `prime` |

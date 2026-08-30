@@ -52,12 +52,29 @@ def test_prime_provider_variant_resolution():
 def test_dsh_provider_dispatches_headless_harness():
     with mock.patch.object(critic, "call_dsh_shell", return_value="ok") as call:
         assert critic.critic_call("dsh", "prompt", 9, "/tmp/wt") == "ok"
-    call.assert_called_once_with("prompt", 9, "/tmp/wt")
+    call.assert_called_once_with("prompt", 9, "/tmp/wt", None)
+
+
+def test_dsh_provider_variant_selects_model_ref():
+    with mock.patch.object(critic, "call_dsh_shell", return_value="ok") as call:
+        assert critic.critic_call("dsh:zai/glm-5.3", "prompt", 9, "/tmp/wt") == "ok"
+    call.assert_called_once_with("prompt", 9, "/tmp/wt", "zai/glm-5.3")
+
+
+def test_dsh_provider_variant_accepts_qwen38_alias():
+    with mock.patch.object(critic, "call_dsh_shell", return_value="ok") as call:
+        assert critic.critic_call("dsh:qwen3.8-27b", "prompt", 9, "/tmp/wt") == "ok"
+    call.assert_called_once_with("prompt", 9, "/tmp/wt", "qwen3.8-27b")
 
 
 def test_dsh_critic_uses_tool_free_patch_and_target_cwd():
     completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
-    env = {"WIGGUM_DSH_BIN": "/bin/dsh", "WIGGUM_DSH_PROFILE": "headless"}
+    env = {
+        "WIGGUM_DSH_BIN": "/bin/dsh",
+        "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_DSH_MODEL": "",
+        "WIGGUM_DSH_PROVIDER": "",
+    }
     captured_patch = ""
 
     def fake_run(argv, **kwargs):
@@ -78,6 +95,53 @@ def test_dsh_critic_uses_tool_free_patch_and_target_cwd():
     for tool_id in ("tool-bash", "tool-fs", "tool-web", "tool-subagent", "tool-workflow"):
         assert "id: %s" % tool_id in captured_patch
     assert captured_patch.count("disabled: true") >= 10
+
+
+def test_dsh_critic_can_select_zai_model_with_patch():
+    completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
+    env = {
+        "WIGGUM_DSH_BIN": "/bin/dsh",
+        "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_DSH_CRITIC_MODEL": "glm-5.3",
+        "WIGGUM_DSH_CRITIC_REASONING_EFFORT": "max",
+    }
+    captured_patch = ""
+
+    def fake_run(argv, **kwargs):
+        nonlocal captured_patch
+        patch_path = argv[argv.index("--patch") + 1]
+        captured_patch = Path(patch_path).read_text()
+        return completed
+
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", side_effect=fake_run):
+        critic.call_dsh_shell("large prompt", 42, "/tmp/work tree")
+
+    assert "- id: agent-default-model" in captured_patch
+    assert "provider: zai" in captured_patch
+    assert "model: glm-5.3" in captured_patch
+    assert "reasoningEffort: max" in captured_patch
+
+
+def test_dsh_critic_can_select_litellm_qwen38_alias_with_patch():
+    completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
+    env = {
+        "WIGGUM_DSH_BIN": "/bin/dsh",
+        "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_DSH_CRITIC_MODEL": "qwen3.8-27b",
+    }
+    captured_patch = ""
+
+    def fake_run(argv, **kwargs):
+        nonlocal captured_patch
+        patch_path = argv[argv.index("--patch") + 1]
+        captured_patch = Path(patch_path).read_text()
+        return completed
+
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", side_effect=fake_run):
+        critic.call_dsh_shell("large prompt", 42, "/tmp/work tree")
+
+    assert "provider: local-high" in captured_patch
+    assert "model: qwen3.8-27b-q5" in captured_patch
 
 
 def test_dsh_critic_splits_oversized_prompt_without_changing_task():
@@ -166,6 +230,8 @@ def test_dsh_proposer_uses_headless_profile_and_target_cwd(tmp_path):
     env.update({
         "WIGGUM_DSH_BIN": str(fake),
         "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_DSH_MODEL": "",
+        "WIGGUM_DSH_PROVIDER": "",
         "WIGGUM_AGENT_STREAM": "false",
         "CAPTURE_CWD": str(tmp_path / "cwd"),
         "CAPTURE_ARGV": str(tmp_path / "argv"),
@@ -181,6 +247,91 @@ def test_dsh_proposer_uses_headless_profile_and_target_cwd(tmp_path):
     assert (tmp_path / "argv").read_text().splitlines() == [
         "--profile", "headless", "standing prompt",
     ]
+
+
+def test_dsh_proposer_can_select_zai_model_with_backend_variant(tmp_path):
+    evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("standing prompt")
+    fake = tmp_path / "fake-dsh"
+    fake.write_text(
+        "#!/bin/bash\n"
+        "pwd > \"$CAPTURE_CWD\"\n"
+        "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGV\"\n"
+        "while [[ $# -gt 0 ]]; do\n"
+        "  if [[ \"$1\" == \"--patch\" ]]; then cp \"$2\" \"$CAPTURE_PATCH\"; shift 2; continue; fi\n"
+        "  shift\n"
+        "done\n"
+        "mkdir -p \"$(dirname \"$TEST_EVIDENCE\")\"\n"
+        "echo ok > \"$TEST_EVIDENCE\"\n"
+    )
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "WIGGUM_DSH_BIN": str(fake),
+        "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_DSH_MODEL": "",
+        "WIGGUM_DSH_PROVIDER": "",
+        "WIGGUM_DSH_REASONING_EFFORT": "max",
+        "WIGGUM_AGENT_STREAM": "false",
+        "CAPTURE_CWD": str(tmp_path / "cwd"),
+        "CAPTURE_ARGV": str(tmp_path / "argv"),
+        "CAPTURE_PATCH": str(tmp_path / "patch.yml"),
+        "TEST_EVIDENCE": str(evidence),
+    })
+    result = subprocess.run([
+        "bash", str(Path(__file__).parents[1] / "proposer.sh"),
+        "-w", str(tmp_path), "-e", str(evidence), "-f", str(prompt),
+        "--backend", "dsh:zai/glm-5.3", "-n", "1",
+    ], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    argv = (tmp_path / "argv").read_text().splitlines()
+    assert argv[:4] == ["--profile", "headless", "--patch", argv[3]]
+    assert argv[-1] == "standing prompt"
+    patch = (tmp_path / "patch.yml").read_text()
+    assert "provider: zai" in patch
+    assert "model: glm-5.3" in patch
+    assert "reasoningEffort: max" in patch
+
+
+def test_dsh_proposer_can_select_litellm_qwen38_alias(tmp_path):
+    evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("standing prompt")
+    fake = tmp_path / "fake-dsh"
+    fake.write_text(
+        "#!/bin/bash\n"
+        "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGV\"\n"
+        "while [[ $# -gt 0 ]]; do\n"
+        "  if [[ \"$1\" == \"--patch\" ]]; then cp \"$2\" \"$CAPTURE_PATCH\"; shift 2; continue; fi\n"
+        "  shift\n"
+        "done\n"
+        "mkdir -p \"$(dirname \"$TEST_EVIDENCE\")\"\n"
+        "echo ok > \"$TEST_EVIDENCE\"\n"
+    )
+    fake.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "WIGGUM_DSH_BIN": str(fake),
+        "WIGGUM_DSH_PROFILE": "headless",
+        "WIGGUM_DSH_MODEL": "",
+        "WIGGUM_DSH_PROVIDER": "",
+        "WIGGUM_AGENT_STREAM": "false",
+        "CAPTURE_ARGV": str(tmp_path / "argv"),
+        "CAPTURE_PATCH": str(tmp_path / "patch.yml"),
+        "TEST_EVIDENCE": str(evidence),
+    })
+    result = subprocess.run([
+        "bash", str(Path(__file__).parents[1] / "proposer.sh"),
+        "-w", str(tmp_path), "-e", str(evidence), "-f", str(prompt),
+        "--backend", "dsh:qwen3.8-27b", "-n", "1",
+    ], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    argv = (tmp_path / "argv").read_text().splitlines()
+    assert argv[-1] == "standing prompt"
+    patch = (tmp_path / "patch.yml").read_text()
+    assert "provider: local-high" in patch
+    assert "model: qwen3.8-27b-q5" in patch
 
 
 def _assert_structured_context(records, backend):

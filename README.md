@@ -595,12 +595,16 @@ Wiggum never writes checkbox state back into `tasks.md`; approvals stay in
 Everything is set in `.env` (copy from `.env.example`; the real `.env` is
 gitignored). Precedence: **built-in defaults < `.env` < CLI flags**.
 
-Pick a backend per role — `dsh | claude | codex | bebop | prime[:variant]`:
+Pick a backend per role — `dsh[:provider/model] | claude | codex | bebop | prime[:variant]`:
 
 - **`dsh`** — DeepSeek Harness's `headless` profile, using the provider/model in
-  `$DSH_HOME/settings.yaml`. It is the default proposer; as critic it runs with
-  model-facing tools disabled. The proposer may request persistent profile plugins
-  when `WIGGUM_DSH_PLUGIN_ALLOWLIST` names exact approved `package@semver` specs.
+  `$DSH_HOME/settings.yaml` unless a model override is supplied. Use backend
+  refs such as `dsh:zai/glm-5.3` or `dsh:qwen3.8-27b`, or set
+  `WIGGUM_DSH_MODEL=zai/glm-5.3`. Bare `glm-*` model ids map to provider `zai`;
+  `qwen3.8-27b` maps to the LiteLLM-backed `local-high/qwen3.8-27b-q5` route. It
+  is the default proposer; as critic it runs with model-facing tools disabled.
+  The proposer may request persistent profile plugins when
+  `WIGGUM_DSH_PLUGIN_ALLOWLIST` names exact approved `package@semver` specs.
 - **`claude`** — Anthropic. Claude Code CLI (proposer) + Messages API (critic).
 - **`codex`** — OpenAI. Codex CLI (proposer) + Chat Completions (critic).
   Ships, but **UNVERIFIED** (no Codex CLI on the author's host to test against).
