@@ -107,9 +107,13 @@ OPTIONS
                         relaunched — many jobs (e.g. a runner that truncates
                         its own log on start) would lose their completed
                         result if re-triggered automatically. A NEW attempt
-                        (after a critic REJECT) does get a fresh run. State
-                        lives under <feature-dir>/long-jobs/phase<N>-attempt<M>.
-                        {pid,log,done}; the log path is also exported as
+                        (after a critic REJECT) does get a fresh run, and so
+                        does a brand-new orchestrator run even at the SAME
+                        attempt number — done-markers are scoped per RUN, so
+                        one run's stale evidence can never silently satisfy a
+                        later, unrelated run. State lives under <feature-dir>/
+                        long-jobs/phase<N>-attempt<M>-<run-id>.{pid,log,done};
+                        the log path is also exported as
                         WIGGUM_LONG_JOB_LOG so the proposer prompt can point
                         the agent at it. Also WIGGUM_LONG_JOB_CMD.
   -h, --help            Show this help.
@@ -1005,10 +1009,17 @@ ensure_long_job() {
   [[ "$LONG_JOB_PHASE" == "$n" && -n "$LONG_JOB_CMD" ]] || return 0
 
   local dir="$FEATURE_DIR/long-jobs"
-  # Scoped per ATTEMPT, not just per phase: many passes share one attempt and
-  # must never re-trigger the job underneath it (see below); a NEW attempt
-  # (after a critic REJECT) is a deliberate, safe point to run it fresh.
-  local base="phase${n}-attempt${attempt}"
+  # Scoped per ATTEMPT *and* per RUN_ID, not just per attempt: attempt numbers
+  # reset to 1 on every fresh orchestrator process (`local attempt=1` above),
+  # so attempt-only scoping lets a `.done` marker from a wholly unrelated,
+  # long-past run silently satisfy a brand-new run's same-numbered attempt —
+  # the new run then reasons over that OLD run's stale/incomplete evidence and
+  # never launches its own job at all. Confirmed live (2026-08-30,
+  # ainetops-demo): a `.done` marker written for one run's phase8-attempt1
+  # silently suppressed a wholly different, later run's phase8-attempt1 from
+  # ever launching, so the proposer worked from a stale, mid-idempotence-check
+  # cycles.run.log left over from a run stopped hours earlier.
+  local base="phase${n}-attempt${attempt}-${WIGGUM_RUN_ID}"
   local pidfile="$dir/${base}.pid"
   local logfile="$dir/${base}.log"
   local donefile="$dir/${base}.done"
@@ -1016,8 +1027,24 @@ ensure_long_job() {
   export WIGGUM_LONG_JOB_LOG="$logfile"
 
   if [[ -f "$donefile" ]]; then
-    return 0   # already ran to completion (or was marked ended) this attempt — never touch it again
+    return 0   # already ran to completion (or was marked ended) THIS run's attempt — never touch it again
   fi
+
+  # Before concluding "nothing for this run — launch fresh", check whether some
+  # OTHER run's pidfile for the SAME phase+attempt is still alive (e.g. the
+  # orchestrator crashed and was resumed within seconds, while its detached job
+  # is still genuinely running) — never launch a second concurrent instance of
+  # the same job.
+  local other
+  for other in "$dir/phase${n}-attempt${attempt}-"*.pid; do
+    [[ -e "$other" ]] || continue
+    [[ "$other" == "$pidfile" ]] && continue
+    local other_pid; other_pid="$(cat "$other" 2>/dev/null)"
+    if [[ -n "$other_pid" ]] && kill -0 "$other_pid" 2>/dev/null; then
+      export WIGGUM_LONG_JOB_LOG="${other%.pid}.log"
+      return 0   # a prior run's instance is still alive — leave it alone
+    fi
+  done
 
   if [[ -f "$pidfile" ]]; then
     local existing_pid; existing_pid="$(cat "$pidfile" 2>/dev/null)"
