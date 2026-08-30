@@ -169,6 +169,28 @@ def test_bare_citation_in_gate_subdir_resolves():
         assert _resolve_cited("nope.txt", d, sd) is None
 
 
+def test_nested_subdir_citation_under_proof_root_resolves():
+    """W16: a citation that already carries its OWN subdirectory relative to a
+    proof root — `proofs/cycles/provision-1.log`, exactly how a batch test runner
+    that writes a per-cycle subdir gets cited — MUST resolve as a whole, not get
+    reduced to its basename first. The basename-only fallback drops the `cycles/`
+    segment, so `gates/proofs/cycles/provision-1.log` (real, on disk) is never
+    checked; only `gates/proofs/provision-1.log` is, which doesn't exist, and a
+    genuinely-satisfied criterion reads MISSING forever (confirmed live 2026-08-30,
+    ainetops-demo phase 8, tests/integration/cycles_runner.sh's proof layout)."""
+    with tempfile.TemporaryDirectory() as d:
+        gates_rel = os.path.join(".wiggum", "features", "default", "gates")
+        subdir = os.path.join(d, gates_rel, "proofs", "cycles")
+        os.makedirs(subdir)
+        open(os.path.join(subdir, "provision-1.log"), "w").write("provision exit=1\n")
+        sd = grounding_search_dirs(gates_rel, d)
+        resolved = _resolve_cited("proofs/cycles/provision-1.log", d, sd)
+        assert resolved, "nested-subdirectory citation must resolve"
+        assert resolved == os.path.join(subdir, "provision-1.log")
+        # A truly-absent nested citation still resolves to None (no false positives).
+        assert _resolve_cited("proofs/cycles/nope.log", d, sd) is None
+
+
 def test_snapshot_labels_bare_gate_citation_by_resolved_path():
     """A bare `GATE0-EVIDENCE.md` citation (as written when describing the atomic
     evidence write) resolves under the feature's gates/ dir. The snapshot MUST show
@@ -537,6 +559,7 @@ if __name__ == "__main__":
     test_secret_scan_passes_placeholders()
     test_gitignore_probe_reports_env_ignored()
     test_bare_citation_in_gate_subdir_resolves()
+    test_nested_subdir_citation_under_proof_root_resolves()
     test_snapshot_labels_bare_gate_citation_by_resolved_path()
     test_snapshot_keeps_missing_label_for_absent_citation()
     test_extractor_denoises_rpc_and_nonresolving_tokens()

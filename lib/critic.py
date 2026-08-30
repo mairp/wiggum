@@ -434,6 +434,20 @@ def _resolve_cited(p, workdir, search_dirs=None, members=None, hint=None):
             cand = os.path.join(workdir, m, norm)
             if os.path.exists(cand):
                 return cand
+    # W16: a citation that already carries its OWN subdirectory relative to a proof
+    # root — `proofs/cycles/provision-1.log`, i.e. exactly how a runner that writes
+    # a per-cycle subdir gets cited — must be tried WHOLE against each search dir,
+    # not reduced to its basename first. The basename-only fallback below silently
+    # drops the `cycles/` segment, so `gates/proofs/cycles/provision-1.log` (real,
+    # on disk) is never checked; only `gates/proofs/provision-1.log` is, which
+    # doesn't exist, so a genuinely-satisfied criterion reads MISSING forever.
+    # Confirmed live (2026-08-30, ainetops-demo phase 8): every `proofs/cycles/*`
+    # citation from tests/integration/cycles_runner.sh's own proof layout rejected
+    # this way despite the files being present and complete.
+    for d in search_dirs:
+        cand = os.path.join(workdir, d, norm)
+        if os.path.exists(cand):
+            return cand
     # bare/short reference: try the known proof dirs using just the basename
     base = os.path.basename(norm)
     for d in search_dirs:
