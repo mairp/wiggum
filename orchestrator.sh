@@ -1041,7 +1041,23 @@ ensure_long_job() {
   # and to signals aimed at this script's or any proposer pass's process group.
   # The subshell backgrounds it and captures $! before exiting; nothing here
   # blocks the orchestrator.
-  ( cd "$WORKDIR" && setsid nohup bash -c "$LONG_JOB_CMD" > "$logfile" 2>&1 < /dev/null & echo $! > "$pidfile" )
+  #
+  # A plain fork (this subshell) inherits ALL open file descriptors, including
+  # the orchestrator's flock on $LOCK — setsid detaches the SESSION, not the FD
+  # table. Left open, the detached job (which deliberately outlives this
+  # process) holds that flock forever, so killing the orchestrator does not
+  # release the lock while the job is still running: a relaunch then fails with
+  # "another run holds the lock" even though no orchestrator is alive.
+  # Confirmed live (2026-08-30, ainetops-demo). Close ONLY this subshell's copy
+  # of the fd (a subshell's fd table is independent after fork, so this cannot
+  # affect the orchestrator's own open lock) before backgrounding the job.
+  # `eval` is required: `exec $LOCK_FD>&-` is a single unparsed argument to
+  # `exec` without it (verified) — bash only accepts a literal fd number there.
+  (
+    [[ -n "${LOCK_FD:-}" ]] && eval "exec ${LOCK_FD}>&-" 2>/dev/null
+    cd "$WORKDIR" && setsid nohup bash -c "$LONG_JOB_CMD" > "$logfile" 2>&1 < /dev/null &
+    echo $! > "$pidfile"
+  )
   wiggum_emit long_job_start phase "$n" attempt "$attempt" cmd "$LONG_JOB_CMD" log "$logfile"
 }
 
