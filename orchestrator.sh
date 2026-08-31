@@ -62,6 +62,13 @@ OPTIONS
                         bebop | prime[:variant] (default: $WIGGUM_CRITIC or claude).
   --max-rejects N       Critic REJECTs per phase before halting (default: 3).
   --max-iter N          Proposer passes per phase (default: 30).
+  --proposer-timeout SECONDS  Hard wall-clock limit on a single proposer pass
+                        (default: 1800). Also WIGGUM_PROPOSER_TIMEOUT. Raise
+                        this when a phase's own verification work (e.g. a
+                        long-job command, see --long-job-cmd) genuinely needs
+                        longer than the default per pass to converge.
+  --critic-timeout SECONDS    Hard wall-clock limit on a single critic call
+                        (default: 300). Also WIGGUM_CRITIC_TIMEOUT.
   --start-phase N       Override the derived resume phase.
   --verification MODE   Verification lifecycle: off | plan | required.
                         plan creates/attaches a hash-bound TEST_PLAN.md before the
@@ -182,6 +189,8 @@ while [[ $# -gt 0 ]]; do
     --critic)       CRITIC_BACKEND="${2:?}"; shift 2 ;;
     --max-rejects)  MAX_REJECTS="${2:?}"; shift 2 ;;
     --max-iter)     MAX_ITER="${2:?}"; shift 2 ;;
+    --proposer-timeout) PROPOSER_TIMEOUT="${2:?}"; shift 2 ;;
+    --critic-timeout)   CRITIC_TIMEOUT="${2:?}"; shift 2 ;;
     --start-phase)  START_PHASE="${2:?}"; shift 2 ;;
     --verification) VERIFICATION="${2:?}"; shift 2 ;;
     --test-plan)     TEST_PLAN="${2:?}"; shift 2 ;;
