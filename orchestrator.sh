@@ -522,6 +522,11 @@ write_last_run_conf() {
     printf 'TEST_PLAN=%q\n'        "$TEST_PLAN"
     printf 'GENERATE_TESTS=%q\n'    "$GENERATE_TESTS"
     printf 'VERIFICATION_PLAN=%q\n' "$VERIFICATION_JSON"
+    # The long job is part of a phase's contract, not a launch-time nicety: a
+    # resume that drops it silently starves the phase of the very evidence it
+    # gates on, with nothing in the log saying so.
+    printf 'LONG_JOB_PHASE=%q\n'   "$LONG_JOB_PHASE"
+    printf 'LONG_JOB_CMD=%q\n'     "$LONG_JOB_CMD"
     printf 'ORCHESTRATOR=%q\n'     "$SCRIPT_DIR/orchestrator.sh"
   } > "$dest" 2>/dev/null || true
 }

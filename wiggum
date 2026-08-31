@@ -461,6 +461,11 @@ for o in keep[-5:]:
     [[ -n "${GENERATE_TESTS:-}" ]] && args+=( --generate-tests "$GENERATE_TESTS" )
     [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )
     [[ "${OTEL:-false}" == "true" ]] && args+=( --otel --otel-url "$OTEL_URL" )
+    # A phase's long-running verification job must survive resume (older confs
+    # won't carry it); without this the resumed run never launches the job the
+    # phase's evidence depends on.
+    [[ -n "${LONG_JOB_PHASE:-}" && -n "${LONG_JOB_CMD:-}" ]] && \
+      args+=( --long-job-phase "$LONG_JOB_PHASE" --long-job-cmd "$LONG_JOB_CMD" )
     # anything extra passed to `wiggum resume` overrides the saved config
     # (orchestrator parses flags last-wins).
     args+=( "${EXTRA[@]}" )

@@ -159,3 +159,57 @@ def test_sc012_five_facts_present_in_retained_records(workdir):
     assert any(e["event"] == "agent_result" for e in lines)                   # outcome
     assert any(e["event"] == "telemetry_delivery" and e.get("status") == "failed"
                for e in lines)                                                # sink failure
+
+
+def test_resume_carries_the_phase_long_job(tmp_path):
+    """A resume that drops --long-job-* starves the phase of its own evidence.
+
+    The long job is part of a phase's contract, not a launch-time nicety: it is
+    the thing the gate's evidence is derived from. It was persisted nowhere, so
+    `wiggum resume` silently relaunched without it.
+    """
+    wd = tmp_path / "proj"
+    feat = wd / ".wiggum" / "features" / "tf"
+    feat.mkdir(parents=True)
+    specs = wd / "spec.md"
+    specs.write_text("## Phase 1\n")
+    fake_orch = tmp_path / "fake-orchestrator.sh"
+    fake_orch.write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n')
+    fake_orch.chmod(0o755)
+    conf = (
+        f"WORKDIR={wd}\nSPECS={specs}\nFEATURE=tf\n"
+        "PROPOSER_BACKEND=dsh\nCRITIC_BACKEND=dsh\nMAX_REJECTS=3\nMAX_ITER=5\n"
+        "LONG_JOB_PHASE=8\nLONG_JOB_CMD=./tests/integration/cycles_runner.sh\n"
+        f"ORCHESTRATOR={fake_orch}\n"
+    )
+    (wd / ".wiggum" / "last-run.conf").write_text(conf)
+    feat.joinpath("last-run.conf").write_text(conf)
+
+    out = run("resume", wd)
+
+    assert "--long-job-phase" in out and "\n8\n" in out
+    assert "--long-job-cmd" in out
+    assert "./tests/integration/cycles_runner.sh" in out
+
+
+def test_resume_omits_long_job_when_the_run_had_none(tmp_path):
+    """Older configs carry no long job; resume must not invent empty flags."""
+    wd = tmp_path / "proj"
+    feat = wd / ".wiggum" / "features" / "tf"
+    feat.mkdir(parents=True)
+    specs = wd / "spec.md"
+    specs.write_text("## Phase 1\n")
+    fake_orch = tmp_path / "fake-orchestrator.sh"
+    fake_orch.write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n')
+    fake_orch.chmod(0o755)
+    conf = (
+        f"WORKDIR={wd}\nSPECS={specs}\nFEATURE=tf\n"
+        "PROPOSER_BACKEND=dsh\nCRITIC_BACKEND=dsh\nMAX_REJECTS=3\nMAX_ITER=5\n"
+        f"ORCHESTRATOR={fake_orch}\n"
+    )
+    (wd / ".wiggum" / "last-run.conf").write_text(conf)
+    feat.joinpath("last-run.conf").write_text(conf)
+
+    out = run("resume", wd)
+
+    assert "--long-job" not in out
