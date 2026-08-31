@@ -47,7 +47,17 @@ OPTIONS
                           (mapped to local-high/qwen3.8-27b-q5).
   -n, --max-iter N        Max passes before giving up (default: 30).
   -s, --sleep SECONDS     Sleep between passes (default: 2).
-  --timeout SECONDS       Hard timeout on a single agent pass (default: 1800).
+  --timeout SECONDS       Absolute backstop on a single agent pass regardless
+                          of progress (default: 1800). Not the primary kill
+                          switch — see --idle-timeout.
+  --idle-timeout SECONDS  Kill the pass only after this many seconds with NO
+                          cpu-time growth anywhere in its process tree
+                          (default: 900) — an actually-hung pass, not one that
+                          is simply taking a while (e.g. waiting on a detached
+                          long-job or a slow network response). This is the
+                          real stuck-detector; raising --timeout does not help
+                          a pass that never converges, since it cannot tell
+                          "still working" from "stuck".
   -j, --stream-json       Also ship tool_use/api_request telemetry (Loki and/or OTEL).
   --loki-url URL          Loki base (with -j).
   --otel-url URL          OTLP/HTTP base (with -j). Ships to OTEL alongside Loki.
@@ -86,6 +96,17 @@ MODEL=""
 MAX_ITER="${WIGGUM_MAX_ITER:-30}"
 SLEEP_SECS=2
 TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
+# IDLE_TIMEOUT is the real stuck-detector (see run_with_idle_watchdog below):
+# killed only after this many seconds with ZERO cpu-time growth anywhere in
+# the agent's own process tree, not after a fixed duration regardless of
+# whether it's working. TIMEOUT above becomes an absolute last-resort backstop
+# instead of the primary control -- a genuinely-working pass (including one
+# waiting on a detached long-job, or on slow network/prefill) is never killed
+# just for taking a while; only an actually-hung one is. 900s (15min) is sized
+# to safely exceed ordinary network/prefill stalls (observed worst case here:
+# ~4min for a 144k-token prompt), not to match any project's task duration --
+# that is the categorical difference from guessing a total-duration number.
+IDLE_TIMEOUT="${WIGGUM_PROPOSER_IDLE_TIMEOUT:-900}"
 STREAM_JSON="false"
 LOKI_URL="${WIGGUM_LOKI_URL:-http://localhost:3100}"
 OTEL_URL="${WIGGUM_OTEL_URL:-http://localhost:4318}"
@@ -109,6 +130,7 @@ while [[ $# -gt 0 ]]; do
     -n|--max-iter)    MAX_ITER="${2:?}"; shift 2 ;;
     -s|--sleep)       SLEEP_SECS="${2:?}"; shift 2 ;;
     --timeout)        TIMEOUT="${2:?}"; shift 2 ;;
+    --idle-timeout)   IDLE_TIMEOUT="${2:?}"; shift 2 ;;
     -j|--stream-json) STREAM_JSON="true"; shift ;;
     --feature)        WIGGUM_FEATURE="${2:?}"; shift 2 ;;
     --role)           WIGGUM_ROLE="${2:?}"; shift 2 ;;
@@ -271,7 +293,7 @@ run_agent() {
         dsh_args+=( --patch "$patch_path" )
       fi
       DSH_PERMISSION_MODE="${WIGGUM_DSH_PERMISSION_MODE:-${DSH_PERMISSION_MODE:-workspace-write}}" \
-        timeout "$TIMEOUT" "$dsh_bin" "${dsh_args[@]}" "$prompt"
+        run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" "$dsh_bin" "${dsh_args[@]}" "$prompt"
       rc=$?
       if [[ -n "${patch_path:-}" ]]; then
         rm -f "$patch_path"
@@ -280,14 +302,14 @@ run_agent() {
       ;;
     claude)
       [[ -n "$MODEL" ]] && args+=( --model "$MODEL" )
-      timeout "$TIMEOUT" claude -p "$prompt" "${args[@]}"
+      run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" claude -p "$prompt" "${args[@]}"
       ;;
     codex)
       # OpenAI Codex CLI — UNVERIFIED on this host (no codex CLI here to test).
       # `codex exec` is the headless/non-interactive entrypoint.
       local -a cargs=( --dangerously-bypass-approvals-and-sandbox )
       [[ -n "$MODEL" ]] && cargs+=( --model "$MODEL" )
-      timeout "$TIMEOUT" codex exec "${cargs[@]}" "$prompt"
+      run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" codex exec "${cargs[@]}" "$prompt"
       ;;
     prime)
       # Out-of-the-box Prime Agent: use its configured default provider/model.
@@ -298,7 +320,7 @@ run_agent() {
       [[ "$PRIME_STRUCTURED" == "true" ]] && prime_mode="json"
       local -a pargs=( -p --mode "$prime_mode" --no-session --cwd "$WORKDIR" )
       [[ -n "$MODEL" ]] && pargs+=( --model "$MODEL" )
-      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_agent_bin" "${pargs[@]}"
+      printf '%s' "$prompt" | run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" "$prime_agent_bin" "${pargs[@]}"
       ;;
     prime:*)
       # Optional fleet launcher resolves a named variant's model/provider/persona.
@@ -309,7 +331,7 @@ run_agent() {
       [[ -z "$MODEL" ]] || { echo "proposer.sh: --model is unsupported with prime:<variant>; the variant selects its model" >&2; return 1; }
       local prime_mode="text"
       [[ "$PRIME_STRUCTURED" == "true" ]] && prime_mode="json"
-      printf '%s' "$prompt" | timeout "$TIMEOUT" "$prime_fleet_bin" "$pv" -p --mode "$prime_mode" --no-session --cwd "$WORKDIR"
+      printf '%s' "$prompt" | run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" "$prime_fleet_bin" "$pv" -p --mode "$prime_mode" --no-session --cwd "$WORKDIR"
       ;;
     bebop|bebop:*)
       # bebop is a shell FUNCTION (bebop.sh); a subprocess doesn't inherit it, so
@@ -323,7 +345,7 @@ run_agent() {
       . "$bebop_sh"
       declare -F bebop >/dev/null 2>&1 || { echo "proposer.sh: $bebop_sh did not define bebop()" >&2; return 127; }
       set +u   # bebop's associative-array indexing is not nounset-clean
-      timeout "$TIMEOUT" bash -c '
+      run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" bash -c '
         . "$1"; shift; bb="$1"; shift; prompt="$1"; shift
         bebop "$bb" -p "$prompt" "$@"
       ' _ "$bebop_sh" "$bb" "$prompt" "${args[@]}"
@@ -386,6 +408,75 @@ finally:
     try: os.unlink(tmp)
     except FileNotFoundError: pass
 PY
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  run_with_idle_watchdog — a drop-in replacement for `timeout N CMD...` that
+#  kills on genuine STUCKNESS, not on elapsed time.
+#
+#  `timeout` cannot distinguish "still legitimately working" from "hung" — it
+#  only knows duration, which is exactly the thing that varies per project,
+#  per phase, per model speed, with no value that fits all of them (confirmed
+#  live 2026-08-31, ainetops-demo: three consecutive passes each ran the FULL
+#  3-hour --timeout with zero progress; raising the number twice already this
+#  session did not and could not fix it, because a bigger number just delays
+#  the same failure). This function tracks cpu-time-seconds summed across the
+#  WHOLE process tree the command spawns (so a child like `kubectl wait` or
+#  `docker exec` genuinely working, even while the top-level agent process
+#  itself is momentarily blocked on that child's result, still counts as
+#  progress) and kills only after IDLE_TIMEOUT seconds with that sum
+#  completely flat. HARD_CAP is kept as an absolute last-resort backstop for a
+#  process that is somehow busy-working forever without ever finishing —
+#  practically unreachable for a genuinely idle-detected hang, since that
+#  triggers on the idle check first.
+#
+#  Usage: run_with_idle_watchdog HARD_CAP_SECONDS IDLE_SECONDS CMD [ARGS...]
+#  Exit code 124 on either kill, matching `timeout`'s own convention, so any
+#  caller checking for that code needs no changes.
+_proc_tree_pids() {
+  local root="$1"
+  echo "$root"
+  local c
+  for c in $(pgrep -P "$root" 2>/dev/null); do
+    _proc_tree_pids "$c"
+  done
+}
+_proc_tree_cpu_seconds() {
+  local root="$1" total=0 t pid
+  for pid in $(_proc_tree_pids "$root"); do
+    t="$(ps -o cputimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [[ -n "$t" ]] && total=$(( total + t ))
+  done
+  echo "$total"
+}
+run_with_idle_watchdog() {
+  local hard_cap="$1" idle_timeout="$2"; shift 2
+  "$@" &
+  local cmd_pid=$! start_ts last_cpu last_change_ts now cpu
+  start_ts="$(date +%s)"; last_cpu=-1; last_change_ts="$start_ts"
+
+  while kill -0 "$cmd_pid" 2>/dev/null; do
+    sleep 15
+    kill -0 "$cmd_pid" 2>/dev/null || break
+    now="$(date +%s)"
+    cpu="$(_proc_tree_cpu_seconds "$cmd_pid")"
+    if [[ "$cpu" != "$last_cpu" ]]; then
+      last_cpu="$cpu"; last_change_ts="$now"
+    fi
+    if (( now - last_change_ts >= idle_timeout )); then
+      echo "run_with_idle_watchdog: no CPU progress anywhere in the process tree for ${idle_timeout}s -- pid $cmd_pid is genuinely stuck (not just slow); killing." >&2
+      kill -TERM "$cmd_pid" 2>/dev/null; sleep 3; kill -KILL "$cmd_pid" 2>/dev/null
+      wait "$cmd_pid" 2>/dev/null
+      return 124
+    fi
+    if (( now - start_ts >= hard_cap )); then
+      echo "run_with_idle_watchdog: absolute backstop ${hard_cap}s reached (still showing progress, but this is a hard ceiling) -- killing pid $cmd_pid." >&2
+      kill -TERM "$cmd_pid" 2>/dev/null; sleep 3; kill -KILL "$cmd_pid" 2>/dev/null
+      wait "$cmd_pid" 2>/dev/null
+      return 124
+    fi
+  done
+  wait "$cmd_pid"
 }
 
 # One iteration. For claude/bebop the agent's stream-json is piped through the
