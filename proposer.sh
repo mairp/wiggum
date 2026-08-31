@@ -179,6 +179,10 @@ FEATURE="${WIGGUM_FEATURE:-default}"
 ROLE="${WIGGUM_ROLE:-proposer}"
 PHASE="${WIGGUM_PHASE:-0}"
 ATTEMPT="${WIGGUM_ATTEMPT:-1}"
+log() { echo "$*" >&2; }   # ensure_long_job's own log lines; reaches run.log via the orchestrator's `2>&1 | emit_out`
+# ensure_long_job (wiggum-lib.sh) needs the feature dir for its long-jobs/
+# subdir. EVIDENCE is always <FEATURE_DIR>/gates/GATE<N>-EVIDENCE.md.
+FEATURE_DIR="$(dirname "$(dirname "$EVIDENCE")")"
 INVOCATION_ID_BASE="${WIGGUM_INVOCATION_ID:-}"
 PRIME_STRUCTURED="false"
 if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] \
@@ -603,6 +607,15 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   fi
   wiggum_emit iter_start iter "$i" max_iter "$MAX_ITER"
   echo "----- proposer pass $i/$MAX_ITER  $(date -Is) -----" >&2
+
+  # Idempotent: a no-op once the phase's long job (if any) is already running
+  # or already done. Called every pass, not just once, because the
+  # orchestrator's own call happens a single time before proposer.sh even
+  # starts, and this loop alone can run for hours across many passes within
+  # one invocation (confirmed live 2026-08-30: a stale marker seen at that one
+  # earlier check starved two full 3-hour passes with no further chance to
+  # launch).
+  ensure_long_job "$PHASE" "$ATTEMPT"
 
   run_iteration "$i" "$PROMPT" &
   PASS_PID=$!

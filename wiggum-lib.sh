@@ -191,3 +191,122 @@ wiggum_spec_context() {
 wiggum_spec_render_context() {
   _wiggum_spec_py render-context --specs "$1"
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ensure_long_job — long-running phase jobs that survive across proposer passes
+#
+#  A phase can require a setup/verification job (e.g. an integration test
+#  runner) that takes longer than one proposer PASS, or even longer than one
+#  proposer.sh INVOCATION (which itself loops up to --max-iter passes inside a
+#  single call from the orchestrator). If the job is started as a child of
+#  either, it dies the moment that process tree ends: --timeout SIGTERMs the
+#  whole tree, and even a pass/invocation that ends on its own kills any child
+#  job when the agent process exits (confirmed 2026-08-30: an in-flight job's
+#  log stopped writing within seconds of iter_done, on a pass that ended long
+#  before its --timeout). Confirmed again the same day at the coarser
+#  granularity: proposer.sh's OWN internal pass loop can run for hours (up to
+#  max-iter full-timeout passes) inside a single orchestrator-invoked attempt,
+#  and the orchestrator only calls this ONCE per attempt, before proposer.sh
+#  even starts — so a stale `.done` marker seen at that single check silently
+#  starves every pass of that entire (potentially many-hour) attempt, with no
+#  further chance to launch. Fix: call this from BOTH the orchestrator (once,
+#  before the attempt starts, as an early head start) AND from inside
+#  proposer.sh's own per-pass loop (idempotent, so calling it many times over
+#  one attempt is a no-op once the job is running or done) — whichever caller
+#  runs it, the job is launched fully detached (setsid, its own session,
+#  reparented to init) so its lifetime is tied to the phase, not to any single
+#  pass or invocation.
+#
+#  Requires from the caller's scope: LONG_JOB_PHASE, LONG_JOB_CMD, FEATURE_DIR,
+#  WORKDIR, WIGGUM_RUN_ID (exported by the orchestrator; proposer.sh reads it
+#  from the same env var), a `log` function, and `wiggum_emit` (this file).
+#  LOCK_FD is optional — set only in a caller that itself holds the workdir
+#  flock by that name; harmless/no-op when absent (e.g. in proposer.sh, which
+#  still inherits the SAME open fd number from the orchestrator that spawned
+#  it, so exporting LOCK_FD from the orchestrator lets proposer.sh close its
+#  own inherited copy too, for the same reason described below).
+ensure_long_job() {
+  local n="$1" attempt="$2"
+  [[ "$LONG_JOB_PHASE" == "$n" && -n "$LONG_JOB_CMD" ]] || return 0
+
+  local dir="$FEATURE_DIR/long-jobs"
+  # Scoped per ATTEMPT *and* per RUN_ID, not just per attempt: attempt numbers
+  # reset to 1 on every fresh orchestrator process (`local attempt=1` in
+  # run_phase), so attempt-only scoping lets a `.done` marker from a wholly
+  # unrelated, long-past run silently satisfy a brand-new run's same-numbered
+  # attempt — the new run then reasons over that OLD run's stale/incomplete
+  # evidence and never launches its own job at all. Confirmed live
+  # (2026-08-30, ainetops-demo): a `.done` marker written for one run's
+  # phase8-attempt1 silently suppressed a wholly different, later run's
+  # phase8-attempt1 from ever launching, so the proposer worked from a stale,
+  # mid-idempotence-check cycles.run.log left over from a run stopped hours
+  # earlier.
+  local base="phase${n}-attempt${attempt}-${WIGGUM_RUN_ID}"
+  local pidfile="$dir/${base}.pid"
+  local logfile="$dir/${base}.log"
+  local donefile="$dir/${base}.done"
+  mkdir -p "$dir"
+  export WIGGUM_LONG_JOB_LOG="$logfile"
+
+  if [[ -f "$donefile" ]]; then
+    return 0   # already ran to completion (or was marked ended) THIS run's attempt — never touch it again
+  fi
+
+  # Before concluding "nothing for this run — launch fresh", check whether some
+  # OTHER run's pidfile for the SAME phase+attempt is still alive (e.g. the
+  # orchestrator crashed and was resumed within seconds, while its detached job
+  # is still genuinely running) — never launch a second concurrent instance of
+  # the same job.
+  local other
+  for other in "$dir/phase${n}-attempt${attempt}-"*.pid; do
+    [[ -e "$other" ]] || continue
+    [[ "$other" == "$pidfile" ]] && continue
+    local other_pid; other_pid="$(cat "$other" 2>/dev/null)"
+    if [[ -n "$other_pid" ]] && kill -0 "$other_pid" 2>/dev/null; then
+      export WIGGUM_LONG_JOB_LOG="${other%.pid}.log"
+      return 0   # a prior run's instance is still alive — leave it alone
+    fi
+  done
+
+  if [[ -f "$pidfile" ]]; then
+    local existing_pid; existing_pid="$(cat "$pidfile" 2>/dev/null)"
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      return 0   # still running — leave it alone
+    fi
+    # PID file exists but the process is gone: it finished (success or crash)
+    # since the last pass. Relaunching here would silently re-run — and for
+    # any job that truncates its own log on start, silently DESTROY — a
+    # completed result. Never auto-restart a job that has already run; record
+    # that it ended and let the proposer's own prompt (pointed at the log via
+    # WIGGUM_LONG_JOB_LOG) read the outcome instead of guessing.
+    log ">>> long-job(phase $n attempt $attempt): process $existing_pid no longer running — treating as ended, NOT auto-restarting. See $logfile"
+    wiggum_emit long_job_ended phase "$n" attempt "$attempt" log "$logfile"
+    : > "$donefile"
+    return 0
+  fi
+
+  log ">>> long-job(phase $n attempt $attempt): launching detached — $LONG_JOB_CMD"
+  # setsid+nohup fully detaches the job into its own session, immune to SIGHUP
+  # and to signals aimed at this script's or any proposer pass's process group.
+  # The subshell backgrounds it and captures $! before exiting; nothing here
+  # blocks the caller.
+  #
+  # A plain fork (this subshell) inherits ALL open file descriptors, including
+  # the orchestrator's flock on the workdir lock (LOCK_FD, when set) — setsid
+  # detaches the SESSION, not the FD table. Left open, the detached job (which
+  # deliberately outlives this process) holds that flock forever, so killing
+  # the orchestrator does not release the lock while the job is still running:
+  # a relaunch then fails with "another run holds the lock" even though no
+  # orchestrator is alive. Confirmed live (2026-08-30, ainetops-demo). Close
+  # ONLY this subshell's copy of the fd (a subshell's fd table is independent
+  # after fork, so this cannot affect the holder's own open lock) before
+  # backgrounding the job. `eval` is required: `exec $LOCK_FD>&-` is a single
+  # unparsed argument to `exec` without it (verified) — bash only accepts a
+  # literal fd number there.
+  (
+    [[ -n "${LOCK_FD:-}" ]] && eval "exec ${LOCK_FD}>&-" 2>/dev/null
+    cd "$WORKDIR" && setsid nohup bash -c "$LONG_JOB_CMD" > "$logfile" 2>&1 < /dev/null &
+    echo $! > "$pidfile"
+  )
+  wiggum_emit long_job_start phase "$n" attempt "$attempt" cmd "$LONG_JOB_CMD" log "$logfile"
+}
