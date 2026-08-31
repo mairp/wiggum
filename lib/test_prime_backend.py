@@ -97,52 +97,85 @@ def test_dsh_critic_uses_tool_free_patch_and_target_cwd():
     assert captured_patch.count("disabled: true") >= 10
 
 
-def test_dsh_critic_can_select_zai_model_with_patch():
+def test_dsh_critic_selects_model_in_settings_layer_not_patch(tmp_path):
+    """The model must be chosen in the settings layer, which is the one that wins.
+
+    dsh-agent-default-model treats --patch config as the BASE that a mounted
+    settings provider layers over, so a model named only in --patch is silently
+    ignored at runtime. Assert the selection lands in $DSH_HOME/settings.yaml.
+    """
     completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
+    real_home = tmp_path / "dsh-home"
+    real_home.mkdir()
+    (real_home / "profiles").mkdir()
+    (real_home / "settings.yaml").write_text(
+        "agent-default-model:\n"
+        "  provider: someone-else\n"
+        "  model: not-this-one\n"
+        "  reasoningEffort: low\n"
+        "llm-pi-ai:\n"
+        "  providers:\n"
+        "    zai:\n"
+        "      baseURL: https://example.invalid\n"
+    )
     env = {
         "WIGGUM_DSH_BIN": "/bin/dsh",
         "WIGGUM_DSH_PROFILE": "headless",
         "WIGGUM_DSH_CRITIC_MODEL": "glm-5.3",
         "WIGGUM_DSH_CRITIC_REASONING_EFFORT": "max",
+        "DSH_HOME": str(real_home),
     }
-    captured_patch = ""
+    captured = {}
 
     def fake_run(argv, **kwargs):
-        nonlocal captured_patch
-        patch_path = argv[argv.index("--patch") + 1]
-        captured_patch = Path(patch_path).read_text()
+        home = kwargs["env"]["DSH_HOME"]
+        captured["home"] = home
+        captured["settings"] = Path(home, "settings.yaml").read_text()
+        captured["patch"] = Path(argv[argv.index("--patch") + 1]).read_text()
+        captured["profiles_linked"] = Path(home, "profiles").exists()
         return completed
 
     with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", side_effect=fake_run):
         critic.call_dsh_shell("large prompt", 42, "/tmp/work tree")
 
-    assert "- id: agent-default-model" in captured_patch
-    assert "provider: zai" in captured_patch
-    assert "model: glm-5.3" in captured_patch
-    assert "reasoningEffort: max" in captured_patch
+    settings = captured["settings"]
+    assert "provider: zai" in settings
+    assert "model: glm-5.3" in settings
+    assert "reasoningEffort: max" in settings
+    # the displaced default is gone, the rest of the file is carried verbatim
+    assert "not-this-one" not in settings
+    assert "https://example.invalid" in settings
+    # the overlay is a throwaway; the real home is never mutated
+    assert captured["home"] != str(real_home)
+    assert "not-this-one" in (real_home / "settings.yaml").read_text()
+    assert captured["profiles_linked"]
+    # --patch stays the right layer for tool disabling, and carries no model
+    assert "agent-default-model" not in captured["patch"]
+    assert "- id: tool-bash" in captured["patch"]
 
-
-def test_dsh_critic_can_select_litellm_qwen38_alias_with_patch():
+def test_dsh_critic_qwen38_alias_resolves_to_local_high_in_settings(tmp_path):
     completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
+    real_home = tmp_path / "dsh-home"
+    real_home.mkdir()
+    (real_home / "settings.yaml").write_text("agent-default-model:\n  provider: zai\n  model: glm-5.3-flash\n")
     env = {
         "WIGGUM_DSH_BIN": "/bin/dsh",
         "WIGGUM_DSH_PROFILE": "headless",
         "WIGGUM_DSH_CRITIC_MODEL": "qwen3.8-27b",
+        "DSH_HOME": str(real_home),
     }
-    captured_patch = ""
+    captured = {}
 
     def fake_run(argv, **kwargs):
-        nonlocal captured_patch
-        patch_path = argv[argv.index("--patch") + 1]
-        captured_patch = Path(patch_path).read_text()
+        captured["settings"] = Path(kwargs["env"]["DSH_HOME"], "settings.yaml").read_text()
         return completed
 
     with mock.patch.dict(os.environ, env, clear=False), mock.patch("subprocess.run", side_effect=fake_run):
         critic.call_dsh_shell("large prompt", 42, "/tmp/work tree")
 
-    assert "provider: local-high" in captured_patch
-    assert "model: qwen3.8-27b-q5" in captured_patch
-
+    assert "provider: local-high" in captured["settings"]
+    assert "model: qwen3.8-27b-q5" in captured["settings"]
+    assert "glm-5.3-flash" not in captured["settings"]
 
 def test_dsh_critic_splits_oversized_prompt_without_changing_task():
     completed = mock.Mock(returncode=0, stdout="VERDICT token: APPROVED\n", stderr="")
@@ -249,19 +282,31 @@ def test_dsh_proposer_uses_headless_profile_and_target_cwd(tmp_path):
     ]
 
 
-def test_dsh_proposer_can_select_zai_model_with_backend_variant(tmp_path):
+def test_dsh_proposer_selects_model_in_settings_layer_not_patch(tmp_path):
+    """`--backend dsh:<provider/model>` must reach dsh via the settings layer."""
     evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("standing prompt")
+    real_home = tmp_path / "dsh-home"
+    real_home.mkdir()
+    (real_home / "profiles").mkdir()
+    (real_home / "settings.yaml").write_text(
+        "agent-default-model:\n"
+        "  provider: someone-else\n"
+        "  model: not-this-one\n"
+        "llm-pi-ai:\n"
+        "  providers:\n"
+        "    zai:\n"
+        "      baseURL: https://example.invalid\n"
+    )
     fake = tmp_path / "fake-dsh"
     fake.write_text(
         "#!/bin/bash\n"
         "pwd > \"$CAPTURE_CWD\"\n"
         "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGV\"\n"
-        "while [[ $# -gt 0 ]]; do\n"
-        "  if [[ \"$1\" == \"--patch\" ]]; then cp \"$2\" \"$CAPTURE_PATCH\"; shift 2; continue; fi\n"
-        "  shift\n"
-        "done\n"
+        "echo \"$DSH_HOME\" > \"$CAPTURE_HOME\"\n"
+        "cp \"$DSH_HOME/settings.yaml\" \"$CAPTURE_SETTINGS\"\n"
+        "[[ -e \"$DSH_HOME/profiles\" ]] && echo linked > \"$CAPTURE_LINKED\"\n"
         "mkdir -p \"$(dirname \"$TEST_EVIDENCE\")\"\n"
         "echo ok > \"$TEST_EVIDENCE\"\n"
     )
@@ -274,9 +319,12 @@ def test_dsh_proposer_can_select_zai_model_with_backend_variant(tmp_path):
         "WIGGUM_DSH_PROVIDER": "",
         "WIGGUM_DSH_REASONING_EFFORT": "max",
         "WIGGUM_AGENT_STREAM": "false",
+        "DSH_HOME": str(real_home),
         "CAPTURE_CWD": str(tmp_path / "cwd"),
         "CAPTURE_ARGV": str(tmp_path / "argv"),
-        "CAPTURE_PATCH": str(tmp_path / "patch.yml"),
+        "CAPTURE_HOME": str(tmp_path / "home"),
+        "CAPTURE_SETTINGS": str(tmp_path / "settings.yaml"),
+        "CAPTURE_LINKED": str(tmp_path / "linked"),
         "TEST_EVIDENCE": str(evidence),
     })
     result = subprocess.run([
@@ -286,26 +334,31 @@ def test_dsh_proposer_can_select_zai_model_with_backend_variant(tmp_path):
     ], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     argv = (tmp_path / "argv").read_text().splitlines()
-    assert argv[:4] == ["--profile", "headless", "--patch", argv[3]]
+    assert argv[:2] == ["--profile", "headless"]
     assert argv[-1] == "standing prompt"
-    patch = (tmp_path / "patch.yml").read_text()
-    assert "provider: zai" in patch
-    assert "model: glm-5.3" in patch
-    assert "reasoningEffort: max" in patch
+    settings = (tmp_path / "settings.yaml").read_text()
+    assert "provider: zai" in settings
+    assert "model: glm-5.3" in settings
+    assert "reasoningEffort: max" in settings
+    assert "not-this-one" not in settings
+    assert "https://example.invalid" in settings
+    # throwaway overlay, real home untouched, rest of the home linked through
+    assert (tmp_path / "home").read_text().strip() != str(real_home)
+    assert "not-this-one" in (real_home / "settings.yaml").read_text()
+    assert (tmp_path / "linked").exists()
 
-
-def test_dsh_proposer_can_select_litellm_qwen38_alias(tmp_path):
+def test_dsh_proposer_qwen38_alias_resolves_to_local_high_in_settings(tmp_path):
     evidence = tmp_path / ".wiggum" / "gates" / "GATE1-EVIDENCE.md"
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("standing prompt")
+    real_home = tmp_path / "dsh-home"
+    real_home.mkdir()
+    (real_home / "settings.yaml").write_text("agent-default-model:\n  provider: zai\n  model: glm-5.3-flash\n")
     fake = tmp_path / "fake-dsh"
     fake.write_text(
         "#!/bin/bash\n"
         "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGV\"\n"
-        "while [[ $# -gt 0 ]]; do\n"
-        "  if [[ \"$1\" == \"--patch\" ]]; then cp \"$2\" \"$CAPTURE_PATCH\"; shift 2; continue; fi\n"
-        "  shift\n"
-        "done\n"
+        "cp \"$DSH_HOME/settings.yaml\" \"$CAPTURE_SETTINGS\"\n"
         "mkdir -p \"$(dirname \"$TEST_EVIDENCE\")\"\n"
         "echo ok > \"$TEST_EVIDENCE\"\n"
     )
@@ -317,8 +370,9 @@ def test_dsh_proposer_can_select_litellm_qwen38_alias(tmp_path):
         "WIGGUM_DSH_MODEL": "",
         "WIGGUM_DSH_PROVIDER": "",
         "WIGGUM_AGENT_STREAM": "false",
+        "DSH_HOME": str(real_home),
         "CAPTURE_ARGV": str(tmp_path / "argv"),
-        "CAPTURE_PATCH": str(tmp_path / "patch.yml"),
+        "CAPTURE_SETTINGS": str(tmp_path / "settings.yaml"),
         "TEST_EVIDENCE": str(evidence),
     })
     result = subprocess.run([
@@ -327,12 +381,11 @@ def test_dsh_proposer_can_select_litellm_qwen38_alias(tmp_path):
         "--backend", "dsh:qwen3.8-27b", "-n", "1",
     ], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
-    argv = (tmp_path / "argv").read_text().splitlines()
-    assert argv[-1] == "standing prompt"
-    patch = (tmp_path / "patch.yml").read_text()
-    assert "provider: local-high" in patch
-    assert "model: qwen3.8-27b-q5" in patch
-
+    assert (tmp_path / "argv").read_text().splitlines()[-1] == "standing prompt"
+    settings = (tmp_path / "settings.yaml").read_text()
+    assert "provider: local-high" in settings
+    assert "model: qwen3.8-27b-q5" in settings
+    assert "glm-5.3-flash" not in settings
 
 def _assert_structured_context(records, backend):
     records = [record for record in records if "invocation_id" in record]

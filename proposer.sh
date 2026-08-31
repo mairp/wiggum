@@ -299,18 +299,48 @@ dsh_resolve_model_ref() {
   printf '%s/%s\n' "$provider" "$model"
 }
 
-dsh_write_model_patch() {
-  local provider="$1" model="$2" patch_path="$3"
+# Select the DSH model in the *settings* layer, not the composition layer.
+#
+# @deepseek-ai/dsh-agent-default-model composes as: plugin config is the BASE of
+# the `agent-default-model` settings section, and "a mounted settings provider
+# layers the user's choice over it" (its README). `--patch` writes that base, so
+# $DSH_HOME/settings.yaml ALWAYS wins over it. The old --patch approach was
+# therefore inert at runtime: `--backend dsh:qwen3.8-27b` silently ran whatever
+# settings.yaml named (verified 2026-08-31: a patch naming a nonexistent
+# provider still dialed the settings.yaml provider), while `dsh --dump-config`
+# kept showing the requested model — which is why it looked correct.
+#
+# Write the selection into a throwaway DSH_HOME that symlinks every entry of the
+# real one except settings.yaml. The CLI's choice wins, nothing global is
+# mutated, and concurrent dsh consumers on this host are unaffected.
+# reasoningEffort belongs to the settings section (deliberately not to plugin
+# config, per the same README), so it is honoured here.
+dsh_make_home_overlay() {
+  local provider="$1" model="$2" overlay="$3"
+  local real_home="${DSH_HOME:-$HOME/.dsh}"
   local reasoning="${WIGGUM_DSH_REASONING_EFFORT:-}"
+  local entry base
+  for entry in "$real_home"/* "$real_home"/.[!.]*; do
+    [[ -e "$entry" ]] || continue
+    base="${entry##*/}"
+    [[ "$base" == settings.yaml ]] && continue
+    ln -sfn "$entry" "$overlay/$base" || return 1
+  done
   {
-    printf '%s\n' "- id: agent-default-model"
-    printf '%s\n' "  config:"
-    printf '    provider: %s\n' "$provider"
-    printf '    model: %s\n' "$model"
+    printf 'agent-default-model:\n'
+    printf '  provider: %s\n' "$provider"
+    printf '  model: %s\n' "$model"
     if [[ -n "$reasoning" ]]; then
-      printf '    reasoningEffort: %s\n' "$reasoning"
+      printf '  reasoningEffort: %s\n' "$reasoning"
     fi
-  } > "$patch_path"
+    # carry the rest of the real settings verbatim, minus the block we replaced
+    if [[ -f "$real_home/settings.yaml" ]]; then
+      awk '/^agent-default-model:/ { skip=1; next }
+           skip && /^[[:space:]]*$/ { next }
+           skip && /^[[:space:]]/   { next }
+           { skip=0; print }' "$real_home/settings.yaml"
+    fi
+  } > "$overlay/settings.yaml" || return 1
 }
 
 run_agent() {
@@ -330,22 +360,25 @@ run_agent() {
         return 1
       fi
       local dsh_model_ref="${MODEL:-${WIGGUM_DSH_MODEL:-$backend_model}}"
-      local resolved_model_ref provider model patch_path rc
+      local resolved_model_ref provider model overlay_dir dsh_home_eff rc
       command -v "$dsh_bin" >/dev/null 2>&1 || { echo "proposer.sh: DeepSeek Harness not found: $dsh_bin (set \$WIGGUM_DSH_BIN)" >&2; return 127; }
       local -a dsh_args=( --profile "$dsh_profile" )
       if [[ -n "$dsh_model_ref" ]]; then
         resolved_model_ref="$(dsh_resolve_model_ref "$dsh_model_ref")" || return 1
         provider="${resolved_model_ref%%/*}"
         model="${resolved_model_ref#*/}"
-        patch_path="$(mktemp "${TMPDIR:-/tmp}/wiggum-dsh-model.XXXXXX.yml")" || return 1
-        dsh_write_model_patch "$provider" "$model" "$patch_path"
-        dsh_args+=( --patch "$patch_path" )
+        overlay_dir="$(mktemp -d "${TMPDIR:-/tmp}/wiggum-dsh-home.XXXXXX")" || return 1
+        dsh_make_home_overlay "$provider" "$model" "$overlay_dir" || {
+          echo "proposer.sh: could not build DSH_HOME overlay for $resolved_model_ref" >&2
+          rm -rf "$overlay_dir"; return 1; }
       fi
+      dsh_home_eff="${overlay_dir:-${DSH_HOME:-$HOME/.dsh}}"
+      DSH_HOME="$dsh_home_eff" \
       DSH_PERMISSION_MODE="${WIGGUM_DSH_PERMISSION_MODE:-${DSH_PERMISSION_MODE:-workspace-write}}" \
         run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" "$dsh_bin" "${dsh_args[@]}" "$prompt"
       rc=$?
-      if [[ -n "${patch_path:-}" ]]; then
-        rm -f "$patch_path"
+      if [[ -n "${overlay_dir:-}" ]]; then
+        rm -rf "$overlay_dir"
       fi
       return "$rc"
       ;;

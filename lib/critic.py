@@ -1122,21 +1122,67 @@ def _resolve_dsh_model_ref(model_ref, provider=None):
     return (provider, model)
 
 
-def _dsh_model_patch(model_ref, provider=None):
+def _strip_agent_default_model(text):
+    """Drop the top-level ``agent-default-model:`` block, keeping everything else."""
+    out, skip = [], False
+    for line in text.splitlines(True):
+        if line.startswith("agent-default-model:"):
+            skip = True
+            continue
+        if skip:
+            if not line.strip() or line[:1] in (" ", "\t"):
+                continue
+            skip = False
+        out.append(line)
+    return "".join(out)
+
+
+def _dsh_home_overlay(model_ref, provider=None):
+    """Build a throwaway DSH_HOME that selects the model in the *settings* layer.
+
+    @deepseek-ai/dsh-agent-default-model treats plugin config (what ``--patch``
+    writes) as the BASE of the ``agent-default-model`` settings section, and "a
+    mounted settings provider layers the user's choice over it" (its README).
+    A --patch model selection therefore never wins against
+    $DSH_HOME/settings.yaml — verified 2026-08-31, when a patch naming a
+    nonexistent provider still dialed the settings.yaml provider while
+    ``dsh --dump-config`` showed the requested one.
+
+    Symlink every entry of the real home except settings.yaml, then write a
+    settings.yaml carrying the caller's selection. Nothing global is mutated and
+    concurrent dsh consumers are unaffected. Returns None when no model override
+    was requested, leaving the ambient DSH_HOME in force.
+    """
+    import tempfile
     provider, model = _resolve_dsh_model_ref(model_ref, provider)
     if not provider:
-        return ""
-    lines = [
-        "- id: agent-default-model",
-        "  config:",
-        "    provider: %s" % provider,
-        "    model: %s" % model,
-    ]
+        return None
+    real_home = os.environ.get("DSH_HOME") or os.path.join(
+        os.path.expanduser("~"), ".dsh")
+    overlay = tempfile.mkdtemp(prefix="wiggum-dsh-home.")
+    if os.path.isdir(real_home):
+        for name in os.listdir(real_home):
+            if name == "settings.yaml":
+                continue
+            os.symlink(os.path.join(real_home, name),
+                       os.path.join(overlay, name))
+    lines = ["agent-default-model:",
+             "  provider: %s" % provider,
+             "  model: %s" % model]
+    # reasoningEffort belongs to the settings section, deliberately not to
+    # plugin config (same README), so it is honoured here.
     reasoning = os.environ.get("WIGGUM_DSH_CRITIC_REASONING_EFFORT") \
         or os.environ.get("WIGGUM_DSH_REASONING_EFFORT")
     if reasoning:
-        lines.append("    reasoningEffort: %s" % reasoning)
-    return "\n".join(lines) + "\n"
+        lines.append("  reasoningEffort: %s" % reasoning)
+    body = "\n".join(lines) + "\n"
+    source = os.path.join(real_home, "settings.yaml")
+    if os.path.isfile(source):
+        with open(source, encoding="utf-8") as handle:
+            body += _strip_agent_default_model(handle.read())
+    with open(os.path.join(overlay, "settings.yaml"), "w", encoding="utf-8") as handle:
+        handle.write(body)
+    return overlay
 
 
 def _dsh_task_args(prompt):
@@ -1215,14 +1261,14 @@ def call_dsh_shell(prompt, timeout, workdir=None, model_ref=None):
 - id: user-questions
   disabled: true
 """
-    model_patch = _dsh_model_patch(
+    # The tool-disabling patch above is pure composition, so --patch is the right
+    # layer for it. The model selection is not: it must go in the settings layer.
+    overlay_home = _dsh_home_overlay(
         model_ref or os.environ.get("WIGGUM_DSH_CRITIC_MODEL")
         or os.environ.get("WIGGUM_DSH_MODEL"),
         os.environ.get("WIGGUM_DSH_CRITIC_PROVIDER")
         or os.environ.get("WIGGUM_DSH_PROVIDER"),
     )
-    if model_patch:
-        patch += model_patch
     patch_path = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as fh:
@@ -1232,6 +1278,8 @@ def call_dsh_shell(prompt, timeout, workdir=None, model_ref=None):
                 + _dsh_task_args(prompt))
         env = dict(os.environ)
         env["DSH_PERMISSION_MODE"] = "read-only"
+        if overlay_home:
+            env["DSH_HOME"] = overlay_home
         out = subprocess.run(argv, cwd=workdir, capture_output=True, text=True,
                              timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
@@ -1244,6 +1292,9 @@ def call_dsh_shell(prompt, timeout, workdir=None, model_ref=None):
                 os.unlink(patch_path)
             except OSError:
                 pass
+        if overlay_home:
+            import shutil
+            shutil.rmtree(overlay_home, ignore_errors=True)
     if out.returncode != 0:
         raise RuntimeError("DeepSeek Harness critic exit %d: %s" %
                            (out.returncode, (out.stderr or "")[:300]))
