@@ -617,7 +617,17 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   # launch).
   ensure_long_job "$PHASE" "$ATTEMPT"
 
-  run_iteration "$i" "$PROMPT" &
+  # Tell the agent the long job's REAL state up front so it never has to
+  # discover "it's still running" by burning the whole pass waiting on it —
+  # confirmed live (2026-08-31): three consecutive passes each ran the full
+  # --timeout with no evidence because the agent had no way to know the job
+  # was already progressing independently in the background. Recomputed every
+  # pass (not just once) since the job's state changes between passes.
+  status_block="$(long_job_status_line "$PHASE" "$ATTEMPT")"
+  pass_prompt="$PROMPT"
+  [[ -n "$status_block" ]] && pass_prompt="${PROMPT}"$'\n\n'"${status_block}"
+
+  run_iteration "$i" "$pass_prompt" &
   PASS_PID=$!
   echo "$PASS_PID" > "$PIDFILE" 2>/dev/null || true
   wait "$PASS_PID" || true

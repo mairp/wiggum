@@ -310,3 +310,73 @@ ensure_long_job() {
   )
   wiggum_emit long_job_start phase "$n" attempt "$attempt" cmd "$LONG_JOB_CMD" log "$logfile"
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  long_job_status_line — tell the agent the truth about its long job so it
+#  never has to burn a whole pass discovering it
+#
+#  Confirmed live (2026-08-31, ainetops-demo phase 8): once a long job is
+#  correctly launched detached, it no longer NEEDS a giant per-pass timeout —
+#  the job keeps running whether the pass is 20 minutes or 3 hours. But the
+#  proposer had no way to KNOW that, so it kept treating "the job isn't done
+#  yet" as something to wait out inside the pass, burning the full --timeout
+#  three times in a row (9 hours) with no evidence. --timeout was never the
+#  right knob: the fix is telling the agent the job's real state up front, so
+#  it can act on the phase's own PROGRESS.md convention ("if it is still
+#  running when the pass ends, END THE PASS without writing evidence") instead
+#  of discovering that the slow way. This makes the per-pass timeout a
+#  constant sized for normal agent turnaround, not a per-project guess sized
+#  to match however long someone's verification job happens to take.
+#
+#  Requires the same scope as ensure_long_job (LONG_JOB_PHASE, LONG_JOB_CMD,
+#  FEATURE_DIR, WIGGUM_RUN_ID). Prints one prompt-ready block to stdout, or
+#  nothing when no long job is configured for this phase.
+long_job_status_line() {
+  local n="$1" attempt="$2"
+  [[ "$LONG_JOB_PHASE" == "$n" && -n "$LONG_JOB_CMD" ]] || return 0
+
+  local dir="$FEATURE_DIR/long-jobs"
+  local base="phase${n}-attempt${attempt}-${WIGGUM_RUN_ID}"
+  local pidfile="$dir/${base}.pid"
+  local logfile="$dir/${base}.log"
+  local donefile="$dir/${base}.done"
+
+  if [[ -f "$donefile" ]]; then
+    cat <<EOF2
+## Long-running verification job: DONE
+$LONG_JOB_CMD has already ENDED (success or crash — check its own exit/output).
+Log: $logfile
+Do NOT re-run it. Read its output and cite the files it produced directly.
+EOF2
+    return 0
+  fi
+
+  if [[ -f "$pidfile" ]]; then
+    local pid; pid="$(cat "$pidfile" 2>/dev/null)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      local started elapsed
+      started="$(stat -c %Y "$pidfile" 2>/dev/null || echo "$(date +%s)")"
+      elapsed=$(( $(date +%s) - started ))
+      cat <<EOF2
+## Long-running verification job: STILL RUNNING (~${elapsed}s so far)
+$LONG_JOB_CMD is running INDEPENDENTLY in the background (log: $logfile) and
+keeps running after this pass ends, whether this pass is short or long — it
+does NOT need you to wait for it, babysit it, or re-run it.
+If its output is not yet complete enough to write full evidence: do NOT poll
+or sleep waiting on it, and do NOT redo verification work it will produce.
+Update PROGRESS.md with whatever you've confirmed independently, then STOP
+this pass without writing evidence — a fresh pass follows immediately, and by
+then the job may have advanced or finished. Burning this whole pass waiting
+for it is the single most expensive mistake available to you right now.
+EOF2
+      return 0
+    fi
+  fi
+
+  cat <<EOF2
+## Long-running verification job: launching now
+$LONG_JOB_CMD is configured for this phase and is being launched automatically,
+detached, in the background as this pass starts. Do not launch it yourself.
+It will not be done by the time you read this; treat it as STILL RUNNING.
+EOF2
+}
