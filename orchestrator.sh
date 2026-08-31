@@ -1104,9 +1104,14 @@ run_phase() {
       fi
       if [[ "$prc" -eq 7 ]]; then
         log ">>> proposer aborted on consecutive agent errors for phase $n — halting (exit $E_BUDGET)."
-        log "#   the agent pass repeatedly ended in error (often --timeout). Options:"
+        log "#   the agent pass repeatedly ended in error, or was repeatedly killed by the"
+        log "#   watchdog (subtype watchdog_*: repeat_stall = same tool call over and over,"
+        log "#   progress_stall = nothing written to disk, hard_cap/idle_timeout = out of time)."
+        log "#   Each killed pass left a checkpoint in $FEATURE_DIR/pass-checkpoints — read the"
+        log "#   newest one first; it says what the agent was actually doing. Options:"
         log "#     - raise the per-pass timeout:  WIGGUM_PROPOSER_TIMEOUT=3600 wiggum resume -w $WORKDIR"
         log "#     - raise the error tolerance:    WIGGUM_PROPOSER_MAX_ERRORS=5 wiggum resume -w $WORKDIR"
+        log "#     - loosen a futility detector:   WIGGUM_PROPOSER_REPEAT_LIMIT=0 / WIGGUM_PROPOSER_PROGRESS_TIMEOUT=0"
         log "#     - or fix the phase's live harness so a pass completes within the timeout."
         wiggum_emit run_stop reason proposer_consecutive_errors phase "$n"
         exit "$E_BUDGET"

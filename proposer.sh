@@ -58,6 +58,21 @@ OPTIONS
                           real stuck-detector; raising --timeout does not help
                           a pass that never converges, since it cannot tell
                           "still working" from "stuck".
+  --progress-timeout SECS Kill the pass after this many seconds during which the
+                          agent modified NOTHING on disk under the workdir
+                          (default: 1800; 0 disables). Idleness and futility are
+                          not the same thing: a pass can be maximally busy by
+                          cpu measure while producing nothing. .git/.wiggum/
+                          node_modules/.venv are ignored as progress.
+  --progress-path PATH    Restrict the disk-progress check to PATH (repeatable;
+                          also WIGGUM_PROPOSER_PROGRESS_PATHS, colon-separated).
+                          Default: the whole workdir, minus the dirs above.
+  --repeat-limit N        Kill the pass when the agent has issued the SAME tool
+                          call (identical tool + target) N times in this pass and
+                          is still issuing it (default: 5; 0 disables). Catches
+                          a fast retry loop, which no cpu- or wall-clock watchdog
+                          can see. Needs the agent stream (on by default for
+                          claude/bebop/prime; inert with WIGGUM_AGENT_STREAM=false).
   -j, --stream-json       Also ship tool_use/api_request telemetry (Loki and/or OTEL).
   --loki-url URL          Loki base (with -j).
   --otel-url URL          OTLP/HTTP base (with -j). Ships to OTEL alongside Loki.
@@ -107,6 +122,18 @@ TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
 # ~4min for a 144k-token prompt), not to match any project's task duration --
 # that is the categorical difference from guessing a total-duration number.
 IDLE_TIMEOUT="${WIGGUM_PROPOSER_IDLE_TIMEOUT:-900}"
+# PROGRESS_TIMEOUT / REPEAT_LIMIT are the futility detectors. IDLE_TIMEOUT above
+# only sees *idleness*; an agent stuck in a fast retry loop (confirmed live
+# 2026-08-31, ainetops-demo phase 8: ten failed builds of the same target, the
+# last five with an identical `make` error minutes apart) is maximally busy by
+# cpu measure while producing nothing, so the idle watchdog never trips and the
+# pass runs to the hard cap — which then throws the whole hour away. These two
+# add the missing signals: nothing written to disk at all (PROGRESS_TIMEOUT), and
+# the same tool call repeating with no result (REPEAT_LIMIT). Set either to 0 to
+# disable.
+PROGRESS_TIMEOUT="${WIGGUM_PROPOSER_PROGRESS_TIMEOUT:-1800}"
+REPEAT_LIMIT="${WIGGUM_PROPOSER_REPEAT_LIMIT:-5}"
+PROGRESS_PATHS=()
 STREAM_JSON="false"
 LOKI_URL="${WIGGUM_LOKI_URL:-http://localhost:3100}"
 OTEL_URL="${WIGGUM_OTEL_URL:-http://localhost:4318}"
@@ -131,6 +158,9 @@ while [[ $# -gt 0 ]]; do
     -s|--sleep)       SLEEP_SECS="${2:?}"; shift 2 ;;
     --timeout)        TIMEOUT="${2:?}"; shift 2 ;;
     --idle-timeout)   IDLE_TIMEOUT="${2:?}"; shift 2 ;;
+    --progress-timeout) PROGRESS_TIMEOUT="${2:?}"; shift 2 ;;
+    --progress-path)  PROGRESS_PATHS+=( "${2:?}" ); shift 2 ;;
+    --repeat-limit)   REPEAT_LIMIT="${2:?}"; shift 2 ;;
     -j|--stream-json) STREAM_JSON="true"; shift ;;
     --feature)        WIGGUM_FEATURE="${2:?}"; shift 2 ;;
     --role)           WIGGUM_ROLE="${2:?}"; shift 2 ;;
@@ -206,6 +236,25 @@ log() { echo "$*" >&2; }   # ensure_long_job's own log lines; reaches run.log vi
 # subdir. EVIDENCE is always <FEATURE_DIR>/gates/GATE<N>-EVIDENCE.md.
 FEATURE_DIR="$(dirname "$(dirname "$EVIDENCE")")"
 INVOCATION_ID_BASE="${WIGGUM_INVOCATION_ID:-}"
+# Disk-progress roots for the futility watchdog. Explicit --progress-path wins,
+# then WIGGUM_PROPOSER_PROGRESS_PATHS (colon-separated), else the whole workdir.
+# The workdir default is deliberately broad: ANY file the agent touches counts as
+# progress, so ordinary implementation work (which need not touch the gate dir for
+# a long stretch) is never mistaken for a stall. Wiggum's own state dirs are
+# excluded in _disk_progress_since — they change on their own, from the harness
+# and from a detached long job, and would mask a genuinely stalled agent.
+if [[ ${#PROGRESS_PATHS[@]} -eq 0 ]]; then
+  if [[ -n "${WIGGUM_PROPOSER_PROGRESS_PATHS:-}" ]]; then
+    IFS=':' read -r -a PROGRESS_PATHS <<< "$WIGGUM_PROPOSER_PROGRESS_PATHS"
+  else
+    PROGRESS_PATHS=( "$WORKDIR" )
+  fi
+fi
+# Where a killed pass leaves what it was doing, so an hour of work degrades into a
+# note the next pass reads instead of vanishing (see write_pass_checkpoint).
+CHECKPOINT_DIR="$FEATURE_DIR/pass-checkpoints"
+KILL_SIDECAR="$STATE_DIR/.last-watchdog-kill"
+CURRENT_ITER=0
 PRIME_STRUCTURED="false"
 if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] \
    && [[ "$AGENT_STREAM" == "true" || "$STREAM_JSON" == "true" ]]; then
@@ -430,6 +479,24 @@ PY
 #  practically unreachable for a genuinely idle-detected hang, since that
 #  triggers on the idle check first.
 #
+#  CPU progress alone is not enough: idleness and futility are different things,
+#  and this loop could only see the first. Confirmed live (2026-08-31,
+#  ainetops-demo phase 8): with the long job already DONE and no evidence
+#  written, the agent spent six consecutive passes rebuilding one binary — ten
+#  attempts, the last five failing with an identical `make` error minutes apart.
+#  That is maximally "active" by cpu measure, so the idle watchdog never tripped
+#  and every pass ran to the hard cap, which discards the whole hour instead of
+#  bounding it. Two more signals are therefore checked on the same tick:
+#    * DISK progress — nothing created or modified anywhere under the workdir
+#      (minus .git/.wiggum/node_modules/.venv, which change without the agent)
+#      for PROGRESS_TIMEOUT seconds. Any real file touch resets it, so ordinary
+#      implementation work is never mistaken for a stall.
+#    * REPETITION — the same tool call (identical tool + target) issued
+#      REPEAT_LIMIT times in this pass, and still the most recent thing the agent
+#      did. A retry loop is caught while it is looping, not an hour later.
+#  Every kill — including the hard cap — writes a checkpoint of what the pass was
+#  doing (write_pass_checkpoint), which the next pass's prompt carries forward.
+#
 #  Usage: run_with_idle_watchdog HARD_CAP_SECONDS IDLE_SECONDS CMD [ARGS...]
 #  Exit code 124 on either kill, matching `timeout`'s own convention, so any
 #  caller checking for that code needs no changes.
@@ -449,34 +516,278 @@ _proc_tree_cpu_seconds() {
   done
   echo "$total"
 }
+
+# Has anything under the disk-progress roots been created or modified since TS?
+# Wiggum's own state dirs are pruned: .wiggum churns from the harness itself
+# (invocation dirs, events.jsonl) and from any detached long job writing its log
+# and proofs, so counting it would mask a completely stalled agent; .git,
+# node_modules and .venv are machine-written noise for the same reason.
+_disk_progress_since() {
+  local since="$1" root hit
+  for root in "${PROGRESS_PATHS[@]}"; do
+    [[ -e "$root" ]] || continue
+    hit="$(find "$root" \
+      \( -name .git -o -name .wiggum -o -name node_modules -o -name .venv \) -prune -o \
+      -newermt "@$since" -print -quit 2>/dev/null)"
+    [[ -n "$hit" ]] && return 0
+  done
+  return 1
+}
+
+# "pid<TAB>command" for every process in the tree, for the process-level repeat
+# detector below.
+_proc_tree_cmdlines() {
+  local pid args
+  for pid in $(_proc_tree_pids "$1"); do
+    args="$(ps -o args= -p "$pid" 2>/dev/null | tr -d '\n' | cut -c1-400)"
+    [[ -n "$args" ]] && printf '%s\t%s\n' "$pid" "$args"
+  done
+}
+
+# Is the agent stuck repeating one tool call? Reads only the events this pass
+# appended (from BYTE_OFFSET), counts identical tool+target pairs, and reports
+# only when the pair that hit the limit is also the most recent call — so a pass
+# that retried something a few times and then moved on is left alone, while one
+# still hammering the same command is caught mid-loop. Prints "<count>\t<call>".
+_repeat_offender() {
+  local events="$1" offset="$2" limit="$3"
+  [[ -n "$events" && -f "$events" && "$limit" -gt 0 ]] || return 0
+  python3 - "$events" "$offset" "$limit" <<'PY' 2>/dev/null
+import json, sys
+path, offset, limit = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+calls = []
+try:
+    with open(path, "rb") as handle:
+        handle.seek(offset)
+        for raw in handle:
+            try:
+                event = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if event.get("event") != "agent_tool":
+                continue
+            calls.append((event.get("tool") or "?", (event.get("target") or "").strip()))
+except OSError:
+    sys.exit(0)
+if not calls:
+    sys.exit(0)
+last = calls[-1]
+# An empty target is too coarse to judge repetition on (e.g. a tool whose input
+# carried nothing summarizable) — never kill a pass on that.
+if not last[1]:
+    sys.exit(0)
+count = calls.count(last)
+if count >= limit:
+    print("%d\t%s %s" % (count, last[0], last[1]))
+PY
+}
+
+# Record what a killed pass was doing, so the hour is bounded rather than thrown
+# away. Writes one markdown checkpoint (reason, elapsed, the pass's tool calls and
+# last words) and a sidecar the controller loop reads after the pass. The next
+# pass's prompt carries this forward via pass_checkpoint_block.
+write_pass_checkpoint() {
+  local reason="$1" elapsed="$2" detail="$3" events="$4" offset="$5"
+  local stamp file
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  file="$CHECKPOINT_DIR/${RUN_ID}-phase${PHASE}-attempt${ATTEMPT}-pass${CURRENT_ITER}-${stamp}.md"
+  mkdir -p "$CHECKPOINT_DIR" 2>/dev/null || return 0
+  {
+    printf '# Pass terminated by the wiggum watchdog\n\n'
+    printf -- '- run: %s\n- phase: %s, attempt: %s, pass: %s\n' "$RUN_ID" "$PHASE" "$ATTEMPT" "$CURRENT_ITER"
+    printf -- '- reason: %s\n- elapsed: %ss\n' "$reason" "$elapsed"
+    [[ -n "$detail" ]] && printf -- '- detail: %s\n' "$detail"
+    printf '\n'
+  } > "$file" 2>/dev/null || return 0
+  if [[ -n "$events" && -f "$events" ]]; then
+    python3 - "$events" "$offset" <<'PY' >> "$file" 2>/dev/null || true
+import json, sys
+path, offset = sys.argv[1], int(sys.argv[2])
+tools, texts = [], []
+try:
+    with open(path, "rb") as handle:
+        handle.seek(offset)
+        for raw in handle:
+            try:
+                event = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            name = event.get("event")
+            if name == "agent_tool":
+                tools.append("%s %s" % (event.get("tool") or "?", (event.get("target") or "").strip()))
+            elif name == "agent_text":
+                text = (event.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+except OSError:
+    pass
+if tools:
+    print("## Tool calls in this pass (last 25 of %d)\n" % len(tools))
+    for call in tools[-25:]:
+        print("- `%s`" % call.replace("`", "'"))
+    print()
+if texts:
+    print("## What it last said\n")
+    for text in texts[-5:]:
+        print("> %s\n" % text[:600])
+PY
+  fi
+  printf '%s\n' "$file" > "$KILL_SIDECAR.path" 2>/dev/null || true
+  printf '%s|%s|%s\n' "$reason" "$elapsed" "$detail" > "$KILL_SIDECAR" 2>/dev/null || true
+  wiggum_emit pass_killed iter "$CURRENT_ITER" reason "$reason" elapsed "$elapsed" \
+    detail "$detail" checkpoint "$file"
+}
+
 run_with_idle_watchdog() {
   local hard_cap="$1" idle_timeout="$2"; shift 2
+  # Poll interval. 15s is the operational value; the tests drive it down so a
+  # watchdog behaviour can be proven in seconds instead of minutes.
+  local tick="${WIGGUM_WATCHDOG_TICK:-15}"
+  # Only the events this pass appends are evidence about this pass.
+  local events="${WIGGUM_EVENTS:-}" offset=0 ticks=0
+  [[ -n "$events" && -f "$events" ]] && offset="$(wc -c < "$events" 2>/dev/null || echo 0)"
+  # Process-level repeat detection: how many DISTINCT processes have run each
+  # command line in this pass. A single long-running command is one pid however
+  # often it is sampled; re-running the same expensive command is a new pid every
+  # time. This is the backend-agnostic half of the repeat check — the event-based
+  # one needs the agent stream (claude/bebop/prime), while dsh and codex produce
+  # no tool events at all, which is exactly the backend the 2026-08-31 incident
+  # ran on. Sampling also self-selects for expensive commands: a `make` that runs
+  # for minutes is always caught, a sub-second `docker ps` poll almost never is.
+  local -A seen_procs=() cmd_runs=()
   "$@" &
-  local cmd_pid=$! start_ts last_cpu last_change_ts now cpu
-  start_ts="$(date +%s)"; last_cpu=-1; last_change_ts="$start_ts"
+  local cmd_pid=$! start_ts last_cpu last_change_ts last_disk_ts now cpu elapsed offender
+  local sample_pid sample_args sample_key sample_head
+  start_ts="$(date +%s)"; last_cpu=-1; last_change_ts="$start_ts"; last_disk_ts="$start_ts"
+
+  # One kill path for every reason: report it, checkpoint it, terminate the whole
+  # tree, and return `timeout`'s own 124 so callers need no changes.
+  _watchdog_kill() {
+    local reason="$1" message="$2" detail="$3" secs="$4"
+    echo "run_with_idle_watchdog: $message -- killing pid $cmd_pid." >&2
+    write_pass_checkpoint "$reason" "$secs" "$detail" "$events" "$offset"
+    kill -TERM "$cmd_pid" 2>/dev/null; sleep 3; kill -KILL "$cmd_pid" 2>/dev/null
+    wait "$cmd_pid" 2>/dev/null
+  }
 
   while kill -0 "$cmd_pid" 2>/dev/null; do
-    sleep 15
+    sleep "$tick"
     kill -0 "$cmd_pid" 2>/dev/null || break
-    now="$(date +%s)"
+    now="$(date +%s)"; elapsed=$(( now - start_ts )); ticks=$(( ticks + 1 ))
     cpu="$(_proc_tree_cpu_seconds "$cmd_pid")"
     if [[ "$cpu" != "$last_cpu" ]]; then
       last_cpu="$cpu"; last_change_ts="$now"
     fi
     if (( now - last_change_ts >= idle_timeout )); then
-      echo "run_with_idle_watchdog: no CPU progress anywhere in the process tree for ${idle_timeout}s -- pid $cmd_pid is genuinely stuck (not just slow); killing." >&2
-      kill -TERM "$cmd_pid" 2>/dev/null; sleep 3; kill -KILL "$cmd_pid" 2>/dev/null
-      wait "$cmd_pid" 2>/dev/null
+      _watchdog_kill idle_timeout \
+        "no CPU progress anywhere in the process tree for ${idle_timeout}s -- pid $cmd_pid is genuinely stuck (not just slow)" \
+        "" "$elapsed"
       return 124
     fi
+    # Repetition, process level: same command line, a new process each time.
+    if (( REPEAT_LIMIT > 0 )); then
+      while IFS=$'\t' read -r sample_pid sample_args; do
+        [[ -n "$sample_args" ]] || continue
+        # `sleep` is the one command whose repetition is normal and cheap (an
+        # agent pacing itself between checks); everything else that gets re-run
+        # this often is work that is not landing. Pure-bash basename: this runs
+        # per process per tick, so it must not fork.
+        sample_head="${sample_args%% *}"
+        [[ "${sample_head##*/}" == "sleep" ]] && continue
+        sample_key="${sample_pid}|${sample_args}"
+        [[ -n "${seen_procs[$sample_key]:-}" ]] && continue
+        seen_procs["$sample_key"]=1
+        cmd_runs["$sample_args"]=$(( ${cmd_runs["$sample_args"]:-0} + 1 ))
+        if (( ${cmd_runs["$sample_args"]} >= REPEAT_LIMIT )); then
+          _watchdog_kill repeat_stall \
+            "the agent has re-run the same command ${cmd_runs[$sample_args]}x in this pass (busy, but not progressing): ${sample_args}" \
+            "re-ran ${cmd_runs[$sample_args]}x: ${sample_args}" "$elapsed"
+          return 124
+        fi
+      done < <(_proc_tree_cmdlines "$cmd_pid")
+    fi
+    # Repetition, tool level: cheap (reads only this pass's events), every tick.
+    if (( REPEAT_LIMIT > 0 )); then
+      offender="$(_repeat_offender "$events" "$offset" "$REPEAT_LIMIT")"
+      if [[ -n "$offender" ]]; then
+        local count="${offender%%$'\t'*}" call="${offender#*$'\t'}"
+        _watchdog_kill repeat_stall \
+          "the agent has issued the same tool call ${count}x in this pass and is still issuing it (busy, but not progressing): ${call}" \
+          "repeated ${count}x: ${call}" "$elapsed"
+        return 124
+      fi
+    fi
+    # Disk progress: a full-tree scan, so every 4th tick (~60s) is plenty.
+    if (( PROGRESS_TIMEOUT > 0 && ticks % 4 == 0 )); then
+      if _disk_progress_since "$last_disk_ts"; then
+        last_disk_ts="$now"
+      elif (( now - last_disk_ts >= PROGRESS_TIMEOUT )); then
+        _watchdog_kill progress_stall \
+          "nothing written to disk under the workdir for ${PROGRESS_TIMEOUT}s (busy, but producing nothing)" \
+          "" "$elapsed"
+        return 124
+      fi
+    fi
     if (( now - start_ts >= hard_cap )); then
-      echo "run_with_idle_watchdog: absolute backstop ${hard_cap}s reached (still showing progress, but this is a hard ceiling) -- killing pid $cmd_pid." >&2
-      kill -TERM "$cmd_pid" 2>/dev/null; sleep 3; kill -KILL "$cmd_pid" 2>/dev/null
-      wait "$cmd_pid" 2>/dev/null
+      _watchdog_kill hard_cap \
+        "absolute backstop ${hard_cap}s reached (still showing progress, but this is a hard ceiling)" \
+        "" "$elapsed"
       return 124
     fi
   done
   wait "$cmd_pid"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  pass_checkpoint_block — carry a killed pass's lesson into the next one.
+#
+#  A watchdog kill used to be pure loss: the pass died, its whole hour went with
+#  it, and the next pass started from the same blank state and made the same
+#  choice (confirmed live 2026-08-31: six consecutive passes died at the hard cap
+#  rebuilding the same binary, each one starting over). The kill now leaves a
+#  checkpoint on disk; this prints it as a prompt block so the fresh pass knows
+#  what happened, that the harness — not the model — ended it, and what not to
+#  resume. Prints nothing when the previous pass ended normally.
+# ─────────────────────────────────────────────────────────────────────────────
+pass_checkpoint_block() {
+  local reason elapsed detail file line
+  [[ -f "$KILL_SIDECAR" ]] || return 0
+  line="$(cat "$KILL_SIDECAR" 2>/dev/null)"
+  [[ -n "$line" ]] || return 0
+  reason="${line%%|*}"; line="${line#*|}"
+  elapsed="${line%%|*}"; detail="${line#*|}"
+  file=""
+  [[ -f "$KILL_SIDECAR.path" ]] && file="$(cat "$KILL_SIDECAR.path" 2>/dev/null)"
+  cat <<EOF2
+## Your previous pass was terminated by the harness, not by you
+Reason: **$reason** after ${elapsed}s.
+EOF2
+  [[ -n "$detail" ]] && printf 'What it caught: %s\n' "$detail"
+  case "$reason" in
+    repeat_stall)
+      cat <<'EOF2'
+You were repeating one command that was not getting you anywhere. Do NOT resume
+that line of work. If it is genuinely required, say so explicitly in PROGRESS.md
+with the exact error and STOP; if it is not required for this phase's acceptance
+criteria, drop it and write the evidence you can already support.
+EOF2
+      ;;
+    progress_stall)
+      cat <<'EOF2'
+That pass changed nothing on disk. Whatever you were doing, it was not producing
+work product. Start by writing down what you know in PROGRESS.md, then do the
+smallest concrete thing the phase still needs.
+EOF2
+      ;;
+    hard_cap|idle_timeout)
+      cat <<'EOF2'
+Budget your work to fit a single pass: prefer writing down partial, verified
+results over starting anything you cannot finish inside one pass.
+EOF2
+      ;;
+  esac
+  [[ -n "$file" && -f "$file" ]] && printf 'Full checkpoint (what you were doing when it was killed): %s\n' "$file"
+  return 0
 }
 
 # One iteration. For claude/bebop the agent's stream-json is piped through the
@@ -485,6 +796,9 @@ run_with_idle_watchdog() {
 # when telemetry is on — also ships to Loki. Codex stays raw (CLI unverified).
 run_iteration() {
   local iter="$1" prompt="$2"
+  # Visible to the watchdog (same subshell) so a checkpoint names the pass it came
+  # from; `iter` itself is local to this function.
+  CURRENT_ITER="$iter"
   # Announce the observability capability at invocation start (T060). The
   # structured Prime/claude paths emit this from the stream tap (agent_stream.py),
   # which sees the live schema; here we cover only the explicit Prime raw-text
@@ -716,7 +1030,13 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   # pass (not just once) since the job's state changes between passes.
   status_block="$(long_job_status_line "$PHASE" "$ATTEMPT")"
   pass_prompt="$PROMPT"
-  [[ -n "$status_block" ]] && pass_prompt="${PROMPT}"$'\n\n'"${status_block}"
+  [[ -n "$status_block" ]] && pass_prompt="${pass_prompt}"$'\n\n'"${status_block}"
+  # A watchdog-killed predecessor hands this pass what it was doing when it died,
+  # so the hour it lost becomes information instead of a repeated mistake.
+  checkpoint_block="$(pass_checkpoint_block)"
+  [[ -n "$checkpoint_block" ]] && pass_prompt="${pass_prompt}"$'\n\n'"${checkpoint_block}"
+  # Consumed: the sidecar describes the pass that just ended, never an older one.
+  rm -f "$KILL_SIDECAR" "$KILL_SIDECAR.path"
 
   run_iteration "$i" "$pass_prompt" &
   PASS_PID=$!
@@ -756,6 +1076,18 @@ for (( i=1; i<=MAX_ITER; i++ )); do
     wiggum_emit iter_done iter "$i" evidence missing plugin_restart true
     sleep "$SLEEP_SECS"
     continue
+  fi
+
+  # Did the watchdog end this pass? A killed pass writes no agent_result, so the
+  # legacy is_error tail-scan below reads it as a clean no-evidence pass and RESETS
+  # the breaker — which is how six consecutive hard-cap kills (2026-08-31,
+  # ainetops-demo phase 8) burned 6.5 hours without the loop ever noticing. A kill
+  # is an erroring pass: count it, so N in a row halts and surfaces to the operator
+  # instead of repeating.
+  pass_kill_reason=""
+  if [[ -f "$KILL_SIDECAR" ]]; then
+    pass_kill_reason="$(cut -d'|' -f1 < "$KILL_SIDECAR" 2>/dev/null)"
+    echo "proposer.sh: pass $i was terminated by the watchdog ($pass_kill_reason); its checkpoint is carried into the next pass." >&2
   fi
 
   # Evidence wins outright — a pass that produced the gate file is a success
@@ -833,6 +1165,10 @@ except Exception:
 print(flag, sub or "-")
 PY
 )
+  # A watchdog kill outranks whatever the (absent or stale) agent_result said.
+  if [[ -n "$pass_kill_reason" ]]; then
+    last_flag="error"; last_subtype="watchdog_${pass_kill_reason}"
+  fi
   if [[ "$last_flag" == "error" ]]; then
     consec_err=$(( consec_err + 1 ))
     echo "proposer.sh: pass $i errored (subtype '$last_subtype', is_error) — consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS" >&2

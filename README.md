@@ -672,6 +672,20 @@ guarded, all cheap:
 - **Single-run lock, timeouts, wall budget, `stop.flag`.** One orchestrator per
   workdir; per-pass and per-critic-call timeouts; an optional whole-run
   wall-clock budget; a manual clean halt.
+- **Pass watchdogs — stuck *and* futile.** `--timeout` is only an absolute
+  backstop: elapsed time cannot distinguish "still working" from "hung", and a
+  bigger number just delays the same failure. Three signals actually end a bad
+  pass, and each kill writes a checkpoint (reason, elapsed, the pass's last tool
+  calls and words) to `.wiggum/features/<f>/pass-checkpoints/` that the **next
+  pass's prompt carries forward**, so a killed hour degrades into a note instead
+  of vanishing. A kill counts as an erroring pass, so repeats trip the failure
+  breaker and surface to you (exit 4) rather than repeating for hours.
+
+  | Signal | Fires when | Knob (default) |
+  |---|---|---|
+  | idle | no cpu-time growth anywhere in the pass's process tree — a genuinely hung pass, not a slow one (a busy `docker exec` child counts as progress) | `--idle-timeout` / `WIGGUM_PROPOSER_IDLE_TIMEOUT` (900s) |
+  | disk stall | nothing created or modified under the workdir, however busy the tree is (`.git`/`.wiggum`/`node_modules`/`.venv` excluded — the harness and a detached long job write there on their own) | `--progress-timeout` / `WIGGUM_PROPOSER_PROGRESS_TIMEOUT` (1800s, 0 = off) |
+  | repetition | the same tool call (identical tool + target) issued N times in one pass **and still the agent's most recent action** — a retry loop, invisible to any cpu or wall-clock measure. A pass that retried something and moved on is untouched | `--repeat-limit` / `WIGGUM_PROPOSER_REPEAT_LIMIT` (5, 0 = off) |
 - **Crash-safe resume.** The current phase is *derived* from the `GATE*` markers
   on start, not from a stored counter. Kill it anywhere, rerun the same command,
   it continues. `--start-phase N` overrides.
@@ -687,7 +701,7 @@ guarded, all cheap:
 | `1` | unexpected/internal error |
 | `2` | MAX_REJECTS exceeded — a human needs to arbitrate |
 | `3` | invalid spec/config |
-| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or the **failure breaker** tripping (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive proposer passes ending in an agent error: crash, timeout, auth/model error, malformed output, or no terminal record; default 2). The breaker emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume` |
+| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or the **failure breaker** tripping (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive proposer passes ending in an agent error: crash, timeout, auth/model error, malformed output, no terminal record, or a **watchdog kill**; default 2). The breaker emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume` |
 | `5` | lock held by another run |
 | `6` | stopped via `stop.flag` (clean; `wiggum resume` or rerun continues). Now also produced when the stop lands **mid-proposer** — `wiggum stop --now` — which earlier versions mislabeled as `4` |
 

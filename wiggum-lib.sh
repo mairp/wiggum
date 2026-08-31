@@ -227,7 +227,10 @@ wiggum_spec_render_context() {
 #  own inherited copy too, for the same reason described below).
 ensure_long_job() {
   local n="$1" attempt="$2"
-  [[ "$LONG_JOB_PHASE" == "$n" && -n "$LONG_JOB_CMD" ]] || return 0
+  # Defaulted, not bare: proposer.sh runs under `set -u` and is supported
+  # standalone, where no orchestrator has exported these — a bare expansion
+  # aborts pass 1 with "LONG_JOB_PHASE: unbound variable".
+  [[ "${LONG_JOB_PHASE:-}" == "$n" && -n "${LONG_JOB_CMD:-}" ]] || return 0
 
   local dir="$FEATURE_DIR/long-jobs"
   # Scoped per ATTEMPT *and* per RUN_ID, not just per attempt: attempt numbers
@@ -333,7 +336,7 @@ ensure_long_job() {
 #  nothing when no long job is configured for this phase.
 long_job_status_line() {
   local n="$1" attempt="$2"
-  [[ "$LONG_JOB_PHASE" == "$n" && -n "$LONG_JOB_CMD" ]] || return 0
+  [[ "${LONG_JOB_PHASE:-}" == "$n" && -n "${LONG_JOB_CMD:-}" ]] || return 0
 
   local dir="$FEATURE_DIR/long-jobs"
   local base="phase${n}-attempt${attempt}-${WIGGUM_RUN_ID}"
@@ -347,6 +350,18 @@ long_job_status_line() {
 $LONG_JOB_CMD has already ENDED (success or crash — check its own exit/output).
 Log: $logfile
 Do NOT re-run it. Read its output and cite the files it produced directly.
+
+### Your only task now is the gate evidence
+The job you were waiting on is finished, and the gate evidence is still unwritten.
+Writing it — from the output that already exists on disk — is the whole job of
+this pass. Do NOT start any new open-ended work (building a tool, compiling a
+dependency, installing software, refactoring) before the evidence file exists:
+that work is unbounded, this pass is not, and a pass that ends without evidence
+throws all of it away. If something the phase needs is genuinely missing from
+this environment, that is a FINDING: record it in PROGRESS.md with the exact
+command and error that proves it, and write the evidence you can support —
+including the criteria you cannot meet and why. An honest blocked report is a
+result; another hour of side work is not.
 EOF2
     return 0
   fi
