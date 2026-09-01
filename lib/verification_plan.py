@@ -1021,6 +1021,15 @@ def _gate(plan, phase):
     )
 
 
+def _output_text(value):
+    """Normalize subprocess output because TimeoutExpired may expose bytes with text=True."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def run_gate(plan, phase):
     gate = _gate(plan, phase)
     if gate is None:
@@ -1082,8 +1091,8 @@ def run_gate(plan, phase):
             signal = None
         except subprocess.TimeoutExpired as exc:
             code = None
-            stdout = (exc.stdout or "")[:64000]
-            stderr = ((exc.stderr or "") + "\ncommand timed out")[:64000]
+            stdout = _output_text(exc.stdout)[:64000]
+            stderr = (_output_text(exc.stderr) + "\ncommand timed out")[:64000]
             signal = "TIMEOUT"
         except OSError as exc:
             code = None

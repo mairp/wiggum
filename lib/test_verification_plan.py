@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -199,6 +200,43 @@ def test_gate_executes_fixed_argv_and_records_evidence(tmp_path):
     assert evidence["passed"] is True
     assert evidence["commands"][0]["executable"] == os.path.realpath(sys.executable)
     assert evidence["commands"][0]["stdout"].strip() == "witness"
+
+
+def test_gate_timeout_output_is_json_serializable(tmp_path, monkeypatch):
+    workdir, specs = project(tmp_path)
+    plan = verification_plan.create_plan(workdir, specs, required=True)
+    command = {
+        "id": "CMD-timeout",
+        "kind": "test",
+        "label": "Timed out test",
+        "executable": os.path.realpath(sys.executable),
+        "args": ["-c", "pass"],
+        "cwd": workdir,
+        "timeoutSec": 1,
+    }
+    plan["commands"] = [command]
+    for suite in plan["suites"]:
+        suite["commandRefs"] = ["CMD-timeout"]
+    semantic = dict(plan)
+    semantic.pop("contentHash")
+    plan["contentHash"] = verification_plan.sha256_text(
+        verification_plan.canonical_json(semantic)
+    )
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 1, output=b"partial \xff stdout",
+                                        stderr=None)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    evidence = verification_plan.run_gate(plan, 1)
+    command_evidence = evidence["commands"][0]
+    assert evidence["passed"] is False
+    assert command_evidence["signal"] == "TIMEOUT"
+    assert command_evidence["stdout"] == "partial � stdout"
+    assert command_evidence["stderr"] == "\ncommand timed out"
+    output = tmp_path / "evidence.json"
+    verification_plan._write_evidence(str(output), evidence)
+    assert json.loads(output.read_text()) == evidence
 
 
 BUILD_SPEC = """# Demo

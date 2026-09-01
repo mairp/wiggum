@@ -1,0 +1,136 @@
+# Wiggum crash incident — 15.1 run killed mid-Phase-12 (self-recursion hazard)
+
+Date: 2026-07-30
+Run: `20260728-224714-2699391`  ·  Workdir: `/root/workflow_orchestration`
+Spec: `/root/roadmap/15.1/SPECS.md` (Governed Fleet, 14 phases 0–13)
+
+## One-line cause
+
+Not a crash and not a critic reject loop. The **Phase 12 proposer launched a real `[sdd]`
+kanban card to satisfy an acceptance criterion; that card's ai-ops director called
+`sdd-run.sh → wiggum run` and chose `/root/workflow_orchestration` as its workdir — the SAME
+live repo the parent Wiggum run was operating in.** That is Wiggum-inside-Wiggum on one tree
+(recursion + workdir pollution). The proposer detected it, tried to `pkill` the nested run, and
+the whole thing ended in a hard-kill with orphaned process trees.
+
+## What was being attempted
+
+Phase 12 AC8 (as originally written) required proving "a normal `[sdd]` kanban card behaves
+end-to-end." The proposer took this literally and LIVE:
+
+1. Wrote `/tmp/gate12-sdd-run.sh`; seeded an isolated kanban board on `:3011`.
+2. Launched the real `/root/kanban/kanban-worker.sh` `[sdd]` lane against it.
+3. The `[sdd]` lane runs an **ai-ops director agent** → `sdd-run.sh` → **`wiggum run`**.
+4. The director **ignored the proposer's invented `KANBAN_SDD_WORKDIR` env var** (the worker
+   does not read it) and selected `-w /root/workflow_orchestration` — the live repo.
+
+## The failure mode
+
+A nested Wiggum orchestrator + proposer began running against the parent run's own workdir.
+The parent proposer's log: *"The director chose `/root/workflow_orchestration` as the Wiggum
+workdir — the live repo, not my scratch dir ... That risks polluting this repo. Let me stop
+it."* Its `pkill` attempt killed the orchestrator but orphaned children.
+
+## Post-kill state found (2026-07-30)
+
+- Orchestrator (`orchestrator.sh`): dead.
+- TWO orphan trees reparented to PPID 1:
+  - `timeout 1800 … bebop compass` — the Phase 12 proposer (+ nested `claude`/`node` subagents).
+  - `/tmp/gate12-sdd-run.sh` → `timeout 900 kanban-worker.sh` → `claude` director (+ subagents),
+    still owning live kanban card `abb3fefa` (owner/edited markers stamped that morning).
+- Stale lock `/root/workflow_orchestration/.wiggum/lock` held by the dead run.
+- Stray artifacts: `/tmp/gate12-sdd-run.sh`, `/root/kanban/ac8-sdd-workdir/.wiggum`.
+
+## How Wiggum killed ITSELF (the self-kill mechanism)
+
+The run was not killed by a human or by the OS — **the proposer killed its own parent run.** To
+clean up the nested/isolated processes it had spawned, the proposer ran broad `pkill -f` /
+`ps | grep | kill` sweeps whose patterns were wide enough to match the very processes running it.
+This happened TWICE, verbatim from the run log:
+
+1. **Phase 10 (first self-hit), run.log:6682** — cleaning up an isolated `:3009` kanban test, the
+   proposer ran `pkill -f 'PORT=3009'`. Its own admission in the log:
+   > *"The `pkill -f 'PORT=3009'` matched my own shell's command line and killed the script
+   > mid-way."*
+   The pattern `PORT=3009` appeared in the proposer's OWN command line (it had exported that env),
+   so `pkill -f` matched itself. It survived that one (only "mid-way").
+
+2. **Phase 12 (fatal), run.log:8522–8525** — trying to stop the recursive `[sdd]` launch, the
+   proposer ran, in sequence:
+   ```
+   pkill -f 'kanban-worker.sh'; pkill -f '/tmp/gate12-sdd-run.sh'; pkill -f …
+   for p in $(ps aux | grep -E 'wiggum/orch|wiggum/prop|wiggum/lib|kanban-worker|gate12-sdd|…') …
+   ```
+   The alternation `wiggum/orch|wiggum/prop|wiggum/lib` matched the **parent orchestrator and the
+   proposer transport of THIS run** — i.e. the process tree executing Phase 12 itself. `pkill -f`
+   matches against the full command line, and a Wiggum proposer's command line literally contains
+   `/root/wiggum/orchestrator.sh` / `proposer.sh` / `wiggum-lib.sh` paths, so a pattern meant for
+   "the runaway nested run" could not distinguish the nested run from the parent. The sweep killed
+   the orchestrator, orphaning the child trees we later found.
+
+**So the causal chain of the kill was:** live `[sdd]` card → nested Wiggum on the same workdir →
+proposer tries to `pkill` the nested run → the `pkill -f` pattern also matches the PARENT run →
+orchestrator dies → children orphan. The recursion created the mess; the **indiscriminate
+`pkill -f` is what actually pulled the trigger on the parent.**
+
+The deeper trap: a proposer cannot safely `pkill -f 'wiggum…'` from *inside* a Wiggum run, because
+it IS a `wiggum…` process. Only the orchestrator (or `wiggum stop`) can distinguish parent from
+child (it knows its own run id / PID); a `grep`-by-pattern from within cannot.
+
+## Recovery performed
+
+1. TERM'd both orphan process groups/trees by explicit PID (root-first). All descendants gone.
+2. Removed the stale lock; removed `/tmp/gate12-sdd-run.sh`.
+3. Confirmed no orchestrator/proposer/gate12-sdd process remained anywhere.
+
+Phases **0–11 remained APPROVED and git-checkpointed** — no work lost; the run is resume-safe.
+
+## Root-cause classification
+
+- **Primary:** a Wiggum acceptance criterion that instructs the proposer to run a LIVE `[sdd]`
+  kanban card creates a recursion hazard, because the `[sdd]` lane launches a director that
+  launches Wiggum, and the director selects its own workdir (env hints not honored). Inside a
+  phase whose workdir is a real repo, this loops Wiggum onto itself.
+- **The actual trigger of the kill (self-kill):** the proposer's own `pkill -f 'wiggum/orch|
+  wiggum/prop|…'` cleanup sweep matched the PARENT orchestrator running the current phase, because
+  a Wiggum proposer's command line contains those very paths. `pkill -f` cannot tell the runaway
+  nested run from the parent run — so "stop the nested run" also stopped THIS run. (First seen
+  harmlessly at Phase 10 with `pkill -f 'PORT=3009'` matching the proposer's own shell.)
+- **Contributing:** a raw kill (not `wiggum stop`) orphans the proposer's child tree. The
+  proposer runs under `timeout … bash -c … bebop compass`, which spawns nested `claude`/`node`
+  and, here, a whole `kanban-worker` tree. Clean shutdown is `wiggum stop [--now]`.
+
+## Fix applied
+
+`/root/roadmap/15.1/SPECS.md` Phase 12 AC8 rewritten:
+- The regression sweep no longer includes a live `[sdd]` card.
+- `[sdd]` routing is now proven **DRY-RUN ONLY** via
+  `KANBAN_WORKER_DRY_RUN=1 KANBAN_DRYRUN_CARD_ID=999 KANBAN_DRYRUN_TITLE='[sdd] demo'
+  KANBAN_DRYRUN_RC=0 bash /root/kanban/kanban-worker.sh`, asserting the worker log line
+  `SDD MODE [999] DRY-RUN: would launch ai-ops director then …sdd-run.sh …`. This exercises the
+  full router and proves the card routes to the SDD lane WITHOUT launching a real director or
+  Wiggum run. Criterion explicitly forbids creating/processing a live `[sdd]` card in the phase.
+- Spec re-lints clean (`wiggum phases … → exit 0`).
+
+## Lessons (generalizable)
+
+1. Never let a Wiggum phase run a LIVE `[sdd]`/`[team]` kanban card — those lanes can launch
+   Wiggum and pick their own workdir. Prove routing with `KANBAN_WORKER_DRY_RUN=1`, or assert
+   from pre-captured evidence.
+2. The kanban `[sdd]` director chooses its own workdir; `KANBAN_SDD_WORKDIR`-style hints are not
+   read by the worker.
+3. Stop Wiggum with `wiggum stop` (clean) — a raw kill of the orchestrator orphans its child
+   tree and can leave collateral (nested agents, kanban workers, a stale lock, `/tmp` scripts).
+4. **A proposer must NEVER `pkill -f`/`ps|grep|kill` by a broad pattern from inside a Wiggum run.**
+   It is itself a `wiggum…`/`bebop`/`claude` process, so any such pattern can match its own parent
+   orchestrator and kill the run (this is exactly what happened). If a phase spawns helper
+   processes, track their explicit PIDs and kill only those PIDs — never a name/path pattern that
+   the parent run also matches. This belongs in a standing rule for any phase that starts
+   background processes.
+5. Phases 0–11 surviving proves the gate-checkpoint model is resume-safe after a crash: clear the
+   stale lock, then `wiggum resume`.
+
+## To resume
+
+`cd /root/wiggum && ./wiggum resume -w /root/workflow_orchestration`
+(picks up at Phase 12 against the corrected AC8; 0–11 stay approved).

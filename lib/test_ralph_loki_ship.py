@@ -87,6 +87,27 @@ def test_flush_noop_when_empty():
         assert srv.requests == []
 
 
+def test_flush_chunks_large_batches_and_preserves_order():
+    old_limit = ship.MAX_BATCH_BYTES
+    ship.MAX_BATCH_BYTES = 500
+    try:
+        with CaptureServer() as srv:
+            lk = ship.Loki(srv.url, {"job": "ralph", "task": "demo"})
+            for i in range(20):
+                lk.add("agent_text", "sequence=%d text=%s" % (i, "x" * 80))
+            rec = lk.flush()
+            pushes = [r.json for r in srv.requests]
+        assert len(pushes) > 1
+        values = [value for payload in pushes for stream in payload["streams"]
+                  for value in stream["values"]]
+        assert [int(value[1].split()[0].split("=")[1]) for value in values] == list(range(20))
+        assert all(len(json.dumps(payload).encode("utf-8")) <= ship.MAX_BATCH_BYTES
+                   for payload in pushes)
+        assert rec["event_count"] == 20 and rec["status"] == "accepted"
+    finally:
+        ship.MAX_BATCH_BYTES = old_limit
+
+
 # ── stream mode (canned claude stream-json) ─────────────────────────────────
 STREAM_FIXTURE = [
     {"type": "system", "subtype": "init", "model": "claude-opus-4", "tools": ["Read", "Bash"]},

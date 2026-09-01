@@ -29,6 +29,7 @@ import sys, os, json, time, argparse, urllib.request, urllib.error
 
 # ---- knobs (env-overridable) ---------------------------------------------
 CONNECT_TIMEOUT = float(os.environ.get("RALPH_LOKI_TIMEOUT", "2.5"))
+MAX_BATCH_BYTES = int(os.environ.get("RALPH_LOKI_MAX_BATCH_BYTES", str(3 * 1024 * 1024)))
 RESULT_PREVIEW  = 300   # chars of the model's final text kept on the api_request event
 
 # Bounded correlation values safe to promote to indexed Loki labels. Everything
@@ -101,48 +102,79 @@ class Loki:
                 labels[k] = str(v)
         self.add(event, logfmt(fields), labels=labels or None)
 
-    def flush(self):
-        """Push all buffered streams. Returns a delivery record dict describing
-        the batch outcome (sink/batch_id/event_count/status/http_status/
-        reason_code) so callers can persist local telemetry_delivery evidence,
-        or None when there was nothing to send. Never raises (best-effort)."""
-        if not self.streams:
-            return None
-        event_count = self._event_count
-        self._batch_seq += 1
-        batch_id = "loki-%d-%d" % (time.time_ns(), self._batch_seq)
-        payload = {"streams": [
-            {"stream": lbl, "values": vals} for lbl, vals in self.streams.values()
-        ]}
+    def _payloads(self):
+        """Yield ordered push payloads bounded below the receiver request limit."""
+        streams = []
+        size = len(b'{"streams":[]}')
+        for lbl, vals in self.streams.values():
+            current = []
+            for value in vals:
+                candidate = {"stream": lbl, "values": current + [value]}
+                encoded = json.dumps(candidate).encode("utf-8")
+                separator = 1 if streams else 0
+                if current and size + separator + len(encoded) > MAX_BATCH_BYTES:
+                    streams.append({"stream": lbl, "values": current})
+                    yield {"streams": streams}
+                    streams = []
+                    size = len(b'{"streams":[]}')
+                    current = []
+                    candidate = {"stream": lbl, "values": [value]}
+                    encoded = json.dumps(candidate).encode("utf-8")
+                current.append(value)
+            if current:
+                entry = {"stream": lbl, "values": current}
+                encoded = json.dumps(entry).encode("utf-8")
+                separator = 1 if streams else 0
+                if streams and size + separator + len(encoded) > MAX_BATCH_BYTES:
+                    yield {"streams": streams}
+                    streams = []
+                    size = len(b'{"streams":[]}')
+                streams.append(entry)
+                size += (1 if len(streams) > 1 else 0) + len(encoded)
+        if streams:
+            yield {"streams": streams}
+
+    def _post(self, payload):
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.push_url, data=data,
             headers={"Content-Type": "application/json"}, method="POST")
-        rec = {"sink": "loki", "batch_id": batch_id, "event_count": event_count,
-               "status": "accepted", "http_status": None, "reason_code": None}
         try:
             with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
-                rec["http_status"] = resp.status
                 if resp.status in (200, 204):
-                    rec["status"] = "accepted"
-                else:
-                    rec["status"] = "failed"
-                    rec["reason_code"] = "http_%s" % resp.status
-                    warn("Loki push HTTP %s" % resp.status)
+                    return resp.status, None
+                warn("Loki push HTTP %s" % resp.status)
+                return resp.status, "http_%s" % resp.status
         except urllib.error.HTTPError as e:
             body = ""
             try:
                 body = e.read().decode("utf-8", "replace")[:200]
             except Exception:
                 pass
-            rec["status"] = "failed"
-            rec["http_status"] = e.code
-            rec["reason_code"] = "http_%s" % e.code
             warn("Loki push failed HTTP %s %s" % (e.code, body))
+            return e.code, "http_%s" % e.code
         except Exception as e:  # noqa: BLE001 — best-effort, never propagate
-            rec["status"] = "failed"
-            rec["reason_code"] = "transport_error"
             warn("Loki push error: %s" % e)
+            return None, "transport_error"
+
+    def flush(self):
+        """Push all buffered streams. Returns one aggregate delivery record."""
+        if not self.streams:
+            return None
+        event_count = self._event_count
+        self._batch_seq += 1
+        batch_id = "loki-%d-%d" % (time.time_ns(), self._batch_seq)
+        rec = {"sink": "loki", "batch_id": batch_id, "event_count": event_count,
+               "status": "accepted", "http_status": None, "reason_code": None}
+        try:
+            for payload in self._payloads():
+                status, reason = self._post(payload)
+                if rec["http_status"] is None:
+                    rec["http_status"] = status
+                if reason and rec["status"] != "failed":
+                    rec["status"] = "failed"
+                    rec["http_status"] = status
+                    rec["reason_code"] = reason
         finally:
             self.streams = {}
             self._event_count = 0

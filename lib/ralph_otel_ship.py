@@ -37,6 +37,7 @@ import sys, os, json, time, argparse, urllib.request, urllib.error
 
 # ---- knobs (env-overridable) ---------------------------------------------
 CONNECT_TIMEOUT = float(os.environ.get("RALPH_OTEL_TIMEOUT", "2.5"))
+MAX_BATCH_BYTES = int(os.environ.get("RALPH_OTEL_MAX_BATCH_BYTES", str(3 * 1024 * 1024)))
 RESULT_PREVIEW  = 300
 SCOPE_NAME      = "wiggum.ralph"
 # DELTA temporality: each shipper invocation reports its own delta slice.
@@ -200,22 +201,36 @@ class Otel:
     def _resource_block(self):
         return {"attributes": _attrs_kv(self.resource)}
 
-    def _logs_payload(self):
+    def _log_record(self, item, observed):
+        ts, body, rec = item
+        return {
+            "timeUnixNano": ts,
+            "observedTimeUnixNano": observed,
+            "severityNumber": 9,
+            "severityText": "INFO",
+            "body": {"stringValue": body},
+            "attributes": _attrs_kv(rec),
+        }
+
+    def _logs_payload(self, logs=None):
         now = str(time.time_ns())
-        records = []
-        for ts, body, rec in self._logs:
-            records.append({
-                "timeUnixNano": ts,
-                "observedTimeUnixNano": now,
-                "severityNumber": 9,          # INFO
-                "severityText": "INFO",
-                "body": {"stringValue": body},
-                "attributes": _attrs_kv(rec),
-            })
+        records = [self._log_record(item, now) for item in (self._logs if logs is None else logs)]
         return {"resourceLogs": [{
             "resource": self._resource_block(),
             "scopeLogs": [{"scope": {"name": SCOPE_NAME}, "logRecords": records}],
         }]}
+
+    def _log_payloads(self):
+        """Yield ordered OTLP log payloads bounded below receiver request limits."""
+        chunk = []
+        for item in self._logs:
+            candidate = chunk + [item]
+            if chunk and len(json.dumps(self._logs_payload(candidate)).encode("utf-8")) > MAX_BATCH_BYTES:
+                yield self._logs_payload(chunk)
+                chunk = []
+            chunk.append(item)
+        if chunk:
+            yield self._logs_payload(chunk)
 
     def _metrics_payload(self):
         now = str(time.time_ns())
@@ -293,11 +308,14 @@ class Otel:
                "status": "accepted", "http_status": None, "reason_code": None}
         try:
             if self._logs:
-                status, reason = self._post(self.logs_url, self._logs_payload())
-                rec["http_status"] = status
-                if reason:
-                    rec["status"] = "failed"
-                    rec["reason_code"] = reason
+                for payload in self._log_payloads():
+                    status, reason = self._post(self.logs_url, payload)
+                    if rec["http_status"] is None:
+                        rec["http_status"] = status
+                    if reason and rec["status"] != "failed":
+                        rec["status"] = "failed"
+                        rec["http_status"] = status
+                        rec["reason_code"] = reason
             if self._sums or self._hists:
                 status, reason = self._post(self.metrics_url, self._metrics_payload())
                 if rec["http_status"] is None:

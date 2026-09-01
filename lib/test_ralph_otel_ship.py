@@ -205,6 +205,28 @@ def test_flush_clears_buffers():
         assert len(srv.requests) == n
 
 
+def test_flush_chunks_large_log_batches_and_preserves_order():
+    old_limit = otelship.MAX_BATCH_BYTES
+    otelship.MAX_BATCH_BYTES = 1200
+    try:
+        with CaptureServer() as srv:
+            otel = _new(srv.url)
+            for i in range(20):
+                fields = {"sequence": i, "text": "x" * 80}
+                otel.add("agent_text", otelship.logfmt(fields), fields=fields)
+            rec = otel.flush()
+            requests = [r for r in srv.requests if r.path == "/v1/logs"]
+            pushes = [r.json for r in requests]
+        assert len(pushes) > 1
+        records = [record for payload in pushes for record in _log_records(payload)[1]]
+        assert [_attr_map(record["attributes"])["sequence"] for record in records] == list(range(20))
+        assert all(len(json.dumps(payload).encode("utf-8")) <= otelship.MAX_BATCH_BYTES
+                   for payload in pushes)
+        assert rec["event_count"] == 20 and rec["status"] == "accepted"
+    finally:
+        otelship.MAX_BATCH_BYTES = old_limit
+
+
 # ── best-effort contract ─────────────────────────────────────────────────────
 def test_flush_swallows_connection_refused():
     otel = otelship.Otel("http://127.0.0.1:1", {"service.name": "ralph"})
