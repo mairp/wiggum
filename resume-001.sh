@@ -35,6 +35,11 @@ cd "$W"
 # --proposer-timeout 7200: real passes exceed the 3600 default (002 pass 1 proved it).
 # --critic-timeout   1800: the 300 default CANNOT read a ~200KB prompt — it returns
 #                    verdict MALFORMED, which reads as a bad response but is a TIMEOUT.
+# BACKEND: switched 2026-09-02 from dsh:qwen3.8-27b to Compass PROD gpt-5. The local
+#          qwen carried 001 to nine watchdog kills and zero evidence in a day; gpt-5
+#          took 002 through all 11 gates in an afternoon, with verdicts in 60-90s
+#          instead of 800-1500s. The 3090 is also wedged (Xid 79, needs a host reboot),
+#          so the local route is unavailable regardless.
 # AINETOPS_WAIVE_L2VNI_ADOPTION=1: operator decision D-A3. leaf01's vlanmgrd crashes
 #                    (ASan DEADLYSIGNAL) so the overlay cannot forward on this image.
 #                    Lets provisioning continue; fabric_verify still FAILS CLOSED, so
@@ -48,7 +53,7 @@ export AINETOPS_WAIVE_L2VNI_ADOPTION=1
 setsid nohup /root/wiggum/orchestrator.sh \
   -w "$W" \
   -s "$W/specs/001-ainetops-sonic-evpn-fabric/tasks.md" \
-  --proposer dsh:qwen3.8-27b --critic dsh:qwen3.8-27b \
+  --proposer dsh:compass-gpt5-high/gpt-5 --critic dsh:compass-gpt5-high/gpt-5 \
   --max-rejects 30 --max-iter 30 \
   --feature 001-ainetops-sonic-evpn-fabric \
   --spec-format speckit-tasks \

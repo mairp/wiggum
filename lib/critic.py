@@ -1859,6 +1859,28 @@ def main():
             paths = list(paths) + spec_dirs
             spec_named |= set(spec_dirs)
         priority = [p for p in paths if p in spec_named]
+        # W19: honour the fallback the W1 comment above promises but never implemented.
+        # It was harmless until W18: `spec_named` used to be extracted from the WHOLE
+        # section, whose inherited-obligations block always carried backticked paths, so
+        # priority was never empty and the missing branch never showed. W18 correctly
+        # narrowed extraction to the phase's own text -- and a phase whose criteria are
+        # PROSE then names no path at all, collapsing priority to nothing.
+        #
+        # Empty priority does not merely lose ordering; it silently disables the two
+        # mechanisms that make evidence verifiable: W15 whole-file emission is gated on
+        # is_priority, and W17b halves the budget to GROUNDING_TOTAL_CAP // 2. Measured
+        # on ainetops-demo phase 8 (T079/T080, pure prose): 79 evidence-cited paths, 0
+        # priority, 163,840-byte budget, whole-file emission off for every file. The
+        # critic then answered NEEDS-GROUNDING for 15 artifacts that were all present on
+        # disk -- provision-1/2/3.log, off-1/2/3.log, tests.integration/failure/traffic/
+        # srv6-capture/srv6-failover.log -- and REJECTED a phase whose evidence was there.
+        #
+        # When the criteria name no file, the paths the verdict turns on are exactly the
+        # ones the EVIDENCE cites: that is the proposer asserting "here is my proof".
+        # Elevating them is bounded -- W17 still degrades whole -> anchored -> head/tail
+        # at GROUNDING_TOTAL_CAP, and GROUNDING_MAX_FILES still caps presence lines.
+        if not priority:
+            priority = list(ev_paths)
         # W2: symbols the criteria name — greppable anchors for the priority files.
         anchors = extract_anchor_tokens(ground_sec)
         # W10/W11: workspace members (for package-relative resolution), the member the

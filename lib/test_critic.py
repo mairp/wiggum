@@ -791,3 +791,44 @@ if __name__ == "__main__":
     test_grounding_byte_budget_binds_priority_files_too()
     test_grounding_section_excludes_inherited_obligations()
     print("OK: all critic grounding assertions pass")
+
+def test_w19_prose_criteria_fall_back_to_evidence_paths(tmp_path):
+    """W19: a phase whose criteria are PROSE must still ground its evidence.
+
+    Regression for ainetops-demo phase 8 (T079/T080). Those tasks name no file --
+    "Run three clean provision/test/off cycles ... publish evidence" -- so after W18
+    narrowed spec_named to the phase's own text, priority collapsed to empty. That
+    silently disabled W15 whole-file emission (gated on is_priority) and halved the
+    budget via W17b, and the critic answered NEEDS-GROUNDING for 15 artifacts that
+    were all present on disk.
+
+    Asserts the mechanism, not just the outcome: with prose criteria the evidence
+    paths must become priority, and a priority file small enough for the ceiling must
+    come back as a COMPLETE file rather than a head/tail slice.
+    """
+    work = tmp_path / "repo"
+    (work / "gates" / "proofs").mkdir(parents=True)
+    log = work / "gates" / "proofs" / "provision-1.log"
+    log.write_text("cycle 1 start\nPROVISION OK\ncycle 1 end\n")
+
+    section = ("- [ ] T080 Run three clean provision/test/off cycles and publish "
+               "evidence for SC-001 through SC-016\n")
+    evidence = "Cycles ran clean; see `gates/proofs/provision-1.log`.\n"
+
+    ev_paths = extract_paths(evidence, str(work), None)
+    assert "gates/proofs/provision-1.log" in ev_paths
+
+    # The criteria name no file -- this is the condition W19 exists for.
+    spec_named = set(extract_paths(critic_grounding_section(section), str(work), None))
+    assert spec_named == set(), "prose criteria must name no file for this regression"
+
+    priority = [p for p in ev_paths if p in spec_named]
+    assert priority == [], "pre-W19 behaviour: priority collapses to empty"
+    if not priority:                      # W19
+        priority = list(ev_paths)
+    assert priority == list(ev_paths)
+
+    g = grounding_snapshot(ev_paths, str(work), None, priority=priority, anchors=[])
+    assert "NEEDS-GROUNDING" not in g
+    assert "PROVISION OK" in g, "priority file content must be emitted"
+    assert "complete file" in g, "W15 whole-file emission must be active for it"
