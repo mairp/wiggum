@@ -20,7 +20,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from critic import (extract_paths, grounding_gap, harness_probes,  # noqa: E402
+from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args,  # noqa: E402
+                    extract_paths, grounding_gap, harness_probes,
                     grounding_search_dirs, grounding_snapshot, _resolve_cited,
                     extract_anchor_tokens, anchored_excerpt,
                     _workspace_members, _declared_build_exports, _member_hint,
@@ -532,6 +533,49 @@ def test_prompt_includes_grounding_snapshot():
     assert nonce in prompt
 
 
+
+def test_dsh_task_args_never_starts_a_chunk_with_dash():
+    """A chunk beginning with "-" is parsed as a CLI option by the profile app.
+
+    The launcher emits "--" before the task, but that stops only the OUTER parser:
+    DSH forwards the remaining argv to the booted profile's app, which parses it
+    again. Observed 2026-09-02 on ainetops-002 phase 3 — evidence quoting an
+    openssl command put "-out /tmp/tls.crt" at a chunk boundary and the critic
+    died with: error: unknown option '-out ...' -> verdict MALFORMED.
+
+    Splitting must (a) reconstruct the prompt byte-for-byte when rejoined with a
+    single space, (b) never start a non-first chunk with "-", and (c) never emit a
+    chunk over the argv cap. An earlier fix satisfied (b) but silently broke (a)
+    and (c); these cases only bite ABOVE the cap, so they must be tested there.
+    """
+    cap = _DSH_TASK_ARG_MAX_BYTES
+    tok = "w" * 9                      # 9 bytes + 1 space = 10 per token
+    head = " ".join([tok] * (cap // 10))
+    big = " ".join([tok] * (cap // 10 * 2))
+
+    cases = [
+        head + " -out /tmp/tls.crt -days 365 tail1 tail2",
+        head + " -a -b -c -d -out /tmp/x end",
+        big + " openssl req -x509 -newkey rsa:4096 -keyout /tmp/k.pem -out /tmp/tls.crt -days 365 " + big,
+        big,
+        "You are the CRITIC. Judge -out fairly.",
+        "-out only at the very start here",
+        " ".join([tok] * (cap // 10)),
+    ]
+    for prompt in cases:
+        args = _dsh_task_args(prompt)
+        assert " ".join(args) == prompt, "prompt not reconstructed byte-for-byte"
+        assert not any(a.startswith("-") for a in args[1:]), "a chunk begins with '-'"
+        assert all(len(a.encode("utf-8")) <= cap for a in args), "chunk exceeds argv cap"
+
+    oversized = "x" * (cap + 10)
+    try:
+        _dsh_task_args(oversized)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("an oversized single token must still raise")
+
 def test_verdict_input_excludes_thinking_and_tool_content():
     """The verdict input is assembled ONLY from the declared sections (spec,
     evidence, grounding, optional design context). build_prompt has no channel for
@@ -585,4 +629,5 @@ if __name__ == "__main__":
     test_verdict_missing_and_duplicate_fail_safe()
     test_prompt_includes_grounding_snapshot()
     test_verdict_input_excludes_thinking_and_tool_content()
+    test_dsh_task_args_never_starts_a_chunk_with_dash()
     print("OK: all critic grounding assertions pass")

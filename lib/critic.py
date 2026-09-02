@@ -42,7 +42,7 @@ GROUNDING_MAX_FILES   = 80         # hard cap on PRESENCE LINES (one per cited p
 GROUNDING_HEAD_BYTES  = 4000       # was 1500 — a source file's public surface (imports,
                                    # exported signatures) rarely fits in 1500 bytes.
 GROUNDING_TAIL_BYTES  = 1000       # was 500.
-GROUNDING_TOTAL_CAP   = 131072    # hard cap on EXCERPT bytes appended (fenced blocks
+GROUNDING_TOTAL_CAP   = 196608    # hard cap on EXCERPT bytes appended (fenced blocks
                                    # only — never suppresses a presence line, only its
                                    # content excerpt). Was 32000, which starved the
                                    # snapshot on any phase citing ~20 source files and
@@ -54,7 +54,7 @@ GROUNDING_TOTAL_CAP   = 131072    # hard cap on EXCERPT bytes appended (fenced b
 ANCHOR_CONTEXT_LINES  = 15         # ±N lines quoted around each criterion-symbol match
                                    # in a criterion-named file (W2 anchored excerpts).
 ANCHOR_MAX_BYTES      = 6000       # per-file FLOOR for an anchored excerpt (small files).
-ANCHOR_MAX_BYTES_CEIL = 24000      # per-file CEILING (W14): a large criterion-named file
+ANCHOR_MAX_BYTES_CEIL = 49152      # per-file CEILING (W14): a large criterion-named file
                                    # scales its anchor budget with its own size so a symbol
                                    # implemented LATE (past where dense common-word anchor
                                    # matches near the top would exhaust a fixed 6 KB budget)
@@ -1193,22 +1193,43 @@ def _dsh_task_args(prompt):
     keeping every argument below Linux's 128 KiB ``MAX_ARG_STRLEN`` ceiling.
     """
     tokens = prompt.split(" ")
-    args = []
-    current = tokens[0]
-    if len(current.encode("utf-8")) > _DSH_TASK_ARG_MAX_BYTES:
-        raise RuntimeError("DeepSeek Harness critic prompt contains a task token over %d bytes" %
-                           _DSH_TASK_ARG_MAX_BYTES)
-    for token in tokens[1:]:
+    for token in tokens:
         if len(token.encode("utf-8")) > _DSH_TASK_ARG_MAX_BYTES:
             raise RuntimeError("DeepSeek Harness critic prompt contains a task token over %d bytes" %
                                _DSH_TASK_ARG_MAX_BYTES)
-        candidate = current + " " + token
-        if len(candidate.encode("utf-8")) <= _DSH_TASK_ARG_MAX_BYTES:
-            current = candidate
-        else:
-            args.append(current)
-            current = token
-    args.append(current)
+
+    args = []
+    i = 0
+    total = len(tokens)
+    while i < total:
+        # Greedily fill one chunk starting at token i.
+        size = len(tokens[i].encode("utf-8"))
+        j = i + 1
+        while j < total:
+            addition = 1 + len(tokens[j].encode("utf-8"))
+            if size + addition > _DSH_TASK_ARG_MAX_BYTES:
+                break
+            size += addition
+            j += 1
+        # A chunk must never BEGIN with "-". The launcher passes "--" before the task,
+        # but that stops only the OUTER parser: DSH forwards the remaining argv to the
+        # booted profile's app, which parses it again, so a chunk starting with e.g.
+        # "-out" (openssl invocations are common in evidence) fails the whole critic
+        # call with: error: unknown option '-out ...' -> verdict MALFORMED.
+        # Retreat the split so the dash token is not first in the next chunk. Chunks
+        # only ever get SMALLER here, so the size cap still holds, and DSH rejoins argv
+        # with a single space, so the prompt is reconstructed byte-for-byte.
+        if j < total and tokens[j].startswith("-"):
+            back = j - 1
+            while back > i and tokens[back].startswith("-"):
+                back -= 1
+            if back > i:
+                j = back
+            # back == i means this chunk is a single token followed only by dash
+            # tokens; nothing can be retreated without emitting an empty chunk, so the
+            # split stands. Needs >120 KB of consecutive dash-leading tokens to occur.
+        args.append(" ".join(tokens[i:j]))
+        i = j
     return args
 
 
