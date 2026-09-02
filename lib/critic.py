@@ -215,14 +215,29 @@ def grounding_search_dirs(gates_rel, workdir=None):
     rejects a genuinely-satisfied criterion forever. Read-only listdir, best-effort."""
     dirs = ["", os.path.join(gates_rel, "proofs"), gates_rel, "out"]
     if workdir:
-        gates_abs = os.path.join(workdir, gates_rel)
-        try:
-            for name in sorted(os.listdir(gates_abs)):
-                sub = os.path.join(gates_rel, name)
-                if sub not in dirs and os.path.isdir(os.path.join(workdir, sub)):
-                    dirs.append(sub)
-        except OSError:
-            pass
+        # W20: one level under gates/ (the original rule) AND one level under
+        # gates/proofs/. Proof runners group their output in a per-concern subdir --
+        # cycles_runner.sh writes every provision/off/test log to gates/proofs/cycles/
+        # -- and the evidence then cites it the natural way, `gates/proofs/cycles/
+        # provision-1.log`. That resolved against nothing: "" gives <repo>/gates/...,
+        # and neither gates_rel nor gates_rel/proofs absorbs the extra `cycles`
+        # component. A citation one directory deeper than the flat proofs/ layout was
+        # therefore MISSING no matter how correct the file was.
+        #
+        # Measured on ainetops-demo phase 8, 2026-09-03: `gates/proofs/
+        # tests.integration.log` resolved but `gates/proofs/cycles/provision-1.log`
+        # did not, and the critic answered NEEDS-GROUNDING for 37 cycle artifacts that
+        # were all present -- all 50 files of gates/proofs/cycles/ were on disk. This
+        # is the same class of defect the gates-subdir rule above already fixes; it
+        # just never covered the proofs dir, where runners actually stage output.
+        for base in (gates_rel, os.path.join(gates_rel, "proofs")):
+            try:
+                for name in sorted(os.listdir(os.path.join(workdir, base))):
+                    sub = os.path.join(base, name)
+                    if sub not in dirs and os.path.isdir(os.path.join(workdir, sub)):
+                        dirs.append(sub)
+            except OSError:
+                pass
     return tuple(dirs)
 
 

@@ -832,3 +832,48 @@ def test_w19_prose_criteria_fall_back_to_evidence_paths(tmp_path):
     assert "NEEDS-GROUNDING" not in g
     assert "PROVISION OK" in g, "priority file content must be emitted"
     assert "complete file" in g, "W15 whole-file emission must be active for it"
+
+def test_w20_search_dirs_cover_proof_subdirs(tmp_path):
+    """W20: a proof staged one level under proofs/ must resolve.
+
+    Regression for ainetops-demo phase 8. cycles_runner.sh writes every
+    provision/off/test log to gates/proofs/cycles/, and the evidence cites them the
+    natural way -- `gates/proofs/cycles/provision-1.log`. Before W20 that resolved
+    against nothing: "" gives <repo>/gates/..., and neither gates_rel nor
+    gates_rel/proofs absorbs the extra `cycles` component. The critic answered
+    NEEDS-GROUNDING for 37 cycle artifacts while all 50 files were on disk.
+
+    Pins the asymmetry that made it confusing to diagnose: a FLAT proofs citation
+    already worked, so the layout looked fine until a nested one was tried.
+    """
+    work = tmp_path / "repo"
+    gates_rel = os.path.join(".wiggum", "features", "001-demo", "gates")
+    proofs = work / gates_rel / "proofs"
+    (proofs / "cycles").mkdir(parents=True)
+    (proofs / "tests.integration.log").write_text("flat proof\n")
+    (proofs / "cycles" / "provision-1.log").write_text("PROVISION OK\n")
+
+    sd = grounding_search_dirs(gates_rel, str(work))
+    assert os.path.join(gates_rel, "proofs", "cycles") in sd
+
+    members = _workspace_members(str(work))
+    flat = _resolve_cited("gates/proofs/tests.integration.log", str(work), sd, members=members)
+    nested = _resolve_cited("gates/proofs/cycles/provision-1.log", str(work), sd, members=members)
+    assert flat, "a flat proofs citation resolved before W20 and must keep resolving"
+    assert nested, "a citation one level under proofs/ must resolve (W20)"
+
+    # And it must actually reach the critic as content, not just resolve.
+    g = grounding_snapshot(["gates/proofs/cycles/provision-1.log"], str(work), sd,
+                           priority=["gates/proofs/cycles/provision-1.log"], anchors=[],
+                           members=members)
+    assert "MISSING" not in g
+    assert "PROVISION OK" in g
+
+
+def test_w20_search_dirs_survive_a_missing_proofs_dir(tmp_path):
+    """W20 must not break a feature that has no gates/proofs/ at all."""
+    work = tmp_path / "repo"
+    gates_rel = os.path.join(".wiggum", "features", "001-demo", "gates")
+    (work / gates_rel).mkdir(parents=True)
+    sd = grounding_search_dirs(gates_rel, str(work))
+    assert sd[0] == "" and gates_rel in sd
