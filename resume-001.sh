@@ -49,6 +49,16 @@ export WIGGUM_PROPOSER_PROGRESS_TIMEOUT=3600
 export WIGGUM_PROPOSER_IDLE_TIMEOUT=1800
 export WIGGUM_PROPOSER_REPEAT_LIMIT=5
 export AINETOPS_WAIVE_L2VNI_ADOPTION=1
+# AINETOPS_WAIVE_TYPE5_ORIGINATION=1: operator decision D-A2, same shape as D-A3
+# above. fabric_verify.sh asserts an EVPN Type-5 route in the RIB and fails closed
+# when it is absent -- but the pinned sonic-vs FRR 10.5.4 build never originates
+# Type-5 in any state tried, so that assertion cannot pass on this image. Left
+# unwaived, fabric_verify.sh can never exit 0, every cycle is recorded as failed,
+# and T080 ("three clean provision/test/off cycles") is structurally unreachable
+# rather than merely unmet -- the loop would burn all 30 rejects on a defect no
+# amount of proposing can fix. The waiver logs WAIVED loudly per leaf and states
+# that Type-5/L3 routing is NOT verified by the run.
+export AINETOPS_WAIVE_TYPE5_ORIGINATION=1
 
 setsid nohup /root/wiggum/orchestrator.sh \
   -w "$W" \
