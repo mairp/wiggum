@@ -64,7 +64,9 @@ _GROUNDING_SKIP_DIRS = frozenset((
     "node_modules", "dist", "build", ".git", "__pycache__", ".venv", ".next",
     "coverage", ".pytest_cache", ".ruff_cache",
 ))                                 # build/vendor noise, never criterion evidence
-_GROUNDING_DIR_EXPAND_MAX = 40     # files pulled in from any one criterion-named dir
+_GROUNDING_DIR_EXPAND_MAX = 40     # a dir with MORE files than this is too broad to
+                                   # be evidence (a package root) — skip it entirely
+_GROUNDING_DIR_EXPAND_TOTAL = 45   # global cap across ALL expanded dirs
 ANCHOR_MAX_BYTES_CEIL = 49152      # per-file CEILING (W14): a large criterion-named file
                                    # scales its anchor budget with its own size so a symbol
                                    # implemented LATE (past where dense common-word anchor
@@ -799,6 +801,37 @@ def extract_dirs(text, workdir, search_dirs=None):
                 break
     return out
 
+
+_INHERITED_MARKER = "### Inherited obligations from earlier approved phases"
+_INHERITED_END = "Create or update automated tests for these obligations"
+
+
+def grounding_section(section):
+    """The part of a phase section whose file citations should be GROUNDED (W18).
+
+    render_phase_context() appends the cumulative gate's INHERITED obligations —
+    earlier phases' items as compact one-liners, explicitly labelled "regression
+    context ... already gated, not new work". Their titles carry backticked paths, so
+    extract_paths/extract_dirs grounded the ENTIRE feature: on ainetops-002 phase 6 the
+    section yielded 90 paths and 29 directories for a gate judging 13 criteria, and the
+    files those criteria actually name lost the budget competition. The unmet set then
+    oscillated attempt to attempt (23,24,23,17,16,17,12,8,12) — the documented
+    "evidence lottery", which burns MAX_REJECTS on work that is correct on disk.
+
+    The inherited block STAYS in the prompt (the critic must still see the regression
+    context); it just stops consuming the grounding budget. Measured on that section:
+    49,307 -> 11,098 bytes, 90 -> 6 paths, 29 -> 5 directories.
+    """
+    if not section:
+        return section
+    start = section.find(_INHERITED_MARKER)
+    if start < 0:
+        return section
+    end = section.find(_INHERITED_END, start)
+    if end < 0:
+        return section[:start]
+    return section[:start] + section[end:]
+
 def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=None,
                        members=None, hint=None, export_targets=None):
     # `priority` = paths the criteria NAME (W1): they are ordered first AND their content
@@ -828,23 +861,44 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
     # per-file ceiling and the byte budget still bound the result.
     if priority:
         expanded, extra_priority = [], set()
+        # W16b: expansion must be bounded GLOBALLY and must skip over-broad
+        # directories. The section the critic receives is not the phase slice — it
+        # carries the verification-plan obligations, so on ainetops-002 phase 6 it
+        # named 29 directories including `agents/` (a whole Python package). Expanding
+        # each up to _GROUNDING_DIR_EXPAND_MAX produced ~1,160 candidates competing for
+        # GROUNDING_MAX_FILES (80) presence slots, and crowded out the very ui/ files
+        # the criteria asked about — the opposite of what W16 exists to do. Small,
+        # specific directories are evidence; a package root is not.
+        dir_candidates = []
         for p in list(paths):
             if p not in priority:
                 continue
             full_dir = _resolve_cited(p, workdir, search_dirs, members=members)
             if not (full_dir and os.path.isdir(full_dir)):
                 continue
+            files = []
             for root, dnames, fnames in os.walk(full_dir):
                 dnames[:] = [d for d in dnames if d not in _GROUNDING_SKIP_DIRS]
                 for fn in sorted(fnames):
                     if fn.endswith(("-lock.json", ".lock")):
                         continue
                     rel = os.path.relpath(os.path.join(root, fn), workdir)
-                    if rel not in paths and rel not in extra_priority:
-                        expanded.append(rel)
-                        extra_priority.add(rel)
-                if len(expanded) >= _GROUNDING_DIR_EXPAND_MAX:
+                    if rel not in paths:
+                        files.append(rel)
+                if len(files) > _GROUNDING_DIR_EXPAND_MAX:
                     break
+            if files and len(files) <= _GROUNDING_DIR_EXPAND_MAX:
+                dir_candidates.append((len(files), p, files))
+        # Smallest (most specific) directories first, then a global budget.
+        for _, _p, files in sorted(dir_candidates):
+            for rel in files:
+                if len(expanded) >= _GROUNDING_DIR_EXPAND_TOTAL:
+                    break
+                if rel not in extra_priority:
+                    expanded.append(rel)
+                    extra_priority.add(rel)
+            if len(expanded) >= _GROUNDING_DIR_EXPAND_TOTAL:
+                break
         if expanded:
             paths = list(paths) + expanded
             priority = set(priority) | extra_priority
@@ -1787,17 +1841,20 @@ def main():
         # be unverifiable because the byte budget was spent on other files. Include the
         # evidence paths that are ALSO spec-named; a path cited only in prose is not
         # elevated. Fall back to all cited paths if the section names none.
-        spec_named = set(extract_paths(section, workdir, search_dirs))
+        # W18: ground only what THIS phase names. The inherited-obligations block is
+        # regression context for the critic to read, not work to verify here.
+        ground_sec = grounding_section(section)
+        spec_named = set(extract_paths(ground_sec, workdir, search_dirs))
         # W16: criteria that name a DIRECTORY are invisible to extract_paths (files
         # only), so add them here — grounding_snapshot expands each into its files.
-        spec_dirs = [d for d in extract_dirs(section, workdir, search_dirs)
+        spec_dirs = [d for d in extract_dirs(ground_sec, workdir, search_dirs)
                      if d not in spec_named]
         if spec_dirs:
             paths = list(paths) + spec_dirs
             spec_named |= set(spec_dirs)
         priority = [p for p in paths if p in spec_named]
         # W2: symbols the criteria name — greppable anchors for the priority files.
-        anchors = extract_anchor_tokens(section)
+        anchors = extract_anchor_tokens(ground_sec)
         # W10/W11: workspace members (for package-relative resolution), the member the
         # criterion/evidence text points at (disambiguates a namesake artifact), and the
         # declared build-export paths (an unresolved one is a build gap, not MISSING).

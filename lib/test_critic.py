@@ -21,6 +21,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args, extract_dirs,  # noqa: E402
+                    grounding_section as critic_grounding_section,
                     GROUNDING_TOTAL_CAP,
                     ANCHOR_MAX_BYTES_CEIL,
                     extract_paths, grounding_gap, harness_probes,
@@ -692,6 +693,44 @@ def test_grounding_byte_budget_binds_priority_files_too():
     for n in names:
         assert n in snap, "path %s vanished from the snapshot entirely" % n
 
+
+def test_grounding_section_excludes_inherited_obligations():
+    """Ground only what THIS phase names (W18).
+
+    render_phase_context() appends the cumulative gate's INHERITED obligations as
+    compact one-liners, explicitly "regression context ... already gated, not new
+    work". Their titles carry backticked paths, so path extraction grounded the whole
+    feature: ainetops-002 phase 6 yielded 90 paths / 29 dirs for a gate judging 13
+    criteria, the files those criteria name lost the budget, and the unmet set
+    oscillated 23,24,23,17,16,17,12,8,12 — the documented evidence lottery.
+
+    The block must STAY in the section (the critic still reads it) and must NOT be
+    scanned for grounding.
+    """
+    section = (
+        "## Phase 6\n"
+        "- [ ] T277 Create the scaffold under `ui/`\n\n"
+        "## Verification obligations\n"
+        "### VO-aaa — T277 scaffold\n- Oracle: `ui/package.json`\n\n"
+        "### Inherited obligations from earlier approved phases (regression "
+        "context — already gated, not new work; the cumulative gate still "
+        "re-checks them):\n"
+        "- VO-bbb — T101 wire probes into `deploy/agents/tests/probes/run-all.sh`\n"
+        "- VO-ccc — T158 health payload in `agents/supervisors/provisioning/main.py`\n\n"
+        "Create or update automated tests for these obligations.\n"
+    )
+    ground = critic_grounding_section(section)
+    assert "T277" in ground and "VO-aaa" in ground, "current-phase content was dropped"
+    assert "VO-bbb" not in ground, "inherited obligations still reach grounding"
+    assert "run-all.sh" not in ground, "an inherited path still reaches grounding"
+    assert "Create or update automated tests" in ground, "tail after the block was lost"
+    # and the block itself is untouched in the ORIGINAL section the critic reads
+    assert "Inherited obligations" in section
+
+    assert critic_grounding_section("") == ""
+    plain = "## Phase 1\n- [ ] T001 do a thing in `ui/package.json`\n"
+    assert critic_grounding_section(plain) == plain, "a section without the block changed"
+
 def test_verdict_input_excludes_thinking_and_tool_content():
     """The verdict input is assembled ONLY from the declared sections (spec,
     evidence, grounding, optional design context). build_prompt has no channel for
@@ -750,4 +789,5 @@ if __name__ == "__main__":
     test_criterion_named_directory_is_expanded_to_its_files()
     test_extract_dirs_finds_criterion_named_directories()
     test_grounding_byte_budget_binds_priority_files_too()
+    test_grounding_section_excludes_inherited_obligations()
     print("OK: all critic grounding assertions pass")
