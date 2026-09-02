@@ -42,7 +42,13 @@ GROUNDING_MAX_FILES   = 80         # hard cap on PRESENCE LINES (one per cited p
 GROUNDING_HEAD_BYTES  = 4000       # was 1500 — a source file's public surface (imports,
                                    # exported signatures) rarely fits in 1500 bytes.
 GROUNDING_TAIL_BYTES  = 1000       # was 500.
-GROUNDING_TOTAL_CAP   = 196608    # hard cap on EXCERPT bytes appended (fenced blocks
+GROUNDING_TOTAL_CAP   = 262144    # 256 KB. Derived, not guessed: the critic's
+                                   # context is 200k tokens at a measured 3.18 bytes/
+                                   # token; reserving 49,152 for the verdict leaves
+                                   # ~480 KB of prompt, of which SPEC (~48 KB),
+                                   # evidence (<=60 KB) and design context take ~120 KB.
+                                   # 256 KB of grounding keeps the whole prompt near
+                                   # 380 KB (~120k tokens) with real margin    # hard cap on EXCERPT bytes appended (fenced blocks
                                    # only — never suppresses a presence line, only its
                                    # content excerpt). Was 32000, which starved the
                                    # snapshot on any phase citing ~20 source files and
@@ -54,6 +60,11 @@ GROUNDING_TOTAL_CAP   = 196608    # hard cap on EXCERPT bytes appended (fenced b
 ANCHOR_CONTEXT_LINES  = 15         # ±N lines quoted around each criterion-symbol match
                                    # in a criterion-named file (W2 anchored excerpts).
 ANCHOR_MAX_BYTES      = 6000       # per-file FLOOR for an anchored excerpt (small files).
+_GROUNDING_SKIP_DIRS = frozenset((
+    "node_modules", "dist", "build", ".git", "__pycache__", ".venv", ".next",
+    "coverage", ".pytest_cache", ".ruff_cache",
+))                                 # build/vendor noise, never criterion evidence
+_GROUNDING_DIR_EXPAND_MAX = 40     # files pulled in from any one criterion-named dir
 ANCHOR_MAX_BYTES_CEIL = 49152      # per-file CEILING (W14): a large criterion-named file
                                    # scales its anchor budget with its own size so a symbol
                                    # implemented LATE (past where dense common-word anchor
@@ -760,6 +771,34 @@ def anchored_excerpt(full, anchors):
     return "\n".join(out)
 
 
+
+def extract_dirs(text, workdir, search_dirs=None):
+    """Backticked tokens that name a DIRECTORY on disk (W16).
+
+    ``extract_paths`` deliberately yields files only, so a criterion phrased against a
+    directory ("Create the Vite/React project structure under `ui/`", "Port components
+    into `ui/src/components/Chat/`") contributed NOTHING to the grounding snapshot and
+    the critic answered NEEDS-GROUNDING for files that were present on disk. Return the
+    directory tokens so the caller can expand them into their files.
+    """
+    import re as _re
+    out = []
+    for tok in _re.findall(r"`([^`\n]+)`", text or ""):
+        tok = tok.strip()
+        if not tok or tok.startswith("-") or " " in tok:
+            continue
+        cand = tok.rstrip("/")
+        if not cand or cand.startswith(("http://", "https://")):
+            continue
+        for base in [workdir] + list(search_dirs or ()):
+            full = cand if os.path.isabs(cand) else os.path.join(base, cand)
+            if os.path.isdir(full):
+                rel = os.path.relpath(full, workdir)
+                if not rel.startswith("..") and rel not in out:
+                    out.append(rel)
+                break
+    return out
+
 def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=None,
                        members=None, hint=None, export_targets=None):
     # `priority` = paths the criteria NAME (W1): they are ordered first AND their content
@@ -778,7 +817,38 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
     # Order: criterion-named files first, then everything else — preserving each group's
     # original (evidence-then-spec) order so the presence-line budget favors the paths a
     # verdict actually turns on.
+    # W16: a criterion that names a DIRECTORY ("Create the Vite/React project structure
+    # under `ui/`", "Port components into `ui/src/components/Chat/`") previously yielded
+    # only a presence line — "directory, N entries" — so nothing inside was ever visible
+    # and the critic had to answer NEEDS-GROUNDING for every file it needed. Observed
+    # 2026-09-02, ainetops-002 phase 6: 23 NEEDS-GROUNDING entries naming files that were
+    # all present on disk, while the two criteria naming actual FILES were verified fine.
+    # Expand a criterion-named directory into the files under it so the normal per-file
+    # path (including whole-file emission, W15) applies. Build noise is skipped; the
+    # per-file ceiling and the byte budget still bound the result.
     if priority:
+        expanded, extra_priority = [], set()
+        for p in list(paths):
+            if p not in priority:
+                continue
+            full_dir = _resolve_cited(p, workdir, search_dirs, members=members)
+            if not (full_dir and os.path.isdir(full_dir)):
+                continue
+            for root, dnames, fnames in os.walk(full_dir):
+                dnames[:] = [d for d in dnames if d not in _GROUNDING_SKIP_DIRS]
+                for fn in sorted(fnames):
+                    if fn.endswith(("-lock.json", ".lock")):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, fn), workdir)
+                    if rel not in paths and rel not in extra_priority:
+                        expanded.append(rel)
+                        extra_priority.add(rel)
+                if len(expanded) >= _GROUNDING_DIR_EXPAND_MAX:
+                    break
+        if expanded:
+            paths = list(paths) + expanded
+            priority = set(priority) | extra_priority
+
         paths = ([p for p in paths if p in priority]
                  + [p for p in paths if p not in priority])
     lines = ["", "## Grounding snapshot (verified by the critic, read-only)",
@@ -901,6 +971,17 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
             anchored = ""
         else:
             anchored = anchored_excerpt(full, anchors) if is_priority else ""
+        # W17: whole-file emission must respect the byte budget. W1 lets a
+        # criterion-named file bypass GROUNDING_TOTAL_CAP so it is never DROPPED —
+        # correct — but combined with W15 (whole files) and W16 (directory expansion)
+        # that made priority emission UNBOUNDED. Observed 2026-09-02, phase 6 attempt 3:
+        # 70 whole files, a 682,145-byte prompt (~214k tokens) against gpt-5's 200k
+        # window, so the prompt was TRUNCATED and the critic still could not see the
+        # files — the same symptom as emitting nothing. Degrade instead: whole ->
+        # anchored -> head/tail, keeping the presence line unconditionally.
+        if whole and total + len(whole) > GROUNDING_TOTAL_CAP:
+            whole = ""
+            anchored = anchored_excerpt(full, anchors) if is_priority else ""
         if whole:
             pass
         elif anchored:
@@ -916,7 +997,16 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
         # A criterion-named file's excerpt is ALWAYS emitted (W1): budget exhaustion must
         # never elide the very content a verdict turns on. Non-priority files still
         # respect the (now much larger) byte budget.
-        if is_priority or total + len(block) <= GROUNDING_TOTAL_CAP:
+        # W17b: the budget must bind PRIORITY files too. W1 exempted them entirely so a
+        # criterion-named file could never be elided — but that made the spend
+        # unbounded once W15/W16 emitted whole files and expanded directories: phase-6
+        # attempt 4 produced ~496 KB of grounding against a 262,144 cap, a 633 KB prompt
+        # (~199k tokens) and SIX truncation markers. Truncation elides the same content,
+        # only silently and unpredictably, so an explicit budget is strictly better.
+        # Priority keeps first claim (it is ordered first) and a bigger allowance;
+        # everything else shares what remains.
+        budget = GROUNDING_TOTAL_CAP if is_priority else GROUNDING_TOTAL_CAP // 2
+        if total + len(block) <= budget:
             lines.append(block)
             total += len(block)
         else:
@@ -1698,6 +1788,13 @@ def main():
         # evidence paths that are ALSO spec-named; a path cited only in prose is not
         # elevated. Fall back to all cited paths if the section names none.
         spec_named = set(extract_paths(section, workdir, search_dirs))
+        # W16: criteria that name a DIRECTORY are invisible to extract_paths (files
+        # only), so add them here — grounding_snapshot expands each into its files.
+        spec_dirs = [d for d in extract_dirs(section, workdir, search_dirs)
+                     if d not in spec_named]
+        if spec_dirs:
+            paths = list(paths) + spec_dirs
+            spec_named |= set(spec_dirs)
         priority = [p for p in paths if p in spec_named]
         # W2: symbols the criteria name — greppable anchors for the priority files.
         anchors = extract_anchor_tokens(section)

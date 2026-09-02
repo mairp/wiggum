@@ -20,7 +20,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args,  # noqa: E402
+from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args, extract_dirs,  # noqa: E402
+                    GROUNDING_TOTAL_CAP,
                     ANCHOR_MAX_BYTES_CEIL,
                     extract_paths, grounding_gap, harness_probes,
                     grounding_search_dirs, grounding_snapshot, _resolve_cited,
@@ -607,6 +608,90 @@ def test_small_criterion_named_file_is_emitted_whole():
     assert "complete file" not in big, "a large file must stay anchored, not emitted whole"
     assert len(big) < ANCHOR_MAX_BYTES_CEIL * 3, "anchored snapshot grew unbounded"
 
+
+def test_criterion_named_directory_is_expanded_to_its_files():
+    """A criterion naming a DIRECTORY must expose the files under it (W16).
+
+    "Create the Vite/React project structure under `ui/`" previously produced only a
+    presence line — "directory, N entries" — so nothing inside was visible and the
+    critic had to answer NEEDS-GROUNDING for files that were present on disk.
+    Observed 2026-09-02, ainetops-002 phase 6: 23 such entries, while the two criteria
+    naming actual FILES verified cleanly. Build noise must stay out, or a single `ui/`
+    would drag node_modules into the prompt.
+    """
+    import tempfile
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "ui/src/components/Chat"))
+    os.makedirs(os.path.join(d, "ui/node_modules/junk"))
+    with open(os.path.join(d, "ui/package.json"), "w") as fh:
+        fh.write('{"name":"ui","scripts":{"dev":"vite"}}')
+    with open(os.path.join(d, "ui/src/components/Chat/Chat.tsx"), "w") as fh:
+        fh.write("export function Chat(){return null}\n")
+    with open(os.path.join(d, "ui/package-lock.json"), "w") as fh:
+        fh.write("x" * 50000)
+    with open(os.path.join(d, "ui/node_modules/junk/big.js"), "w") as fh:
+        fh.write("y" * 50000)
+
+    snap = grounding_snapshot(["ui/"], d, priority=["ui/"], anchors=[])
+    assert "package.json" in snap, "criterion-named directory was not expanded"
+    assert "export function Chat" in snap, "nested component content not visible"
+    assert "big.js" not in snap, "node_modules leaked into the snapshot"
+    assert "package-lock.json" not in snap, "lockfile leaked into the snapshot"
+
+
+def test_extract_dirs_finds_criterion_named_directories():
+    """extract_paths yields FILES only, so directory-phrased criteria were invisible.
+
+    "Create the Vite/React project structure under `ui/`" contributed nothing to the
+    grounding snapshot, so the critic answered NEEDS-GROUNDING for files present on
+    disk. extract_dirs supplies those directory tokens; grounding_snapshot expands
+    them (W16). Verified against ainetops-002 phase 6, where extract_paths returned
+    only 2 ui-related paths while 5 directories were named.
+    """
+    import tempfile
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "ui/src/components/Chat"))
+    with open(os.path.join(d, "ui/src/App.tsx"), "w") as fh:
+        fh.write("export default function App(){return null}\n")
+
+    text = ("- T277 Create the Vite/React project structure under `ui/`\n"
+            "- T278 Port components into `ui/src/components/Chat/`\n"
+            "- T279 Implement `ui/src/App.tsx` shell\n")
+    dirs = extract_dirs(text, d, [])
+    assert "ui" in dirs, "directory token `ui/` not extracted"
+    assert "ui/src/components/Chat" in dirs, "nested directory token not extracted"
+    assert "ui/src/App.tsx" not in dirs, "a FILE must not be returned as a directory"
+    assert extract_dirs("no backticks here at all", d, []) == []
+
+
+def test_grounding_byte_budget_binds_priority_files_too():
+    """The byte budget must bound PRIORITY files as well (W17b).
+
+    W1 exempted criterion-named files from GROUNDING_TOTAL_CAP so one could never be
+    dropped. That was safe while they were anchored excerpts; combined with W15
+    (whole files) and W16 (directory expansion) it made the spend UNBOUNDED —
+    ainetops-002 phase 6 attempt 4 emitted ~496 KB of grounding against a 262,144
+    cap. An explicit, announced budget is strictly better than an unbounded prompt:
+    every path still gets its presence line, only the excerpt is dropped.
+    """
+    import tempfile
+    d = tempfile.mkdtemp()
+    names = []
+    for i in range(60):
+        n = "mod_%02d.py" % i
+        names.append(n)
+        with open(os.path.join(d, n), "w") as fh:
+            fh.write("\n".join("line_%d = %d" % (j, j) for j in range(400)))
+
+    snap = grounding_snapshot(names, d, priority=names, anchors=[])
+    # Bounded: a small constant of slack for the final block plus the header lines.
+    assert len(snap) <= GROUNDING_TOTAL_CAP * 1.2, (
+        "priority emission is unbounded: %d bytes against a %d cap"
+        % (len(snap), GROUNDING_TOTAL_CAP))
+    # Never silently absent: every file keeps a presence line even when elided.
+    for n in names:
+        assert n in snap, "path %s vanished from the snapshot entirely" % n
+
 def test_verdict_input_excludes_thinking_and_tool_content():
     """The verdict input is assembled ONLY from the declared sections (spec,
     evidence, grounding, optional design context). build_prompt has no channel for
@@ -662,4 +747,7 @@ if __name__ == "__main__":
     test_verdict_input_excludes_thinking_and_tool_content()
     test_dsh_task_args_never_starts_a_chunk_with_dash()
     test_small_criterion_named_file_is_emitted_whole()
+    test_criterion_named_directory_is_expanded_to_its_files()
+    test_extract_dirs_finds_criterion_named_directories()
+    test_grounding_byte_budget_binds_priority_files_too()
     print("OK: all critic grounding assertions pass")
