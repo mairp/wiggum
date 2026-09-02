@@ -21,6 +21,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args,  # noqa: E402
+                    ANCHOR_MAX_BYTES_CEIL,
                     extract_paths, grounding_gap, harness_probes,
                     grounding_search_dirs, grounding_snapshot, _resolve_cited,
                     extract_anchor_tokens, anchored_excerpt,
@@ -576,6 +577,36 @@ def test_dsh_task_args_never_starts_a_chunk_with_dash():
     else:
         raise AssertionError("an oversized single token must still raise")
 
+
+def test_small_criterion_named_file_is_emitted_whole():
+    """A criterion-named file under the per-file ceiling must be shown ENTIRE.
+
+    Anchoring is an optimisation for LARGE files. On a small one it can only lose
+    information: if the criterion's symbol is not greppable in the source (spec says
+    `GET /transport/config`, code says @app.get("/transport/config")) no window is
+    quoted for that region and the critic reports NEEDS-GROUNDING for code that is
+    present on disk. Observed 2026-09-02 on ainetops-002 phase 4 — two consecutive
+    rejections naming the same 6 files, one of which (run-all.sh) is 1,877 bytes.
+    Large files must still be anchored so the snapshot stays bounded.
+    """
+    import tempfile
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "main.py"), "w") as fh:
+        fh.write("import x\n"
+                 + "\n".join("filler_%d = %d" % (i, i) for i in range(80))
+                 + '\n@app.get("/transport/config")\n'
+                   'def transport_config():\n    return {"transport": "slim"}\n')
+    snap = grounding_snapshot(["main.py"], d, priority=["main.py"],
+                              anchors=["GET /transport/config"])
+    assert "complete file, line-numbered" in snap, "small priority file was not emitted whole"
+    assert "transport_config" in snap, "region with no anchor match is still invisible"
+
+    with open(os.path.join(d, "big.py"), "w") as fh:
+        fh.write("\n".join("line_%d = %d" % (i, i) for i in range(200000)))
+    big = grounding_snapshot(["big.py"], d, priority=["big.py"], anchors=["line_5"])
+    assert "complete file" not in big, "a large file must stay anchored, not emitted whole"
+    assert len(big) < ANCHOR_MAX_BYTES_CEIL * 3, "anchored snapshot grew unbounded"
+
 def test_verdict_input_excludes_thinking_and_tool_content():
     """The verdict input is assembled ONLY from the declared sections (spec,
     evidence, grounding, optional design context). build_prompt has no channel for
@@ -630,4 +661,5 @@ if __name__ == "__main__":
     test_prompt_includes_grounding_snapshot()
     test_verdict_input_excludes_thinking_and_tool_content()
     test_dsh_task_args_never_starts_a_chunk_with_dash()
+    test_small_criterion_named_file_is_emitted_whole()
     print("OK: all critic grounding assertions pass")

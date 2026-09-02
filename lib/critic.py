@@ -875,8 +875,35 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
         # W2: for a criterion-named file, quote ±N lines around each criterion symbol
         # instead of a blind head/tail slice — the only way a mid-file implementation
         # (e.g. the T022 resume wiring buried in an 18 KB module) can ever appear.
-        anchored = anchored_excerpt(full, anchors) if is_priority else ""
-        if anchored:
+        # W15: a criterion-named file that fits under the per-file ceiling is emitted
+        # WHOLE. Anchoring is an optimisation for LARGE files; on a small one it can
+        # only lose information, because a criterion whose symbol the grep does not
+        # match (e.g. the spec says `GET /transport/config` while the code says
+        # @app.get("/transport/config")) leaves that region unquoted and the critic
+        # correctly reports NEEDS-GROUNDING for code that is present on disk.
+        # Observed 2026-09-02, ainetops-002 phase 4: two consecutive rejections naming
+        # the same 6 files (run-all.sh is 1,877 bytes — the entire file would have fit
+        # several times over). Emitting the 19 phase-4 criterion-named files in full is
+        # 170,720 bytes, inside GROUNDING_TOTAL_CAP.
+        whole = ""
+        if is_priority and st.st_size <= ANCHOR_MAX_BYTES_CEIL:
+            try:
+                with open(full, "rb") as fh:
+                    whole = fh.read().decode("utf-8", "replace").replace("\x00", "\ufffd")
+            except OSError:
+                whole = ""
+        if whole:
+            numbered = "\n".join("%6d\t%s" % (n, l)
+                                 for n, l in enumerate(whole.splitlines(), 1))
+            block = ("  ```\n"
+                     + "\n".join("  " + l for l in numbered.splitlines())
+                     + "\n  ```\n  (complete file, line-numbered)")
+            anchored = ""
+        else:
+            anchored = anchored_excerpt(full, anchors) if is_priority else ""
+        if whole:
+            pass
+        elif anchored:
             block = ("  ```\n"
                      + "\n".join("  " + l for l in anchored.splitlines())
                      + "\n  ```\n  (anchored excerpt: ±%d lines around each criterion "
