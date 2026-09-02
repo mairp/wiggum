@@ -42,13 +42,19 @@ GROUNDING_MAX_FILES   = 80         # hard cap on PRESENCE LINES (one per cited p
 GROUNDING_HEAD_BYTES  = 4000       # was 1500 — a source file's public surface (imports,
                                    # exported signatures) rarely fits in 1500 bytes.
 GROUNDING_TAIL_BYTES  = 1000       # was 500.
-GROUNDING_TOTAL_CAP   = 262144    # 256 KB. Derived, not guessed: the critic's
+GROUNDING_TOTAL_CAP   = 327680    # 320 KB. Derived, not guessed: the critic's
                                    # context is 200k tokens at a measured 3.18 bytes/
                                    # token; reserving 49,152 for the verdict leaves
                                    # ~480 KB of prompt, of which SPEC (~48 KB),
                                    # evidence (<=60 KB) and design context take ~120 KB.
-                                   # 256 KB of grounding keeps the whole prompt near
-                                   # 380 KB (~120k tokens) with real margin    # hard cap on EXCERPT bytes appended (fenced blocks
+                                   # Raised 262144 -> 327680 on 2026-09-02 after phase 8
+                                   # flattened at two findings, one of them Chat.tsx
+                                   # (6,012 B, far under the per-file ceiling) being
+                                   # ELIDED by the budget while the prompt used only
+                                   # 83k of ~150k available tokens — 55 files elided,
+                                   # 18 emitted whole, with ~213 KB of headroom unused.
+                                   # 320 KB keeps the prompt near 407 KB (~128k tokens)
+                                   # plus the 49k verdict reserve = ~177k of 200k.    # hard cap on EXCERPT bytes appended (fenced blocks
                                    # only — never suppresses a presence line, only its
                                    # content excerpt). Was 32000, which starved the
                                    # snapshot on any phase citing ~20 source files and
