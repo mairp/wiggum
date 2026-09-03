@@ -50,7 +50,13 @@ PY
 
 # Untrack. -r for the tree, --cached so the working files stay on disk (the loop
 # still needs them). Quiet: 35k paths of output is noise.
-git rm -r --cached --quiet specs .wiggum 2>/dev/null || true
+# Each path separately: `git rm` fails the WHOLE invocation if any pathspec
+# matches nothing, and `specs/` is already untracked here -- so the combined form
+# silently did nothing to .wiggum and reported "removed 0".
+for p in specs .wiggum; do
+  git ls-files --error-unmatch "$p" >/dev/null 2>&1 || { echo "  (nothing tracked under $p)"; continue; }
+  git rm -r --cached --quiet "$p" || echo "  WARNING: git rm failed for $p" >&2
+done
 
 after=$(git ls-files | wc -l)
 echo "tracked files: $before -> $after  (removed $((before - after)))"
