@@ -823,6 +823,44 @@ feedback_gist() {
   printf '%s' "$g"
 }
 
+# ── diagnostician (stuck-loop mitigation) ────────────────────────────────────
+# A REJECT that names the SAME unmet-criteria signature the diagnostician already
+# saw is not new information — the loop isn't converging, but re-asking the same
+# question gets the same answer at the same cost. Fires the FIRST time each
+# distinct signature appears (K=1, deliberately as early as possible — a
+# diagnostician pass is one narrow critic-model call, not a full proposer+critic
+# round trip, so the cost of firing on cases that might have self-resolved is
+# small next to the cost of continuing to burn full passes blind). Never blocks
+# or replaces the normal retry; it only ever adds GATE<N>-HINT.md for the next
+# proposer prompt to read (see build_proposer_prompt).
+WIGGUM_DIAGNOSTICIAN="${WIGGUM_DIAGNOSTICIAN:-true}"
+maybe_run_diagnostician() {
+  local n="$1" attempt="$2"
+  [[ "$WIGGUM_DIAGNOSTICIAN" == "true" ]] || return 0
+  local fb="$GATES_DIR/GATE${n}-FEEDBACK.md"
+  [[ -f "$fb" ]] || return 0
+  local sig
+  sig="$(grep -o '\bT[0-9]\{2,\}\b' "$fb" 2>/dev/null | sort -u | tr '\n' ',')"
+  if [[ -z "$sig" ]]; then
+    # Prose-only criteria (openspec-change / native prose phases) carry no stable
+    # T### token to key on — fall back to a hash of the full feedback text so a
+    # byte-identical re-rejection still dedups, but ANY change in what the critic
+    # said (even reworded) is treated as new information worth another look.
+    sig="text:$(sha256sum "$fb" 2>/dev/null | cut -d' ' -f1)"
+  fi
+  local marker="$GATES_DIR/.diagnosed-phase${n}"
+  if [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$sig" ]]; then
+    return 0   # already diagnosed this exact unmet set; nothing new to say
+  fi
+  log "----- diagnostician: phase $n attempt $attempt (unmet set changed) -----"
+  wiggum_emit diagnostician_trigger phase "$n" attempt "$attempt"
+  WIGGUM_ROLE=diagnostician python3 "$LIB_DIR/critic.py" \
+    --workdir "$WORKDIR" --specs "$SPECS" --phase "$n" --attempt "$attempt" \
+    --provider "$CRITIC_BACKEND" --timeout "$CRITIC_TIMEOUT" \
+    --format "$SPEC_FORMAT" --feature "$SLUG" --diagnose 2>&1 | emit_out
+  printf '%s' "$sig" > "$marker"
+}
+
 # ── oscillation detector (W8) ────────────────────────────────────────────────
 # A non-converging loop re-rejects a criterion that an EARLIER attempt had already
 # cleared (a flip-flop) — the signature of the evidence lottery, not of real code
@@ -892,6 +930,11 @@ archive_attempt() {
   mkdir -p "$dir"
   [[ -f "$GATES_DIR/GATE${n}-EVIDENCE.md" ]] && mv "$GATES_DIR/GATE${n}-EVIDENCE.md" "$dir/GATE${n}-EVIDENCE.md"
   [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && cp "$GATES_DIR/GATE${n}-FEEDBACK.md" "$dir/GATE${n}-FEEDBACK.md"
+  # cp (not mv), same as FEEDBACK above: the hint must stay live in GATES_DIR so
+  # build_proposer_prompt keeps reading it on every subsequent attempt until the
+  # diagnostician overwrites it with a fresh one (maybe_run_diagnostician's
+  # signature guard decides when that happens, not this archiving step).
+  [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]] && cp "$GATES_DIR/GATE${n}-HINT.md" "$dir/GATE${n}-HINT.md"
   # newest verdict transcript for this phase/attempt, if any
   local vt; vt="$(ls -t "$FEATURE_DIR/verdicts/phase${n}.attempt${attempt}."*.txt 2>/dev/null | head -1)"
   [[ -n "$vt" && -f "$vt" ]] && cp "$vt" "$dir/verdict.txt"
@@ -1018,6 +1061,16 @@ build_proposer_prompt() {
         fi
         echo "- $(basename "$d"): ${gist}"
       done
+      if [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]]; then
+        echo
+        echo "### Diagnostician hint (${GATES_REL}/GATE${n}-HINT.md) — read this too"
+        echo "A second pass with no grounding byte budget looked at why this phase"
+        echo "keeps getting rejected. It is advisory, not authoritative — the critic"
+        echo "feedback above still governs what must be true — but it may point"
+        echo "straight at the fix (or explain that the critic itself couldn't see"
+        echo "code that is already correct)."
+        cat "$GATES_DIR/GATE${n}-HINT.md"
+      fi
     fi
   } > "$out"
 }
@@ -1214,12 +1267,17 @@ run_phase() {
 
     if [[ "$crc" -eq 0 && -f "$GATES_DIR/GATE${n}-APPROVED" ]]; then
       log "===== PHASE $n APPROVED (attempt $attempt) ====="
-      # On APPROVED, archive any leftover feedback so it can't leak forward.
-      if [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]]; then
+      # On APPROVED, archive any leftover feedback/hint so it can't leak forward,
+      # and drop the diagnostician's signature marker so a future re-run of this
+      # phase slug (a regression, a resumed feature) starts undiagnosed rather than
+      # silently comparing against a stale signature from this approved run.
+      if [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" || -f "$GATES_DIR/GATE${n}-HINT.md" ]]; then
         local adir="$FEATURE_DIR/attempts/phase${n}/approved"
         mkdir -p "$adir"
-        mv "$GATES_DIR/GATE${n}-FEEDBACK.md" "$adir/GATE${n}-FEEDBACK.md"
+        [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && mv "$GATES_DIR/GATE${n}-FEEDBACK.md" "$adir/GATE${n}-FEEDBACK.md"
+        [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]] && mv "$GATES_DIR/GATE${n}-HINT.md" "$adir/GATE${n}-HINT.md"
       fi
+      rm -f "$GATES_DIR/.diagnosed-phase${n}"
       wiggum_emit phase_done phase "$n" attempt "$attempt" title "$title"
       maybe_git_checkpoint "$n" "$title"
       return 0
@@ -1234,6 +1292,8 @@ run_phase() {
     # REJECTED / MALFORMED (crc == 10 or other). Record and maybe retry.
     log "----- phase $n REJECTED on attempt $attempt/$MAX_REJECTS -----"
     wiggum_emit reject phase "$n" attempt "$attempt"
+
+    maybe_run_diagnostician "$n" "$attempt"
 
     # Oscillation breaker (W8): if a criterion the loop had already cleared is being
     # re-rejected (a flip-flop), the loop is not converging — stop now with a pointer to
@@ -1269,6 +1329,8 @@ run_phase() {
       log "# HALT — phase $n exceeded MAX_REJECTS ($MAX_REJECTS). Human needed."
       log "#   latest evidence : $GATES_DIR/GATE${n}-EVIDENCE.md"
       log "#   latest feedback : $GATES_DIR/GATE${n}-FEEDBACK.md"
+      [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]] && \
+        log "#   diagnostician hint : $GATES_DIR/GATE${n}-HINT.md (read this first)"
       log "#   attempt history : $FEATURE_DIR/attempts/phase${n}/"
       # Rejection trail: one line per attempt so a human sees at a glance whether the
       # loop was progressing or spinning on the same point.

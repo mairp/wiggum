@@ -18,8 +18,10 @@ import json
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import critic as critic_mod  # noqa: E402 — module import, for monkeypatching critic_call
 from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args, extract_dirs,  # noqa: E402
                     grounding_section as critic_grounding_section,
                     GROUNDING_TOTAL_CAP,
@@ -31,7 +33,8 @@ from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args, extract_dirs,  # no
                     _strip_dot_slash,
                     _WORKSPACE_CACHE, _anchor_cap, ANCHOR_MAX_BYTES,
                     ANCHOR_MAX_BYTES_CEIL,
-                    parse_verdict, build_prompt)
+                    parse_verdict, build_prompt,
+                    full_dump_snapshot, run_diagnostician)
 
 
 def test_w14_anchor_cap_scales_with_file_size():
@@ -877,3 +880,102 @@ def test_w20_search_dirs_survive_a_missing_proofs_dir(tmp_path):
     (work / gates_rel).mkdir(parents=True)
     sd = grounding_search_dirs(gates_rel, str(work))
     assert sd[0] == "" and gates_rel in sd
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Diagnostician (stuck-loop mitigation): full_dump_snapshot + run_diagnostician.
+#  Locks in the reason this exists — a phase whose cumulative citations blow
+#  GROUNDING_TOTAL_CAP degrades the SAME files to head/tail every attempt,
+#  deterministically, so the critic can never converge on it (agentic-netops
+#  003-datacenter-service-constructs phase 4, 29 attempts, 2026-09-06). The
+#  diagnostician must show a small, targeted file set with NO such degradation.
+# ─────────────────────────────────────────────────────────────────────────────
+def test_full_dump_snapshot_shows_whole_file_no_truncation(tmp_path):
+    work = tmp_path / "repo"
+    work.mkdir()
+    (work / "acl.go").write_text("package acl\n\nfunc Render() {}\n")
+    out = full_dump_snapshot(["acl.go"], str(work))
+    assert "package acl" in out
+    assert "func Render()" in out
+    assert "truncated" not in out
+    assert "SKIPPED" not in out
+
+
+def test_full_dump_snapshot_missing_file_labelled_not_found(tmp_path):
+    work = tmp_path / "repo"
+    work.mkdir()
+    out = full_dump_snapshot(["nope.go"], str(work))
+    assert "`nope.go` — NOT FOUND on disk" in out
+
+
+def test_full_dump_snapshot_per_file_cap_labels_truncation(tmp_path, monkeypatch):
+    work = tmp_path / "repo"
+    work.mkdir()
+    (work / "big.go").write_text("x" * 500)
+    monkeypatch.setattr(critic_mod, "DIAGNOSTICIAN_FILE_CAP", 100)
+    out = full_dump_snapshot(["big.go"], str(work))
+    assert "truncated at 100 bytes" in out
+    # exactly the capped byte count of content must appear, not the full 500.
+    assert out.count("x") == 100
+
+
+def test_full_dump_snapshot_total_cap_skips_later_files(tmp_path, monkeypatch):
+    work = tmp_path / "repo"
+    work.mkdir()
+    (work / "first.go").write_text("a" * 80)
+    (work / "second.go").write_text("b" * 80)
+    monkeypatch.setattr(critic_mod, "DIAGNOSTICIAN_FILE_CAP", 1000)
+    monkeypatch.setattr(critic_mod, "DIAGNOSTICIAN_TOTAL_CAP", 100)
+    out = full_dump_snapshot(["first.go", "second.go"], str(work))
+    assert "a" * 80 in out
+    assert "`second.go` — SKIPPED (diagnostician total budget reached" in out
+    assert "b" * 80 not in out
+
+
+def _diagnostician_args(**overrides):
+    ns = {"provider": "claude", "timeout": 60, "attempt": 2}
+    ns.update(overrides)
+    return SimpleNamespace(**ns)
+
+
+def test_run_diagnostician_writes_hint_file(tmp_path, monkeypatch):
+    work = tmp_path / "repo"
+    gates_rel = os.path.join(".wiggum", "features", "001-demo", "gates")
+    gates_dir = work / gates_rel
+    gates_dir.mkdir(parents=True)
+    (work / "acl.go").write_text("package acl\nfunc Allow() bool { return true }\n")
+    feature_dir = os.path.dirname(str(gates_dir))
+    (gates_dir / "GATE4-FEEDBACK.md").write_text(
+        "T032 unmet: acl.go — cannot verify Allow()\n")
+
+    monkeypatch.setattr(critic_mod, "critic_call",
+                        lambda provider, prompt, timeout, workdir: "CASE: GROUNDING\nfake diagnosis")
+
+    section = "### T032 — cite `acl.go`\n"
+    evidence = "See `acl.go` for the Allow() implementation.\n"
+    run_diagnostician(_diagnostician_args(), str(work), 4, feature_dir, str(gates_dir),
+                      gates_rel, section, evidence, events_path=None)
+
+    hint = gates_dir / "GATE4-HINT.md"
+    assert hint.is_file()
+    text = hint.read_text()
+    assert "diagnostician hint" in text
+    assert "CASE: GROUNDING" in text
+    assert "fake diagnosis" in text
+
+
+def test_run_diagnostician_never_raises_when_critic_call_fails(tmp_path, monkeypatch):
+    work = tmp_path / "repo"
+    gates_rel = os.path.join(".wiggum", "features", "001-demo", "gates")
+    gates_dir = work / gates_rel
+    gates_dir.mkdir(parents=True)
+    feature_dir = os.path.dirname(str(gates_dir))
+
+    def boom(provider, prompt, timeout, workdir):
+        raise RuntimeError("critic backend unreachable")
+    monkeypatch.setattr(critic_mod, "critic_call", boom)
+
+    # Must not raise — a diagnostician failure must never abort the run it helps.
+    run_diagnostician(_diagnostician_args(), str(work), 4, feature_dir, str(gates_dir),
+                      gates_rel, "### T032\n", "evidence\n", events_path=None)
+    assert not (gates_dir / "GATE4-HINT.md").exists()

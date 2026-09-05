@@ -83,6 +83,19 @@ ANCHOR_MAX_BYTES_CEIL = 49152      # per-file CEILING (W14): a large criterion-n
                                    # criteria can NEVER be grounded — the phase-3 T024 wall.
 EVIDENCE_MAX_BYTES    = 60000     # truncate a huge evidence file for the prompt
 
+# Diagnostician (stuck-loop mitigation, see run_diagnostician): a per-file and total
+# cap for full_dump_snapshot. Deliberately NOT the same knobs as GROUNDING_TOTAL_CAP
+# above — the diagnostician is scoped to only ONE phase's still-unmet-criteria files
+# (a small subset of the phase's whole cited universe), so it can afford whole-file,
+# untruncated content where the normal critic pass had to degrade to head/tail. These
+# are a safety valve against a pathological single artifact (a data file, a vendored
+# bundle), not a routine truncation path.
+DIAGNOSTICIAN_FILE_CAP  = 200000  # 200 KB/file — generous for any real source file
+DIAGNOSTICIAN_TOTAL_CAP = 600000  # ~600 KB (~190k tokens at the critic's measured
+                                   # 3.18 B/token) — same headroom math as
+                                   # GROUNDING_TOTAL_CAP, roughly doubled because this
+                                   # is scoped narrower than a full phase's citations.
+
 
 def warn(msg):
     sys.stderr.write("critic.py: %s\n" % msg)
@@ -1121,6 +1134,168 @@ def _sniff_binary(head):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Diagnostician (stuck-loop mitigation) — see run_diagnostician for the trigger.
+# ─────────────────────────────────────────────────────────────────────────────
+def full_dump_snapshot(paths, workdir, search_dirs=None, members=None):
+    """Unlike grounding_snapshot (budget-degraded whole -> anchored -> head/tail
+    across a phase's WHOLE cited universe), this reads the FULL content of each
+    resolved path with no head/tail elision. The diagnostician only ever sees the
+    files behind ONE phase's still-unmet criteria — a small subset of what the
+    normal critic pass had to fit in GROUNDING_TOTAL_CAP — so the budget that
+    starves large phases does not apply here. Still capped (DIAGNOSTICIAN_FILE_CAP /
+    DIAGNOSTICIAN_TOTAL_CAP) as a safety valve, never silently: every cap hit is
+    labelled in the output so the diagnostician knows it, rather than reading a
+    quietly-clipped file as complete."""
+    if members is None:
+        members = _workspace_members(workdir)
+    out = []
+    total = 0
+    seen = set()
+    for p in paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        full = _resolve_cited(p, workdir, search_dirs, members=members)
+        if not full:
+            out.append("### `%s` — NOT FOUND on disk" % p)
+            continue
+        if os.path.isdir(full):
+            try:
+                entries = sorted(os.listdir(full))[:200]
+            except OSError:
+                entries = []
+            out.append("### `%s` — directory (%d entries)\n%s" %
+                       (p, len(entries), "\n".join("- %s" % e for e in entries)))
+            continue
+        try:
+            with open(full, "rb") as fh:
+                data = fh.read(DIAGNOSTICIAN_FILE_CAP + 1)
+        except OSError as e:
+            out.append("### `%s` — could not read (%s)" % (p, e))
+            continue
+        truncated = len(data) > DIAGNOSTICIAN_FILE_CAP
+        text = data[:DIAGNOSTICIAN_FILE_CAP].decode("utf-8", errors="replace")
+        if total + len(text) > DIAGNOSTICIAN_TOTAL_CAP:
+            out.append("### `%s` — SKIPPED (diagnostician total budget reached; "
+                       "file verified present on disk)" % p)
+            continue
+        total += len(text)
+        note = " (truncated at %d bytes — file is larger)" % DIAGNOSTICIAN_FILE_CAP \
+               if truncated else ""
+        out.append("### `%s`%s\n```\n%s\n```" % (p, note, text))
+    return "\n\n".join(out)
+
+
+def build_diagnostician_prompt(phase_n, section, evidence, history, files_block):
+    return f"""You are the DIAGNOSTICIAN in an automated spec-driven loop — NOT the
+critic and NOT the proposer. A critic has REJECTED phase {phase_n} at least once,
+citing the same unmet criteria without resolving them. Your only job: read the
+full, untruncated evidence and files below and determine WHY this keeps getting
+rejected, then write a short, concrete hint the proposer can act on next attempt.
+You have NO byte budget on the files below — if you still cannot find something a
+criterion needs, say so plainly; that itself is diagnostic information.
+
+Distinguish exactly ONE of these two cases and say which one, first line:
+  CASE: GROUNDING — the code/evidence is actually fine; the critic's rejection was
+    caused by ITS OWN byte-budget elision (it could not see enough of a file) or a
+    path-resolution miss, not a real gap. Say exactly what content the critic needs
+    and where it is (line ranges welcome), so the proposer can restage a smaller,
+    targeted proof slice next attempt that the critic's own budget can fit.
+  CASE: REAL-GAP — the code genuinely does not satisfy the criterion. Say exactly
+    what is missing or wrong, and the smallest concrete change that would fix it.
+
+Do not be diplomatic; be specific and short (a few sentences, plus a short
+code/diff sketch if useful). This becomes a hint file the proposer reads verbatim
+alongside the critic's own feedback — it does not override the critic, it exists
+to unblock a loop that is not converging on its own.
+
+════════════════════════ SPEC — Phase {phase_n} ════════════════════════
+{section}
+
+════════════════════════ LATEST EVIDENCE (proposer-written) ════════════════════════
+{evidence}
+
+════════════════════════ REJECTION HISTORY (this phase, oldest first) ════════════════════════
+{history}
+
+════════════════════════ FULL, UNTRUNCATED content of the cited/criterion files ════════════════════════
+{files_block}
+════════════════════════ END ════════════════════════
+Write your diagnosis now. Start with "CASE: GROUNDING" or "CASE: REAL-GAP" on the
+first line."""
+
+
+def run_diagnostician(args, workdir, n, feature_dir, gates_dir, gates_rel, section,
+                      evidence, events_path):
+    """Stuck-loop mitigation. Triggered by orchestrator.sh the first time a phase's
+    unmet-criteria signature is seen (see maybe_run_diagnostician in orchestrator.sh
+    for the K=1-on-any-new-signature trigger and its idempotency guard). Reuses the
+    SAME critic backend/model (WIGGUM_CRITIC), but with the full rejection history
+    and full, untruncated file content instead of the critic's own budgeted
+    grounding snapshot — a second opinion with more room to look, not a new judge.
+    Writes GATE<N>-HINT.md; NEVER writes GATE<N>-APPROVED/FEEDBACK.md and never
+    raises — a diagnostician failure must not abort the run it is trying to help."""
+    search_dirs = grounding_search_dirs(gates_rel, workdir)
+    ground_sec = grounding_section(section)
+    ev_paths = extract_paths(evidence, workdir, search_dirs)
+    spec_paths = [p for p in extract_paths(ground_sec, workdir, search_dirs)
+                  if p not in set(ev_paths)]
+    paths = ev_paths + spec_paths
+    members = _workspace_members(workdir)
+    spec_dirs = [d for d in extract_dirs(ground_sec, workdir, search_dirs)
+                 if d not in set(paths)]
+    files_block = (full_dump_snapshot(paths + spec_dirs, workdir, search_dirs, members=members)
+                  if (paths or spec_dirs) else
+                  "(no file paths cited in the evidence or criteria)")
+
+    attempts_dir = os.path.join(feature_dir, "attempts", "phase%d" % n)
+    history_parts = []
+    if os.path.isdir(attempts_dir):
+        for d in sorted(os.listdir(attempts_dir)):
+            fb = os.path.join(attempts_dir, d, "GATE%d-FEEDBACK.md" % n)
+            if os.path.isfile(fb):
+                try:
+                    with open(fb, encoding="utf-8", errors="replace") as fh:
+                        history_parts.append("--- %s ---\n%s" % (d, fh.read()))
+                except OSError:
+                    pass
+    cur_fb = os.path.join(gates_dir, "GATE%d-FEEDBACK.md" % n)
+    if os.path.isfile(cur_fb):
+        try:
+            with open(cur_fb, encoding="utf-8", errors="replace") as fh:
+                history_parts.append("--- latest (attempt %d) ---\n%s" % (args.attempt, fh.read()))
+        except OSError:
+            pass
+    history = "\n\n".join(history_parts) or "(no prior rejection recorded)"
+
+    prompt = build_diagnostician_prompt(n, section, evidence, history, files_block)
+    emit(events_path, "diagnostician_start", phase=n, attempt=args.attempt,
+         provider=args.provider)
+    try:
+        reply = critic_call(args.provider, prompt, args.timeout, workdir)
+    except Exception as e:  # noqa: BLE001 — must never abort the run it is helping
+        warn("diagnostician call failed: %s" % e)
+        emit(events_path, "diagnostician_error", phase=n, attempt=args.attempt,
+             error=str(e))
+        return
+    hint_path = os.path.join(gates_dir, "GATE%d-HINT.md" % n)
+    try:
+        with open(hint_path, "w", encoding="utf-8") as fh:
+            fh.write("# Phase %d — diagnostician hint (attempt %d)\n\n" % (n, args.attempt))
+            fh.write("Generated because this phase's rejection reasons matched a NEW\n")
+            fh.write("unmet-criteria signature. NOT a critic verdict — a second opinion\n")
+            fh.write("with no grounding byte budget, meant to unblock a stuck loop faster.\n\n")
+            fh.write(reply or "(empty diagnostician reply)")
+            fh.write("\n")
+    except OSError as e:
+        warn("could not write hint %s: %s" % (hint_path, e))
+        return
+    emit(events_path, "diagnostician_done", phase=n, attempt=args.attempt,
+         bytes=len(reply or ""))
+    print("HINT-WRITTEN")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Prompt assembly + strict nonce verdict contract.
 # ─────────────────────────────────────────────────────────────────────────────
 def build_prompt(phase_n, section, evidence, grounding, nonce, context=""):
@@ -1778,6 +1953,12 @@ def main():
                     help="absolute canonical VerificationPlan v1 JSON; its phase "
                          "obligations become approval criteria")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="Diagnostician mode (stuck-loop mitigation): read the full "
+                         "evidence + complete rejection history with no grounding "
+                         "budget, write GATE<N>-HINT.md, then exit. Never approves "
+                         "or rejects — orchestrator.sh triggers this instead of the "
+                         "normal verdict flow.")
     args = ap.parse_args()
 
     workdir = os.path.abspath(args.workdir)
@@ -1838,6 +2019,11 @@ def main():
         evidence = fh.read(EVIDENCE_MAX_BYTES + 1)
     if len(evidence) > EVIDENCE_MAX_BYTES:
         evidence = evidence[:EVIDENCE_MAX_BYTES] + "\n… (evidence truncated) …"
+
+    if args.diagnose:
+        run_diagnostician(args, workdir, n, feature_dir, gates_dir, gates_rel,
+                          section, evidence, events_path)
+        return
 
     grounding = ""
     gap = []
