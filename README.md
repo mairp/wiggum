@@ -37,12 +37,6 @@ genuinely can't settle.
 
 ## The cast
 
-<p align="center">
-  <img src="./assets/the-cast-nes-springfield.png" width="480"
-       alt="NES-style Springfield scene: Maggie in a pram (the silent orchestrator), Lisa on saxophone (the sharp critic), and Ralph (the proposer that does the work), with the nuclear plant's cooling towers behind them"
-       style="image-rendering: pixelated;">
-</p>
-
 This is the one place the naming is explained. Everywhere else — code, files,
 flags, env vars — uses the literal role names, so you never have to decode a joke
 to operate the tool.
@@ -206,9 +200,11 @@ orchestrator.sh   (derives the current phase N from disk; reads SPECS.md)
   │           REJECTED → writes .wiggum/gates/GATE<N>-FEEDBACK.md (the specific gaps)
   │
   ├─(3a) APPROVED → git-checkpoint the workdir, N := N+1, back to (1).
-  └─(3b) REJECTED → archive the rejected evidence, re-run the proposer for the
-           SAME phase with the feedback. Bounded by MAX_REJECTS; on exceed, halt
-           and leave everything on disk for a human.
+  └─(3b) REJECTED → the first time this phase's UNMET-CRITERIA SIGNATURE is seen,
+           run the DIAGNOSTICIAN (a second, budget-free look at the same files —
+           see below) before archiving the rejected evidence and re-running the
+           proposer with the feedback (+ hint, if one was written). Bounded by
+           MAX_REJECTS; on exceed, halt and leave everything on disk for a human.
 ```
 
 The same loop as a UML sequence — the three roles (orchestrator = *Maggie*,
@@ -265,6 +261,29 @@ There is **no file-watcher**. Detection is deterministic: the proposer loop's
 gate is a plain `test -f .wiggum/gates/GATE<N>-EVIDENCE.md`, and because that loop has already
 exited when control returns, the orchestrator hands the critic the exact path —
 no race, no half-written file.
+
+### Diagnostician (stuck-loop mitigation)
+
+A large phase can cite more files than the critic's grounding snapshot can fit in
+one budget (`GROUNDING_TOTAL_CAP`), so the same file gets degraded to a head/tail
+excerpt — or elided — on every attempt. When that's the actual cause, the
+criterion never converges: the critic isn't wrong about what it *can* see, it
+just can't see enough, and a plain retry burns a full proposer+critic pass to
+learn nothing new.
+
+The orchestrator tracks each phase's unmet-criteria signature (the `T###` IDs a
+rejection names). The FIRST time a new signature appears, it runs `lib/critic.py
+--diagnose`: one extra pass, same critic backend (`WIGGUM_CRITIC`), given the
+full rejection history and the FULL, untruncated content of the cited files —
+no grounding budget. It classifies the stall as `CASE: GROUNDING` (the code is
+fine, the critic just couldn't see it — and says what to restage) or
+`CASE: REAL-GAP` (a genuine gap — and what to fix), and writes
+`.wiggum/gates/GATE<N>-HINT.md`, which the next proposer prompt reads alongside
+the critic's own feedback.
+
+It never re-fires on an unchanged signature (no point paying for the same
+answer twice), never blocks or replaces the normal retry, and never approves or
+rejects anything itself — it's advisory. Disable with `WIGGUM_DIAGNOSTICIAN=false`.
 
 ## Quick start
 
