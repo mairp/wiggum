@@ -23,13 +23,17 @@ orchestrator.sh   (derives the current phase N from disk; reads the spec)
            and leave everything on disk for a human.
 ```
 
-## The three roles
+## The roles
+
+Literal role names are used everywhere — code, files, flags, env vars. Three scripts, five passes:
 
 | Role | Script | Job |
 |---|---|---|
-| **Orchestrator** (Maggie) | [`orchestrator.sh`](../orchestrator.sh) | Derives the current phase from `GATE*` markers, drives proposer↔critic, checkpoints on approval, archives on reject, enforces budgets/locks. |
-| **Proposer** (Ralph) | [`proposer.sh`](../proposer.sh) | Runs a headless coding-agent CLI in a fresh-context loop until phase N's `GATE<N>-EVIDENCE.md` exists. |
-| **Critic** (Lisa) | [`lib/critic.py`](../lib/critic.py) | Reads criteria + evidence, grounds cited files (read-only), asks the LLM for a nonce-bound verdict. |
+| **Orchestrator** | [`orchestrator.sh`](../orchestrator.sh) | Derives the current phase from `GATE*` markers, drives proposer↔critic, checkpoints on approval, archives on reject, tracks each phase's unmet-criteria signature, enforces budgets/locks. |
+| **Proposer** | [`proposer.sh`](../proposer.sh) | Runs a headless coding-agent CLI in a fresh-context loop until phase N's `GATE<N>-EVIDENCE.md` exists. |
+| **Critic** | [`lib/critic.py`](../lib/critic.py) | Reads criteria + evidence, grounds cited files (read-only, byte budget scaled to the backend's context window), asks the LLM for a nonce-bound verdict. |
+| **Diagnostician** | `lib/critic.py --diagnose` | Fires once per NEW unmet-criteria signature: same critic backend, the FULL untruncated cited files, no grounding budget. Writes `GATE<N>-HINT.md` (`CASE: GROUNDING` or `CASE: REAL-GAP` + the fix). Advisory only. `WIGGUM_DIAGNOSTICIAN=false` disables. |
+| **Accelerator** | `proposer.sh --role accelerator` | The attempt right after a new hint: the proposer with a prompt narrowed to the unmet criteria, the feedback, the hint and the evidence to splice. Once per hint, never twice in a row, counts toward `MAX_REJECTS`; writes `GATE<N>-ACCELERATION.md` for the next wide pass. `WIGGUM_ACCELERATOR=false` disables. |
 
 ## Sequence
 
@@ -37,9 +41,9 @@ orchestrator.sh   (derives the current phase N from disk; reads the spec)
 sequenceDiagram
     autonumber
     actor Human
-    participant O as orchestrator.sh<br/>(Maggie)
-    participant P as proposer.sh<br/>(Ralph · coding-agent CLI)
-    participant C as lib/critic.py<br/>(Lisa · LLM gate)
+    participant O as orchestrator.sh<br/>(orchestrator)
+    participant P as proposer.sh<br/>(proposer · also the accelerator pass)
+    participant C as lib/critic.py<br/>(critic · also the diagnostician pass)
     participant FS as .wiggum/gates/<br/>(on-disk contract)
 
     Human->>O: run -w WORKDIR -s SPECS.md
@@ -47,7 +51,11 @@ sequenceDiagram
     Note over O: no stored counter — phase is derived
 
     loop until all phases APPROVED (or halt)
-        O->>P: run headless loop for phase N
+        alt a NEW hint was just written (once per signature, never twice in a row)
+            O->>P: --role accelerator — narrowed prompt: unmet criteria + feedback + hint + evidence to splice
+        else otherwise
+            O->>P: --role proposer — full phase prompt (+ feedback, hint, acceleration note if present)
+        end
         activate P
         loop until evidence exists
             P->>P: read PROGRESS.md, do the work
@@ -55,10 +63,13 @@ sequenceDiagram
         end
         P-->>O: loop exits (test -f passes)
         deactivate P
+        opt accelerator attempt
+            O->>FS: write GATE<N>-ACCELERATION.md (files this pass changed)
+        end
 
         O->>C: judge phase N (criteria + evidence)
         activate C
-        C->>FS: read-only grounding pass over cited files
+        C->>FS: read-only grounding pass over cited files (byte budget scaled to the backend's context window)
         C->>C: LLM verdict, nonce-bound
         alt APPROVED
             C->>FS: write GATE<N>-APPROVED (empty marker)
@@ -67,9 +78,17 @@ sequenceDiagram
         else REJECTED (attempt < MAX_REJECTS)
             C->>FS: write GATE<N>-FEEDBACK.md (the gaps)
             C-->>O: VERDICT nonce: REJECTED
-            O->>FS: archive stale evidence
-            Note over O,P: re-run SAME phase with feedback
-        else MAX_REJECTS exceeded
+            O->>O: unmet-criteria signature (T### IDs the feedback names, or a prose hash)
+            opt signature is NEW for this phase
+                O->>C: --diagnose (same backend, FULL untruncated files, rejection history)
+                activate C
+                C->>FS: write GATE<N>-HINT.md (CASE: GROUNDING or CASE: REAL-GAP + the fix)
+                deactivate C
+                Note over O: next attempt = accelerator
+            end
+            O->>FS: archive stale evidence (+ feedback, hint, acceleration note)
+            Note over O,P: re-run SAME phase
+        else MAX_REJECTS exceeded (accelerator attempts count too)
             C-->>O: still REJECTED
             O->>Human: halt (exit 2) — arbitrate
         end

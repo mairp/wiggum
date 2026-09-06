@@ -15,18 +15,14 @@ harness built around that loop.
 
 > **Runtime is bash + python3 stdlib** — no pip, no dependency manager, clone-and-run.
 
-## The cast (naming, decoded once)
+## The roles
 
-Everywhere in the code, files, flags, and env vars, the **literal role names** are used, so
-you never have to decode a joke to operate the tool. The Simpsons names appear only here.
-
-| Character | Role in the loop | In the code |
-|---|---|---|
-| **Ralph** (the namesake) | the **proposer** that does the work | `proposer.sh`, `--proposer`, `WIGGUM_PROPOSER` |
-| **Lisa** (checks Ralph's homework) | the **critic** that judges the evidence | `lib/critic.py`, `--critic`, `WIGGUM_CRITIC` |
-| **Maggie** (silently runs the show) | the **orchestrator** that drives them both | `orchestrator.sh` |
-
-From here on: **proposer** and **critic** mean exactly what they say.
+Literal role names are used everywhere — code, files, flags, env vars. The
+**orchestrator** (`orchestrator.sh`) drives the **proposer** (`proposer.sh`,
+`--proposer`, `WIGGUM_PROPOSER`) and the **critic** (`lib/critic.py`, `--critic`,
+`WIGGUM_CRITIC`). Two more passes reuse those scripts when a phase gets stuck: the
+**diagnostician** (`lib/critic.py --diagnose`) and the **accelerator**
+(`proposer.sh --role accelerator`) — see [Architecture](Architecture).
 
 ## Wiki map
 

@@ -1,10 +1,6 @@
 # Planning doc — internal only, not pushed to GitHub (per instruction).
 PLAN.md
 
-# Removed from the repo (backed up to /root/tmp) — kept ignored so it can't be
-# accidentally re-added.
-assets/the-cast-nes-springfield.png
-
 # Local Claude Code settings (host-specific permission allowlist).
 .claude/settings.local.json
 
