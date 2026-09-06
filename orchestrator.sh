@@ -833,21 +833,34 @@ feedback_gist() {
 # small next to the cost of continuing to burn full passes blind). Never blocks
 # or replaces the normal retry; it only ever adds GATE<N>-HINT.md for the next
 # proposer prompt to read (see build_proposer_prompt).
+# unmet_signature FEEDBACK_FILE — the stable identity of "what is still unmet".
+# Keys the diagnostician (fire once per distinct signature) and the accelerator
+# (which criteria to narrow to). Task IDs may carry a letter suffix (T044a,
+# T049a, T077a in real Spec Kit plans); dropping it made a phase rejected ONLY on
+# suffixed IDs look signature-less, so it fell to the prose hash and those
+# criteria vanished from the accelerator's narrowed slice.
+unmet_signature() {
+  local fb="$1" sig
+  sig="$(grep -o '\bT[0-9]\{2,\}[a-z]\?\b' "$fb" 2>/dev/null | sort -u | tr '\n' ',')"
+  if [[ -z "$sig" ]]; then
+    # Prose-only criteria (openspec-change / native prose phases) carry no stable
+    # T### token to key on — fall back to a hash of the full feedback text so a
+    # byte-identical re-rejection still dedups, but ANY change in what the critic
+    # said (even reworded) is treated as new information worth another look.
+    # The critic's terminal "VERDICT <nonce>: REJECTED" line carries a per-call
+    # nonce, so hashing it would make every re-rejection look new. Strip it.
+    sig="text:$(grep -vE '^VERDICT [0-9a-f]+:' "$fb" 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  fi
+  printf '%s' "$sig"
+}
+
 WIGGUM_DIAGNOSTICIAN="${WIGGUM_DIAGNOSTICIAN:-true}"
 maybe_run_diagnostician() {
   local n="$1" attempt="$2"
   [[ "$WIGGUM_DIAGNOSTICIAN" == "true" ]] || return 0
   local fb="$GATES_DIR/GATE${n}-FEEDBACK.md"
   [[ -f "$fb" ]] || return 0
-  local sig
-  sig="$(grep -o '\bT[0-9]\{2,\}\b' "$fb" 2>/dev/null | sort -u | tr '\n' ',')"
-  if [[ -z "$sig" ]]; then
-    # Prose-only criteria (openspec-change / native prose phases) carry no stable
-    # T### token to key on — fall back to a hash of the full feedback text so a
-    # byte-identical re-rejection still dedups, but ANY change in what the critic
-    # said (even reworded) is treated as new information worth another look.
-    sig="text:$(sha256sum "$fb" 2>/dev/null | cut -d' ' -f1)"
-  fi
+  local sig; sig="$(unmet_signature "$fb")"
   local marker="$GATES_DIR/.diagnosed-phase${n}"
   if [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$sig" ]]; then
     return 0   # already diagnosed this exact unmet set; nothing new to say
@@ -859,6 +872,182 @@ maybe_run_diagnostician() {
     --provider "$CRITIC_BACKEND" --timeout "$CRITIC_TIMEOUT" \
     --format "$SPEC_FORMAT" --feature "$SLUG" --diagnose 2>&1 | emit_out
   printf '%s' "$sig" > "$marker"
+}
+
+# ── accelerator (acts on the diagnostician's hint) ────────────────────────────
+# The diagnostician can say exactly what is wrong but cannot touch the tree (it is
+# a tool-free critic call). Without an accelerator the next proposer pass re-reads
+# the whole phase prompt to re-derive a fix the hint already spelled out. The
+# accelerator IS that retry pass — proposer.sh with the same tools (and, by default,
+# the same backend) but a NARROWED prompt: only the unmet criteria, the critic
+# feedback, the hint as the primary instruction, and the previous evidence to
+# splice. It replaces the wide proposer pass for exactly one attempt per
+# diagnostician signature and never runs twice in a row: if the critic rejects
+# the accelerated attempt, the full proposer pass runs next with a note of what
+# the accelerator changed (GATE<N>-ACCELERATION.md). It counts toward MAX_REJECTS
+# like any attempt. Disable with WIGGUM_ACCELERATOR=false.
+WIGGUM_ACCELERATOR="${WIGGUM_ACCELERATOR:-true}"
+WIGGUM_ACCELERATOR_BACKEND="${WIGGUM_ACCELERATOR_BACKEND:-}"   # empty = the proposer's
+
+# accelerator_due N PREV_ROLE — prints the diagnostician signature to act on and
+# returns 0 when the next attempt should be an accelerator pass; 1 otherwise.
+accelerator_due() {
+  local n="$1" prev_role="${2:-}"
+  [[ "$WIGGUM_ACCELERATOR" == "true" ]] || return 1
+  [[ "$prev_role" != "accelerator" ]] || return 1
+  [[ -f "$GATES_DIR/GATE${n}-HINT.md" && -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] || return 1
+  local sig; sig="$(cat "$GATES_DIR/.diagnosed-phase${n}" 2>/dev/null)"
+  [[ -n "$sig" ]] || return 1
+  local done_sig; done_sig="$(cat "$GATES_DIR/.accelerated-phase${n}" 2>/dev/null)"
+  [[ "$sig" != "$done_sig" ]] || return 1
+  printf '%s' "$sig"
+  return 0
+}
+
+# "T058,T066," → "T058|T066" (an ERE alternation); "" for a prose-only signature.
+unmet_ids_re() {
+  local sig="$1"
+  [[ "$sig" == text:* ]] && return 0
+  printf '%s' "$sig" | tr ',' '\n' | grep -E '^T[0-9]+[a-z]?$' | paste -sd'|' -
+}
+
+# What is modified in the workdir right now (git numstat vs HEAD + untracked
+# files), one sorted line per path. Two snapshots bracket the accelerator pass so
+# the acceleration note can name the files THAT pass touched, even though earlier
+# attempts' changes are still uncommitted alongside them.
+workdir_change_snapshot() {
+  local out="$1"
+  if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    {
+      git -C "$WORKDIR" diff --numstat HEAD 2>/dev/null | awk -F'\t' '{print $3 "\t+" $1 "\t-" $2}'
+      git -C "$WORKDIR" ls-files --others --exclude-standard 2>/dev/null | sed 's/$/\tnew/'
+    } | sort > "$out"
+  else
+    : > "$out"
+  fi
+}
+
+# The note the NEXT (wide) proposer pass reads so it does not redo the accelerator's
+# work. Orchestrator-written (deterministic), plus the accelerator's own optional
+# GATE<N>-ACCELERATOR-NOTE.md if it left one (blockers, a hint it judged wrong).
+write_acceleration_note() {
+  local n="$1" attempt="$2" sig="$3" before="$4" after="$5"
+  local note="$GATES_DIR/GATE${n}-ACCELERATION.md"
+  local what="${sig%,}"
+  [[ "$sig" == text:* ]] && what="the criteria named in the critic feedback (prose, no IDs)"
+  {
+    echo "# Phase $n — accelerator pass (attempt $attempt)"
+    echo
+    echo "An accelerator pass (proposer tools, narrowed prompt) already acted on the"
+    echo "diagnostician hint for: $what"
+    echo "Its changes are in the tree. Do NOT redo them — verify they hold, then fix"
+    echo "whatever the critic still rejects."
+    echo
+    echo "## Files this pass changed (vs HEAD; 'new' = untracked)"
+    local changed=""
+    [[ -s "$after" ]] && changed="$(comm -13 "$before" "$after" 2>/dev/null)"
+    if [[ -n "$changed" ]]; then
+      printf '%s\n' "$changed" | sed 's/^/- /'
+    else
+      echo "(none detected — not a git workdir, or the pass changed nothing)"
+    fi
+    if [[ -f "$GATES_DIR/GATE${n}-ACCELERATOR-NOTE.md" ]]; then
+      echo
+      echo "## The accelerator's own notes"
+      cat "$GATES_DIR/GATE${n}-ACCELERATOR-NOTE.md"
+    fi
+  } > "$note"
+  rm -f "$GATES_DIR/GATE${n}-ACCELERATOR-NOTE.md"
+}
+
+# ── build the accelerator prompt for phase N (attempt M) ──────────────────────
+# Same evidence contract as the proposer, but scoped: the unmet criteria (by the
+# diagnostician's T### signature), the feedback, the hint as the primary
+# instruction, only THEIR verification obligations, and the archived evidence to
+# splice. No constitution/spec/plan context block — the hint already did that
+# reading; the proposer prompt still carries it for the wide pass.
+build_accelerator_prompt() {
+  local n="$1" attempt="$2" sig="$3" out="$4"
+  local section title ids_re prev_ev
+  section="$(wiggum_spec_slice "$SPECS" "$n")"
+  title="$(wiggum_spec_phase_title "$SPECS" "$n")"
+  ids_re="$(unmet_ids_re "$sig")"
+  prev_ev="$(ls -t "$FEATURE_DIR/attempts/phase${n}"/*/GATE${n}-EVIDENCE.md 2>/dev/null | head -1)"
+  {
+    echo "You are the ACCELERATOR in an automated spec-driven loop. A previous attempt at"
+    echo "this phase was REJECTED on a SMALL set of criteria, and a diagnostician (a"
+    echo "second reviewer that saw the full, untruncated files) has already worked out"
+    echo "why. Your job is NARROW: fix exactly those criteria, restage their proof,"
+    echo "splice the previous evidence, then STOP. Do not re-verify or rework the rest."
+    echo
+    echo "## Working directory"
+    echo "You are operating in: $WORKDIR"
+    echo "Progress notes live in ${STATE_REL}/PROGRESS.md — read it FIRST, and append one"
+    echo "short 'acceleration' entry when done. Keep the workdir ROOT clean — all your"
+    echo "bookkeeping goes under ${STATE_REL}/, not here."
+    echo
+    echo "## Phase $n${title:+ — $title}: the criteria still UNMET"
+    if [[ -n "$ids_re" ]]; then
+      echo "Only these criteria were rejected. Everything else in the phase is already"
+      echo "confirmed and pinned — its code and its evidence must be left exactly as is."
+      echo
+      printf '%s\n' "$section" | grep -E "^#|(^|[^A-Za-z0-9])(${ids_re})([^A-Za-z0-9]|$)"
+    else
+      echo "(the critic's feedback names no criterion IDs, so the whole phase spec follows;"
+      echo "the feedback and hint below say which parts were rejected)"
+      echo
+      printf '%s\n' "$section"
+    fi
+    echo
+    echo "## Critic feedback (${GATES_REL}/GATE${n}-FEEDBACK.md) — what must become true"
+    cat "$GATES_DIR/GATE${n}-FEEDBACK.md"
+    echo
+    echo "## Diagnostician hint (${GATES_REL}/GATE${n}-HINT.md) — your PRIMARY instruction"
+    echo "It was written with the full files in view and usually contains the exact fix."
+    echo "Apply it unless the code proves it wrong; if it IS wrong, do the right fix and"
+    echo "say why in ${GATES_REL}/GATE${n}-ACCELERATOR-NOTE.md (a short, optional note —"
+    echo "also use it for anything you could not finish). A \`CASE: GROUNDING\` hint means"
+    echo "the code is fine and only the proof slice / citation needs restaging."
+    cat "$GATES_DIR/GATE${n}-HINT.md"
+    echo
+    echo "## Footprint rule — touch ONLY what the unmet criteria and the hint cite"
+    echo "Confirmed criteria are pinned to a content hash of their backing files. Editing"
+    echo "an unrelated file drops those pins and re-opens criteria that already passed —"
+    echo "the exact non-convergence this pass exists to avoid. Run the tests that cover"
+    echo "the files you change; do not reformat, rename, or tidy anything else."
+    echo
+    emit_evidence_contract
+    echo "## Evidence: splice, don't rewrite"
+    if [[ -n "$prev_ev" ]]; then
+      echo "The previous (rejected) evidence is archived at:"
+      echo "  $prev_ev"
+      echo "Read it. Produce the new ${GATES_REL}/GATE${n}-EVIDENCE.md by copying it and"
+      echo "replacing ONLY the sections for the unmet criteria above (fresh, line-numbered"
+      echo "proof slices under ${GATES_REL}/proofs/). Every other section stays byte-for-byte."
+    else
+      echo "No previous evidence is archived; write ${GATES_REL}/GATE${n}-EVIDENCE.md covering"
+      echo "every criterion of the phase, with the unmet ones re-proven."
+    fi
+    echo "Write it ATOMICALLY: ${GATES_REL}/GATE${n}-EVIDENCE.md.tmp first, then \`mv\` it onto"
+    echo "${GATES_REL}/GATE${n}-EVIDENCE.md. Its existence ends this pass, so write it LAST,"
+    echo "after the code change and its tests are done."
+    echo "This is attempt $attempt of $MAX_REJECTS for this phase."
+    if [[ "$VERIFICATION" != "off" && -f "$VERIFICATION_JSON" ]]; then
+      local vblock
+      vblock="$(python3 "$LIB_DIR/verification_plan.py" slice \
+        --plan "$VERIFICATION_JSON" --specs "$SPECS" --phase "$n" 2>/dev/null)"
+      if [[ -n "$vblock" ]]; then
+        echo
+        # Keep the plan header, the "### VO-" blocks for the unmet IDs only (all
+        # blocks for a prose signature), and drop the cumulative "- VO-" roster.
+        printf '%s\n' "$vblock" | awk -v re="$ids_re" '
+          /^### VO-/ { started = 1; keep = (re == "" || $0 ~ ("(^|[^A-Za-z0-9])(" re ")([^A-Za-z0-9]|$)")) }
+          /^### /    { if ($0 !~ /^### VO-/) { started = 1; keep = 0 } }
+          /^- VO-/   { next }
+          { if (!started || keep) print }'
+      fi
+    fi
+  } > "$out"
 }
 
 # ── oscillation detector (W8) ────────────────────────────────────────────────
@@ -894,7 +1083,7 @@ for f in files:
         txt = open(f, encoding="utf-8", errors="replace").read()
     except OSError:
         txt = ""
-    seqs.append(set(re.findall(r'\bT\d{2,}\b', txt)))
+    seqs.append(set(re.findall(r'\bT\d{2,}[a-z]?\b', txt)))
 ids = set().union(*seqs) if seqs else set()
 worst_id, worst = None, 0
 for cid in ids:
@@ -935,10 +1124,44 @@ archive_attempt() {
   # diagnostician overwrites it with a fresh one (maybe_run_diagnostician's
   # signature guard decides when that happens, not this archiving step).
   [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]] && cp "$GATES_DIR/GATE${n}-HINT.md" "$dir/GATE${n}-HINT.md"
+  # Same for the acceleration note: the wide proposer pass after a rejected
+  # accelerator attempt must still read what that pass changed.
+  [[ -f "$GATES_DIR/GATE${n}-ACCELERATION.md" ]] && cp "$GATES_DIR/GATE${n}-ACCELERATION.md" "$dir/GATE${n}-ACCELERATION.md"
   # newest verdict transcript for this phase/attempt, if any
   local vt; vt="$(ls -t "$FEATURE_DIR/verdicts/phase${n}.attempt${attempt}."*.txt 2>/dev/null | head -1)"
   [[ -n "$vt" && -f "$vt" ]] && cp "$vt" "$dir/verdict.txt"
   wiggum_emit attempt_archived phase "$n" attempt "$attempt" dir "$dir"
+}
+
+# ── evidence contract (W6) — shared by the proposer and accelerator prompts ──
+# The critic judges ONLY the evidence doc + a read-only "grounding snapshot" of the
+# files it cites. It has hard limits; evidence written blind to them turns honest,
+# implemented work into a rejection (the exact loop this contract exists to break).
+emit_evidence_contract() {
+  echo "## Evidence contract — READ THIS or your evidence will be rejected despite correct code"
+  echo "A separate automated CRITIC judges ONLY (a) this evidence file and (b) a"
+  echo "read-only grounding snapshot of the files you CITE. It cannot browse the repo."
+  echo "So for EVERY acceptance criterion that names a file and/or a symbol:"
+  echo "  1. Cite THAT exact file path in your evidence (a workdir-relative path with a"
+  echo "     slash, e.g. \`packages/sdk/src/resilience.ts\`, not a bare method name)."
+  echo "  2. Stage a LINE-NUMBERED proof slice of that file showing the exact symbols"
+  echo "     the criterion names, under ${GATES_REL}/proofs/ (e.g."
+  echo "     \`sed -n '52,78p' packages/sdk/src/resilience.ts\` piped through \`nl -ba\`,"
+  echo "     or \`grep -n\`), and cite the proof file. Quote the symbol, not just its"
+  echo "     surrounding function — the critic greps your cited file for that symbol."
+  echo "How the critic's snapshot works (write evidence it can actually ground):"
+  echo "  - Files your criteria NAME are shown with ANCHORED excerpts: ±15 line-numbered"
+  echo "    lines around each named symbol. So naming the symbol in the criterion (and"
+  echo "    ensuring it appears verbatim in the cited file) is what makes it verifiable —"
+  echo "    a mid-file implementation IS reachable this way; a vague citation is not."
+  echo "  - There is a per-snapshot byte budget. A snapshot line 'content excerpt"
+  echo "    omitted — grounding byte budget reached' means the file was VERIFIED PRESENT;"
+  echo "    it is NOT a missing file. Criterion-named files are never omitted, so cite"
+  echo "    the precise path the criterion is about rather than dozens of tangential ones."
+  echo "  - Cite files by real relative paths. Do NOT cite RPC method names (\`jobs.run\`,"
+  echo "    \`events.subscribe@v1\`) as if they were files — they are not, and the critic"
+  echo "    ignores them."
+  echo
 }
 
 # ── build the proposer prompt for phase N (attempt M) ────────────────────────
@@ -984,30 +1207,7 @@ build_proposer_prompt() {
     # The critic judges ONLY the evidence doc + a read-only "grounding snapshot" of the
     # files you cite. It has hard limits; evidence written blind to them turns honest,
     # implemented work into a rejection (the exact loop this contract exists to break).
-    echo "## Evidence contract — READ THIS or your evidence will be rejected despite correct code"
-    echo "A separate automated CRITIC judges ONLY (a) this evidence file and (b) a"
-    echo "read-only grounding snapshot of the files you CITE. It cannot browse the repo."
-    echo "So for EVERY acceptance criterion that names a file and/or a symbol:"
-    echo "  1. Cite THAT exact file path in your evidence (a workdir-relative path with a"
-    echo "     slash, e.g. \`packages/sdk/src/resilience.ts\`, not a bare method name)."
-    echo "  2. Stage a LINE-NUMBERED proof slice of that file showing the exact symbols"
-    echo "     the criterion names, under ${GATES_REL}/proofs/ (e.g."
-    echo "     \`sed -n '52,78p' packages/sdk/src/resilience.ts\` piped through \`nl -ba\`,"
-    echo "     or \`grep -n\`), and cite the proof file. Quote the symbol, not just its"
-    echo "     surrounding function — the critic greps your cited file for that symbol."
-    echo "How the critic's snapshot works (write evidence it can actually ground):"
-    echo "  - Files your criteria NAME are shown with ANCHORED excerpts: ±15 line-numbered"
-    echo "    lines around each named symbol. So naming the symbol in the criterion (and"
-    echo "    ensuring it appears verbatim in the cited file) is what makes it verifiable —"
-    echo "    a mid-file implementation IS reachable this way; a vague citation is not."
-    echo "  - There is a per-snapshot byte budget. A snapshot line 'content excerpt"
-    echo "    omitted — grounding byte budget reached' means the file was VERIFIED PRESENT;"
-    echo "    it is NOT a missing file. Criterion-named files are never omitted, so cite"
-    echo "    the precise path the criterion is about rather than dozens of tangential ones."
-    echo "  - Cite files by real relative paths. Do NOT cite RPC method names (\`jobs.run\`,"
-    echo "    \`events.subscribe@v1\`) as if they were files — they are not, and the critic"
-    echo "    ignores them."
-    echo
+    emit_evidence_contract
     # The criteria heading is adapter-specific: native calls them acceptance
     # criteria; a Spec Kit tasks.md phase is a checklist of deliverable tasks.
     if [[ "$SPEC_FORMAT" == "openspec-change" ]]; then
@@ -1071,6 +1271,13 @@ build_proposer_prompt() {
         echo "code that is already correct)."
         cat "$GATES_DIR/GATE${n}-HINT.md"
       fi
+      if [[ -f "$GATES_DIR/GATE${n}-ACCELERATION.md" ]]; then
+        echo
+        echo "### An accelerator pass already acted on that hint (${GATES_REL}/GATE${n}-ACCELERATION.md)"
+        echo "Its changes are in the tree. Do NOT redo them — verify they hold, then fix"
+        echo "whatever the critic still rejects (the feedback above is the current verdict)."
+        cat "$GATES_DIR/GATE${n}-ACCELERATION.md"
+      fi
     fi
   } > "$out"
 }
@@ -1101,6 +1308,7 @@ run_phase() {
     archive_attempt "$n" "resume-${WIGGUM_RUN_ID}"
   fi
 
+  local prev_role=""
   while (( attempt <= MAX_REJECTS + 1 )); do
     # stop.flag / budget checks at each phase-boundary step
     if [[ -f "$STOP_FLAG" ]]; then
@@ -1117,24 +1325,46 @@ run_phase() {
 
     ensure_long_job "$n" "$attempt"
 
-    local prompt_file="$FEATURE_DIR/proposer-prompt.phase${n}.txt"
-    build_proposer_prompt "$n" "$attempt" "$prompt_file"
-
-    log "----- proposer: phase $n attempt $attempt/$MAX_REJECTS ($PROPOSER_BACKEND) -----"
-    wiggum_emit proposer_start phase "$n" attempt "$attempt" backend "$PROPOSER_BACKEND"
+    # Which agent takes this attempt: the wide proposer, or — right after a NEW
+    # diagnostician hint — the narrowed accelerator (see accelerator_due).
+    local role="proposer" backend="$PROPOSER_BACKEND" rem_sig=""
+    if rem_sig="$(accelerator_due "$n" "$prev_role")"; then
+      role="accelerator"
+      backend="${WIGGUM_ACCELERATOR_BACKEND:-$PROPOSER_BACKEND}"
+    fi
+    local prompt_file="$FEATURE_DIR/${role}-prompt.phase${n}.txt"
+    local rem_before="" rem_after=""
+    if [[ "$role" == "accelerator" ]]; then
+      build_accelerator_prompt "$n" "$attempt" "$rem_sig" "$prompt_file"
+      # Mark BEFORE the pass: one accelerator pass per diagnostician signature, even
+      # if this pass is interrupted — the next attempt on the same signature is the
+      # wide proposer pass, never a second acceleration of the same hint.
+      printf '%s' "$rem_sig" > "$GATES_DIR/.accelerated-phase${n}"
+      mkdir -p "$RUN_DIR/accelerator"
+      rem_before="$RUN_DIR/accelerator/phase${n}-attempt${attempt}.before"
+      rem_after="$RUN_DIR/accelerator/phase${n}-attempt${attempt}.after"
+      workdir_change_snapshot "$rem_before"
+      log "----- accelerator: phase $n attempt $attempt/$MAX_REJECTS ($backend) — acting on the hint for ${rem_sig%,} -----"
+      wiggum_emit accelerator_start phase "$n" attempt "$attempt" backend "$backend" criteria "${rem_sig%,}"
+    else
+      build_proposer_prompt "$n" "$attempt" "$prompt_file"
+      log "----- proposer: phase $n attempt $attempt/$MAX_REJECTS ($PROPOSER_BACKEND) -----"
+      wiggum_emit proposer_start phase "$n" attempt "$attempt" backend "$PROPOSER_BACKEND"
+    fi
+    prev_role="$role"
 
     local -a prop_args=(
       --workdir "$WORKDIR"
       --evidence "$GATES_DIR/GATE${n}-EVIDENCE.md"
       --prompt-file "$prompt_file"
-      --backend "$PROPOSER_BACKEND"
+      --backend "$backend"
       --max-iter "$MAX_ITER"
       --timeout "$PROPOSER_TIMEOUT"
       --feature "$SLUG"
-      --role proposer
+      --role "$role"
       --phase "$n"
       --attempt "$attempt"
-      --invocation-id "${WIGGUM_RUN_ID}-proposer-phase-${n}-attempt-${attempt}"
+      --invocation-id "${WIGGUM_RUN_ID}-${role}-phase-${n}-attempt-${attempt}"
     )
     [[ "$TELEMETRY" == "true" ]] && prop_args+=( --stream-json --loki-url "$LOKI_URL" )
     # OTEL is independent of --telemetry; --stream-json is idempotent if both add it.
@@ -1143,6 +1373,12 @@ run_phase() {
 
     bash "$SCRIPT_DIR/proposer.sh" "${prop_args[@]}" 2>&1 | emit_out
     local prc="${PIPESTATUS[0]}"
+
+    if [[ "$role" == "accelerator" ]]; then
+      workdir_change_snapshot "$rem_after"
+      write_acceleration_note "$n" "$attempt" "$rem_sig" "$rem_before" "$rem_after"
+      wiggum_emit acceleration_note phase "$n" attempt "$attempt" note "$GATES_DIR/GATE${n}-ACCELERATION.md"
+    fi
 
     # Proposer exits 6 when it saw stop.flag (graceful stop, or a `wiggum stop
     # --now` kill followed by the flag check). That is a CLEAN stop: consume the
@@ -1271,13 +1507,14 @@ run_phase() {
       # and drop the diagnostician's signature marker so a future re-run of this
       # phase slug (a regression, a resumed feature) starts undiagnosed rather than
       # silently comparing against a stale signature from this approved run.
-      if [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" || -f "$GATES_DIR/GATE${n}-HINT.md" ]]; then
+      if [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" || -f "$GATES_DIR/GATE${n}-HINT.md" || -f "$GATES_DIR/GATE${n}-ACCELERATION.md" ]]; then
         local adir="$FEATURE_DIR/attempts/phase${n}/approved"
         mkdir -p "$adir"
         [[ -f "$GATES_DIR/GATE${n}-FEEDBACK.md" ]] && mv "$GATES_DIR/GATE${n}-FEEDBACK.md" "$adir/GATE${n}-FEEDBACK.md"
         [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]] && mv "$GATES_DIR/GATE${n}-HINT.md" "$adir/GATE${n}-HINT.md"
+        [[ -f "$GATES_DIR/GATE${n}-ACCELERATION.md" ]] && mv "$GATES_DIR/GATE${n}-ACCELERATION.md" "$adir/GATE${n}-ACCELERATION.md"
       fi
-      rm -f "$GATES_DIR/.diagnosed-phase${n}"
+      rm -f "$GATES_DIR/.diagnosed-phase${n}" "$GATES_DIR/.accelerated-phase${n}"
       wiggum_emit phase_done phase "$n" attempt "$attempt" title "$title"
       maybe_git_checkpoint "$n" "$title"
       return 0
@@ -1331,6 +1568,8 @@ run_phase() {
       log "#   latest feedback : $GATES_DIR/GATE${n}-FEEDBACK.md"
       [[ -f "$GATES_DIR/GATE${n}-HINT.md" ]] && \
         log "#   diagnostician hint : $GATES_DIR/GATE${n}-HINT.md (read this first)"
+      [[ -f "$GATES_DIR/GATE${n}-ACCELERATION.md" ]] && \
+        log "#   acceleration note   : $GATES_DIR/GATE${n}-ACCELERATION.md (what the accelerator changed)"
       log "#   attempt history : $FEATURE_DIR/attempts/phase${n}/"
       # Rejection trail: one line per attempt so a human sees at a glance whether the
       # loop was progressing or spinning on the same point.

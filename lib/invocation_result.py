@@ -13,7 +13,9 @@ import time
 
 CONTEXT_CONTRACT = "wiggum-invocation/v1"
 RESULT_CONTRACT = "wiggum-invocation-result/v1"
-ROLES = {"proposer", "critic"}
+# accelerator = proposer.sh run with a narrowed prompt (see orchestrator.sh); it
+# shares the proposer's iteration semantics (>= 1), only the label differs.
+ROLES = {"proposer", "accelerator", "critic"}
 MODES = {"structured", "raw-text", "degraded"}
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -94,7 +96,7 @@ class InvocationContext:
         _required_string("feature", feature)
         _required_string("backend", backend)
         if role not in ROLES:
-            raise ValueError("role must be proposer or critic")
+            raise ValueError("role must be proposer, accelerator or critic")
         _integer("phase", phase, 0)
         _integer("attempt", attempt, 1)
         _integer("iteration", iteration, 0 if role == "critic" else 1)

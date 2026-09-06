@@ -413,3 +413,113 @@ def test_default_verification_executes_and_isolates_artifacts_by_feature(tmp_pat
     assert (workdir / "testautomation" / "002-beta" / "TEST_PLAN.md").is_file()
     root_config = (workdir / ".wiggum" / "last-run.conf").read_text()
     assert "FEATURE=002-beta" in root_config
+
+
+# ── accelerator (acts on the diagnostician's hint) ────────────────────────────
+# The first rejection of a phase yields a NEW unmet-criteria signature, so the
+# diagnostician writes GATE<N>-HINT.md; the NEXT attempt must then be an accelerator
+# pass (proposer.sh, role=accelerator, narrowed prompt) — and only one: a second
+# rejection on the SAME signature (the fake critic always says REJECTED, and the
+# text signature ignores the per-call VERDICT nonce) falls back to the wide
+# proposer pass, which reads the acceleration note. Attempts are shared, so the
+# run still halts at MAX_REJECTS.
+def _role_trail(events):
+    keep = ("proposer_start", "accelerator_start", "acceleration_note",
+            "diagnostician_trigger", "reject")
+    return [(e["event"], str(e.get("attempt", ""))) for e in events if e["event"] in keep]
+
+
+def test_accelerator_takes_the_retry_after_a_new_hint_then_yields_to_proposer(tmp_path):
+    result, workdir, events = _run_orchestrator(
+        tmp_path, verdict="REJECTED", max_iter="1", max_rejects="3")
+    assert result.returncode == 2, result.stdout + "\n" + result.stderr
+
+    assert _role_trail(events) == [
+        ("proposer_start", "1"), ("reject", "1"), ("diagnostician_trigger", "1"),
+        ("accelerator_start", "2"), ("acceleration_note", "2"), ("reject", "2"),
+        ("proposer_start", "3"), ("reject", "3"),
+    ]
+    rem = [e for e in events if e["event"] == "accelerator_start"][0]
+    assert rem["phase"] == "1" and rem["backend"] == "prime"
+
+    feature = workdir / ".wiggum" / "features" / "obs-lifecycle"
+    rem_prompt = (feature / "accelerator-prompt.phase1.txt").read_text()
+    assert "You are the ACCELERATOR" in rem_prompt
+    assert "your PRIMARY instruction" in rem_prompt
+    assert "## Evidence contract" in rem_prompt          # shared with the proposer
+    assert "GATE1-EVIDENCE.md" in rem_prompt
+    # the wide pass that followed was told what the accelerator already did
+    prop_prompt = (feature / "proposer-prompt.phase1.txt").read_text()
+    assert "An accelerator pass already acted on that hint" in prop_prompt
+    # the note is archived with the rejected accelerator attempt and stays live
+    assert (feature / "attempts" / "phase1" / "attempt2" / "GATE1-ACCELERATION.md").is_file()
+    note = (feature / "gates" / "GATE1-ACCELERATION.md").read_text()
+    assert note.startswith("# Phase 1 — accelerator pass (attempt 2)")
+    # one acceleration per signature: the marker records the signature it acted on
+    marker = (feature / "gates" / ".accelerated-phase1").read_text()
+    assert marker == (feature / "gates" / ".diagnosed-phase1").read_text()
+
+
+def test_accelerator_can_be_disabled(tmp_path):
+    result, _workdir, events = _run_orchestrator(
+        tmp_path, verdict="REJECTED", max_iter="1", max_rejects="2",
+        extra_env={"WIGGUM_ACCELERATOR": "false"})
+    assert result.returncode == 2, result.stdout + "\n" + result.stderr
+    names = _names(events)
+    assert "accelerator_start" not in names
+    assert names.count("proposer_start") == 2
+
+
+# ── unmet-criteria signature: suffixed task IDs (T049a) ──────────────────────
+# Real Spec Kit plans number inserted work with a letter suffix (T044a, T049a,
+# T077a). A digits-only token pattern dropped those: a phase rejected only on
+# suffixed IDs looked signature-less and fell to the prose hash, and the
+# accelerator's narrowed slice silently omitted exactly the criteria the critic
+# had named. These drive the real bash functions out of orchestrator.sh.
+def _bash_fn(script, tmp_path):
+    """Run `script` with orchestrator.sh's pure signature helpers in scope."""
+    harness = (
+        'eval "$(sed -n \'/^unmet_signature()/,/^}/p; /^unmet_ids_re()/,/^}/p\' %s)"\n%s'
+        % (ORCHESTRATOR, script))
+    out = subprocess.run(["/usr/bin/bash", "-c", harness], text=True, cwd=str(tmp_path),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    assert out.returncode == 0, out.stdout + "\n" + out.stderr
+    return out.stdout.strip()
+
+
+def test_unmet_signature_keeps_letter_suffixed_task_ids(tmp_path):
+    fb = tmp_path / "GATE8-FEEDBACK.md"
+    fb.write_text(
+        "# Phase 8 — critic feedback (REJECTED)\n\n"
+        "- T049a [US3] gateway claim profile not evidenced\n"
+        "- T082 Scenario 4 (lab run) not executed\n"
+        "- T082 named twice must dedup\n\n"
+        "VERDICT 96f3dc4ecd3e9b00: REJECTED\n")
+    sig = _bash_fn('unmet_signature "%s"' % fb, tmp_path)
+    assert sig == "T049a,T082,"
+    ids = _bash_fn('unmet_ids_re "%s"' % sig, tmp_path)
+    assert ids == "T049a|T082"
+
+
+def test_unmet_signature_falls_back_to_prose_hash_without_the_verdict_nonce(tmp_path):
+    """No T-token → hash the prose, but never the per-call VERDICT nonce line:
+    hashing it would make every re-rejection look like new information and
+    re-fire the diagnostician on an unchanged verdict."""
+    body = "The acceptance criterion about durable artifacts is not substantiated.\n"
+    first = tmp_path / "a.md"
+    first.write_text(body + "VERDICT 1111111111111111: REJECTED\n")
+    second = tmp_path / "b.md"
+    second.write_text(body + "VERDICT 2222222222222222: REJECTED\n")
+    sig_a = _bash_fn('unmet_signature "%s"' % first, tmp_path)
+    sig_b = _bash_fn('unmet_signature "%s"' % second, tmp_path)
+    assert sig_a.startswith("text:") and sig_a == sig_b
+
+    third = tmp_path / "c.md"
+    third.write_text("A different gap entirely.\nVERDICT 1111111111111111: REJECTED\n")
+    assert _bash_fn('unmet_signature "%s"' % third, tmp_path) != sig_a
+
+
+def test_unmet_ids_re_is_empty_for_a_prose_signature(tmp_path):
+    """A prose signature has no IDs to narrow to, so the accelerator prompt must
+    fall back to the whole phase rather than filtering on a literal "text:...".."""
+    assert _bash_fn('unmet_ids_re "text:deadbeef"', tmp_path) == ""

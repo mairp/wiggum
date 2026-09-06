@@ -179,6 +179,10 @@ class Totals:
             self.phase = ev.get("phase", self.phase)
             self.attempt = ev.get("attempt")
             self._set_activity("proposer working")
+        elif e == "accelerator_start":
+            self.phase = ev.get("phase", self.phase)
+            self.attempt = ev.get("attempt")
+            self._set_activity("accelerator working")
         elif e == "iter_start":
             self.itr = ev.get("iter")
             self.max_iter = ev.get("max_iter")
@@ -267,6 +271,12 @@ def narrate(ev, detail="tools", debug=False):
     if e == "proposer_start":
         return f"{stamp}  {BMAGENTA}✱ proposer{RESET} {DIM}working — phase {p}, " \
                f"attempt {BOLD}{ev.get('attempt','?')}{RESET}{DIM}, {ev.get('backend','?')}{RESET}"
+    if e == "accelerator_start":
+        return f"{stamp}  {BMAGENTA}✚ accelerator{RESET} {DIM}acting on the hint — phase {p}, " \
+               f"attempt {BOLD}{ev.get('attempt','?')}{RESET}{DIM}, {ev.get('backend','?')}" \
+               f"{(' · ' + ev.get('criteria')) if ev.get('criteria') else ''}{RESET}"
+    if e == "acceleration_note":
+        return f"{stamp}  {GRAY}↦ acceleration note written (phase {p}, attempt {ev.get('attempt','?')}){RESET}"
     if e == "iter_start":
         if lvl < 1:
             return None
@@ -656,7 +666,7 @@ class State:
             self.cur_phase = ev.get("phase")
             self.cur_title = ev.get("title", "")
             self.phases_total = ev.get("total", self.phases_total)
-        elif e == "proposer_start":
+        elif e in ("proposer_start", "accelerator_start"):
             self.cur_phase = ev.get("phase", self.cur_phase)
             self.attempt[str(ev.get("phase"))] = ev.get("attempt")
         elif e == "verdict":

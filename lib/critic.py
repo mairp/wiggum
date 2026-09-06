@@ -54,7 +54,24 @@ GROUNDING_TOTAL_CAP   = 327680    # 320 KB. Derived, not guessed: the critic's
                                    # 83k of ~150k available tokens — 55 files elided,
                                    # 18 emitted whole, with ~213 KB of headroom unused.
                                    # 320 KB keeps the prompt near 407 KB (~128k tokens)
-                                   # plus the 49k verdict reserve = ~177k of 200k.    # hard cap on EXCERPT bytes appended (fenced blocks
+                                   # plus the 49k verdict reserve = ~177k of 200k.
+                                   #
+                                   # This is the REFERENCE value, tuned against a 200k-
+                                   # token context (gpt-5's window, per the W17 incident
+                                   # below). It is NOT used directly any more — every
+                                   # provider wiggum supports has a DIFFERENT real window
+                                   # (Claude Opus 200k, a locally-served Qwen3.8 measured
+                                   # at 229,376 on this fleet's 3090, GLM-5.3 at 128,000,
+                                   # Prime's backing model unknown from here) and using one
+                                   # flat number for all of them either wastes headroom on
+                                   # a bigger window (this exact starvation bug, just from
+                                   # under-sizing instead of an oversized phase) or risks
+                                   # overflowing a smaller one. `grounding_total_cap_for()`
+                                   # scales this reference LINEARLY by the resolved
+                                   # backend's real context window instead. See
+                                   # `_critic_context_tokens()` just below for where each
+                                   # number comes from.
+                                   # hard cap on EXCERPT bytes appended (fenced blocks
                                    # only — never suppresses a presence line, only its
                                    # content excerpt). Was 32000, which starved the
                                    # snapshot on any phase citing ~20 source files and
@@ -63,6 +80,135 @@ GROUNDING_TOTAL_CAP   = 327680    # 320 KB. Derived, not guessed: the critic's
                                    # lottery). Modern context windows make 32 KB
                                    # needlessly stingy; the adversarial gate is only
                                    # sound if the judge can see the defendant's exhibit.
+REFERENCE_CONTEXT_TOKENS = 200000  # the window GROUNDING_TOTAL_CAP (above) was tuned
+                                   # against — gpt-5's window, per the W17 incident.
+BYTES_PER_TOKEN = 3.18            # measured on this fleet's actual prompts (see
+                                   # GROUNDING_TOTAL_CAP above); used for every provider,
+                                   # not just the one it was measured on — a rough
+                                   # cross-model estimate is far better than treating
+                                   # every backend as if it had the SAME window, which is
+                                   # the bug this whole block exists to fix.
+
+# Real context windows, split by HOW critic_call() actually reaches each provider --
+# this distinction matters and was gotten wrong once already (see below).
+#
+# `dsh`/`bebop` genuinely route through this fleet's own local infrastructure
+# (llama-swap / cc-compass-shim), so that infra's own already-reconciled numbers
+# ARE the real, authoritative ceiling for those two providers:
+#   /root/llama-swap/config.yaml       — qwen3.8-27b: 229,376, the MEASURED maximum
+#                                        that loads on this host's 3090 (ctx sweep log).
+#   /root/cc-compass-shim/.env          — QWEN_CTX_MAP, the ceiling every harness on
+#                                        this host reconciles against for muse/nemotron/
+#                                        auto (131,072 each); gpt-5*:300,000 (the
+#                                        SHIM's own enforced guard for a dsh/bebop
+#                                        model ref ROUTED THROUGH compass to gpt-5 --
+#                                        a real, different ceiling from the 400,000
+#                                        gpt-5's own vendor API allows, because a
+#                                        compass-routed call answers to the shim's
+#                                        guard, not OpenAI's raw limit; this is exactly
+#                                        the config the 003-datacenter-service-
+#                                        constructs feature's saved run uses
+#                                        (CRITIC_BACKEND=dsh:compass-gpt5-high/gpt-5));
+#                                        QWEN_CTX=98304 is its own documented fallback
+#                                        for an unmapped model.
+#   /root/.dsh/settings.yaml            — glm-5.3-flash: contextWindow 128000 (GLM's
+#                                        declared standard window).
+_LOCAL_MODEL_CONTEXT_TOKENS = {
+    "qwen3.8-27b": 229376, "qwen3.8-27b-q5": 229376, "qwen3.8-27b-q4": 229376,
+    "muse": 131072, "muse-glimmer-30b": 131072,
+    "nemotron": 131072, "nemotron-lightning-30b": 131072,
+    "auto": 131072, "qwen-auto": 131072,
+    "glm-5.3": 128000, "glm-5.3-flash": 128000,
+    "gpt-5": 300000, "gpt-5.5": 300000, "gpt-5.6-sol": 300000, "gpt-5.2": 300000,
+}
+_DEFAULT_CONTEXT_TOKENS = 98304    # cc-compass-shim/.env's own QWEN_CTX fallback for
+                                   # a model absent from its map — used for Prime
+                                   # (backing model unknown from critic.py) and any
+                                   # dsh/bebop model ref this table doesn't recognize.
+
+# `claude`/`codex` call the vendor APIs DIRECTLY (call_claude / call_openai_chat) --
+# NOT through this fleet's shim at all, so a number from /root/.prime/agent/models.json
+# or cc-compass-shim's QWEN_CTX_MAP is the WRONG source for these two (that number is
+# an internal operational ceiling Prime/Compass impose on themselves for a completely
+# different code path, not the vendor's real context window). First attempt at this
+# table used exactly that wrong source and got Claude off by 5x (200,000 vs the real
+# 1,000,000) -- fixed by reading the actual current model table instead.
+# Verified via the `claude-api` skill's current model table (cached 2026-06-24): every
+# current Claude model has a 1,000,000-token window except Haiku 4.5 (200,000).
+_CLAUDE_MODEL_CONTEXT_TOKENS = {
+    "claude-opus-4-8": 1000000, "claude-opus-4.8": 1000000,
+    "claude-opus-4-7": 1000000, "claude-opus-4-6": 1000000,
+    "claude-opus-5": 1000000,
+    "claude-sonnet-5": 1000000, "claude-sonnet-4-6": 1000000,
+    "claude-fable-5": 1000000, "claude-fable-5-1": 1000000,
+    "claude-mythos-5-1": 1000000,
+    "claude-haiku-4-5": 200000,
+}
+# Verified from OpenAI's official API model docs (developers.openai.com/api/docs/
+# models/gpt-5, checked 2026-09-06): the bare "gpt-5" id (default snapshot
+# gpt-5-2025-08-07) is 400,000 total (272,000 input + 128,000 output) -- NOT the
+# 200,000 the fleet's Compass/Prime config uses for its own unrelated routing.
+# Newer family members have larger windows per their own OpenAI model pages:
+# gpt-5.5 1,000,000; gpt-5.4/gpt-5.4-pro ~1,050,000. "gpt-5.6-sol"/"gpt-5.2" are
+# this fleet's own LiteLLM/Compass routing aliases, not real OpenAI model ids --
+# dropped from this table; WIGGUM_CODEX_CRITIC_MODEL naming one of them should go
+# through WIGGUM_CRITIC_CONTEXT_TOKENS instead of a guessed table entry here.
+_CODEX_MODEL_CONTEXT_TOKENS = {
+    "gpt-5": 400000, "gpt-5.5": 1000000, "gpt-5.4": 1050000, "gpt-5.4-pro": 1050000,
+}
+
+
+def _critic_context_tokens(provider):
+    """The critic backend's real context window, in tokens. WIGGUM_CRITIC_CONTEXT_TOKENS
+    always wins when set — it is the only correct answer for a host-specific model these
+    tables can't know about (in particular Prime, whose backing model critic.py never
+    sees). Otherwise resolved from the model actually configured for the given provider,
+    falling back to _DEFAULT_CONTEXT_TOKENS for anything unrecognized."""
+    override = os.environ.get("WIGGUM_CRITIC_CONTEXT_TOKENS")
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            warn("WIGGUM_CRITIC_CONTEXT_TOKENS=%r is not an integer; ignoring" % override)
+    if provider == "claude":
+        model = os.environ.get("WIGGUM_CLAUDE_CRITIC_MODEL", "claude-opus-4-8")
+        # fallback = Haiku 4.5's window, the smallest in the current Claude lineup —
+        # safer than assuming an unrecognized future model matches the 1M majority.
+        return _CLAUDE_MODEL_CONTEXT_TOKENS.get(model, 200000)
+    if provider == "codex":
+        model = os.environ.get("WIGGUM_CODEX_CRITIC_MODEL", "gpt-5")
+        # fallback: a conservative modern-API floor, well under verified "gpt-5"
+        # (400,000) — an unrecognized model name could be an older/smaller one.
+        return _CODEX_MODEL_CONTEXT_TOKENS.get(model, 128000)
+    if provider == "dsh" or provider.startswith("dsh:"):
+        model_ref = provider.partition(":")[2] if provider.startswith("dsh:") else ""
+        model = model_ref.rpartition("/")[2] if "/" in model_ref else model_ref
+        return _LOCAL_MODEL_CONTEXT_TOKENS.get(model, _DEFAULT_CONTEXT_TOKENS)
+    if provider == "bebop":
+        backend = os.environ.get("WIGGUM_BEBOP_BACKEND", "compass")
+        model = os.environ.get("WIGGUM_BEBOP_CRITIC_MODEL") or backend
+        return _LOCAL_MODEL_CONTEXT_TOKENS.get(model, _DEFAULT_CONTEXT_TOKENS)
+    # prime / prime:<variant> — the backing model is never visible from critic.py
+    # (call_prime_shell takes no model argument), so there is nothing to key a table
+    # lookup on; WIGGUM_CRITIC_CONTEXT_TOKENS above is the only way to correct this.
+    return _DEFAULT_CONTEXT_TOKENS
+
+
+def _scaled_cap(reference_bytes, context_tokens, floor_bytes=65536):
+    """Scale a byte budget that was tuned/measured at REFERENCE_CONTEXT_TOKENS
+    LINEARLY to a different real context window, instead of using one flat number
+    for every backend (the bug this whole block exists to fix — see
+    GROUNDING_TOTAL_CAP's comment above). `floor_bytes` guards only against a
+    pathological override; every real window in the tables above scales to a
+    comfortably larger result than this floor."""
+    return max(floor_bytes, round(reference_bytes * context_tokens / REFERENCE_CONTEXT_TOKENS))
+
+
+def grounding_total_cap_for(provider):
+    """The grounding byte budget for THIS critic call's actual backend."""
+    return _scaled_cap(GROUNDING_TOTAL_CAP, _critic_context_tokens(provider))
+
+
 ANCHOR_CONTEXT_LINES  = 15         # ±N lines quoted around each criterion-symbol match
                                    # in a criterion-named file (W2 anchored excerpts).
 ANCHOR_MAX_BYTES      = 6000       # per-file FLOOR for an anchored excerpt (small files).
@@ -867,7 +1013,11 @@ def grounding_section(section):
     return section[:start] + section[end:]
 
 def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=None,
-                       members=None, hint=None, export_targets=None):
+                       members=None, hint=None, export_targets=None, total_cap=None):
+    # `total_cap` — the byte budget for this call. Defaults to GROUNDING_TOTAL_CAP (the
+    # 200k-token reference value) for backward compatibility with direct callers/tests;
+    # main() always passes the provider-scaled value from grounding_total_cap_for().
+    total_cap = GROUNDING_TOTAL_CAP if total_cap is None else total_cap
     # `priority` = paths the criteria NAME (W1): they are ordered first AND their content
     # excerpt is ALWAYS emitted (never suppressed by the byte budget) — a criterion that
     # names a file must never be unverifiable because budget was spent on other files.
@@ -1067,7 +1217,7 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
         # window, so the prompt was TRUNCATED and the critic still could not see the
         # files — the same symptom as emitting nothing. Degrade instead: whole ->
         # anchored -> head/tail, keeping the presence line unconditionally.
-        if whole and total + len(whole) > GROUNDING_TOTAL_CAP:
+        if whole and total + len(whole) > total_cap:
             whole = ""
             anchored = anchored_excerpt(full, anchors) if is_priority else ""
         if whole:
@@ -1093,7 +1243,7 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
         # only silently and unpredictably, so an explicit budget is strictly better.
         # Priority keeps first claim (it is ordered first) and a bigger allowance;
         # everything else shares what remains.
-        budget = GROUNDING_TOTAL_CAP if is_priority else GROUNDING_TOTAL_CAP // 2
+        budget = total_cap if is_priority else total_cap // 2
         if total + len(block) <= budget:
             lines.append(block)
             total += len(block)
@@ -1136,16 +1286,20 @@ def _sniff_binary(head):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Diagnostician (stuck-loop mitigation) — see run_diagnostician for the trigger.
 # ─────────────────────────────────────────────────────────────────────────────
-def full_dump_snapshot(paths, workdir, search_dirs=None, members=None):
+def full_dump_snapshot(paths, workdir, search_dirs=None, members=None,
+                       file_cap=None, total_cap=None):
     """Unlike grounding_snapshot (budget-degraded whole -> anchored -> head/tail
     across a phase's WHOLE cited universe), this reads the FULL content of each
     resolved path with no head/tail elision. The diagnostician only ever sees the
     files behind ONE phase's still-unmet criteria — a small subset of what the
-    normal critic pass had to fit in GROUNDING_TOTAL_CAP — so the budget that
-    starves large phases does not apply here. Still capped (DIAGNOSTICIAN_FILE_CAP /
-    DIAGNOSTICIAN_TOTAL_CAP) as a safety valve, never silently: every cap hit is
-    labelled in the output so the diagnostician knows it, rather than reading a
-    quietly-clipped file as complete."""
+    normal critic pass had to fit in its (provider-scaled) grounding budget — so
+    that budget does not apply here. Still capped (`file_cap`/`total_cap`, default
+    DIAGNOSTICIAN_FILE_CAP/DIAGNOSTICIAN_TOTAL_CAP for callers/tests that don't scale
+    them) as a safety valve, never silently: every cap hit is labelled in the output
+    so the diagnostician knows it, rather than reading a quietly-clipped file as
+    complete. run_diagnostician() always passes provider-scaled values."""
+    file_cap = DIAGNOSTICIAN_FILE_CAP if file_cap is None else file_cap
+    total_cap = DIAGNOSTICIAN_TOTAL_CAP if total_cap is None else total_cap
     if members is None:
         members = _workspace_members(workdir)
     out = []
@@ -1169,19 +1323,18 @@ def full_dump_snapshot(paths, workdir, search_dirs=None, members=None):
             continue
         try:
             with open(full, "rb") as fh:
-                data = fh.read(DIAGNOSTICIAN_FILE_CAP + 1)
+                data = fh.read(file_cap + 1)
         except OSError as e:
             out.append("### `%s` — could not read (%s)" % (p, e))
             continue
-        truncated = len(data) > DIAGNOSTICIAN_FILE_CAP
-        text = data[:DIAGNOSTICIAN_FILE_CAP].decode("utf-8", errors="replace")
-        if total + len(text) > DIAGNOSTICIAN_TOTAL_CAP:
+        truncated = len(data) > file_cap
+        text = data[:file_cap].decode("utf-8", errors="replace")
+        if total + len(text) > total_cap:
             out.append("### `%s` — SKIPPED (diagnostician total budget reached; "
                        "file verified present on disk)" % p)
             continue
         total += len(text)
-        note = " (truncated at %d bytes — file is larger)" % DIAGNOSTICIAN_FILE_CAP \
-               if truncated else ""
+        note = " (truncated at %d bytes — file is larger)" % file_cap if truncated else ""
         out.append("### `%s`%s\n```\n%s\n```" % (p, note, text))
     return "\n\n".join(out)
 
@@ -1244,7 +1397,11 @@ def run_diagnostician(args, workdir, n, feature_dir, gates_dir, gates_rel, secti
     members = _workspace_members(workdir)
     spec_dirs = [d for d in extract_dirs(ground_sec, workdir, search_dirs)
                  if d not in set(paths)]
-    files_block = (full_dump_snapshot(paths + spec_dirs, workdir, search_dirs, members=members)
+    context_tokens = _critic_context_tokens(args.provider)
+    files_block = (full_dump_snapshot(
+                      paths + spec_dirs, workdir, search_dirs, members=members,
+                      file_cap=_scaled_cap(DIAGNOSTICIAN_FILE_CAP, context_tokens),
+                      total_cap=_scaled_cap(DIAGNOSTICIAN_TOTAL_CAP, context_tokens))
                   if (paths or spec_dirs) else
                   "(no file paths cited in the evidence or criteria)")
 
@@ -2092,7 +2249,8 @@ def main():
         export_targets = _declared_build_exports(workdir, members)
         grounding = grounding_snapshot(
             paths, workdir, search_dirs, priority=priority, anchors=anchors,
-            members=members, hint=hint, export_targets=export_targets) if paths else \
+            members=members, hint=hint, export_targets=export_targets,
+            total_cap=grounding_total_cap_for(args.provider)) if paths else \
             "\n## Grounding snapshot\n(No file paths cited in the evidence.)"
         # Anti-blind-spot backstop: files cited (by evidence OR spec) that the strict
         # extractor missed but that resolve on disk. Tell the critic to treat them as

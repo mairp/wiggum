@@ -891,13 +891,13 @@ PY
     fi
     if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]]; then
       python3 - "$invocation_dir/metadata.json" "$RUN_ID" "$FEATURE" "$stream_backend" \
-        "$PHASE" "$ATTEMPT" "$iter" "$invocation_id" "$EVIDENCE" <<'PY'
+        "$PHASE" "$ATTEMPT" "$iter" "$invocation_id" "$EVIDENCE" "$ROLE" <<'PY'
 import json, os, sys, tempfile
 (path, run_id, feature, backend, phase, attempt, iteration,
- invocation_id, evidence) = sys.argv[1:]
+ invocation_id, evidence, role) = sys.argv[1:]
 value = {
     "contract": "wiggum-invocation/v1", "run_id": run_id, "feature": feature,
-    "role": "proposer", "backend": backend, "phase": int(phase),
+    "role": role, "backend": backend, "phase": int(phase),
     "attempt": int(attempt), "iteration": int(iteration),
     "invocation_id": invocation_id, "observability_mode": "structured",
     "provider_format": "prime-v3", "expected_evidence": os.path.abspath(evidence),

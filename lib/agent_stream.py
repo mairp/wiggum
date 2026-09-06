@@ -344,7 +344,7 @@ def main():
     parser.add_argument("--run-id", default=os.environ.get("WIGGUM_RUN_ID", ""))
     parser.add_argument("--task", default=os.environ.get("WIGGUM_TASK", ""))
     parser.add_argument("--feature", default=os.environ.get("WIGGUM_FEATURE", ""))
-    parser.add_argument("--role", choices=("proposer", "critic"), default=None)
+    parser.add_argument("--role", choices=("proposer", "accelerator", "critic"), default=None)
     parser.add_argument("--backend", default=os.environ.get("WIGGUM_BACKEND_LABEL", ""))
     parser.add_argument("--phase", type=int)
     parser.add_argument("--attempt", type=int)

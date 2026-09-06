@@ -285,6 +285,66 @@ It never re-fires on an unchanged signature (no point paying for the same
 answer twice), never blocks or replaces the normal retry, and never approves or
 rejects anything itself — it's advisory. Disable with `WIGGUM_DIAGNOSTICIAN=false`.
 
+### Accelerator (acting on the diagnostician's hint)
+
+The diagnostician knows the fix but cannot touch the tree (it is a tool-free
+critic call). Left alone, the next proposer pass re-reads the FULL phase prompt
+(every task, contract and verification obligation) to re-derive a change the
+hint already spelled out — on a real 12-task phase that was a 16-minute pass to
+apply a two-file diff.
+
+The **accelerator** is that retry pass, narrowed. It is `proposer.sh` with the
+same tools and (by default) the same backend, run with `--role accelerator` and a
+prompt that carries only:
+
+- the unmet criteria (by the diagnostician's `T###` signature; the whole phase
+  for prose-only specs) and only *their* verification obligations,
+- the critic feedback, and the hint as the **primary instruction**,
+- the archived evidence, with the order to splice only the rejected criteria's
+  sections and leave everything else byte-for-byte,
+- a footprint rule: touch only files the unmet criteria and the hint cite.
+  Confirmed criteria are pinned (W9) to a content hash of their backing files;
+  a wide edit drops those pins and re-opens criteria that already passed.
+
+Sequencing is strict — one writer at a time, never a parallel agent:
+
+```
+reject → diagnostician (new signature → GATE<N>-HINT.md)
+       → attempt N+1 = ACCELERATOR (once per signature)  → verification → critic
+             APPROVED → done
+             REJECTED, same signature → attempt N+2 = wide PROPOSER, whose prompt
+                        carries GATE<N>-ACCELERATION.md (files the accelerator
+                        changed + its own notes) so it does not redo that work
+             REJECTED, new signature  → diagnostician → accelerator again
+```
+
+An accelerator attempt counts toward `MAX_REJECTS` like any other, and it never
+runs twice in a row. Its prompt is written to `accelerator-prompt.phase<N>.txt`
+next to the proposer's; its invocation artifacts land under `.../accelerator/`.
+Disable with `WIGGUM_ACCELERATOR=false`; point it at a different model with
+`WIGGUM_ACCELERATOR_BACKEND`.
+
+### Grounding budget scales to the actual critic backend's context window
+
+`GROUNDING_TOTAL_CAP` (and the diagnostician's own, larger budget) is not one
+flat number for every provider — each real backend has a different context
+window, and using one number for all of them either wastes headroom on a
+bigger window (this is the SAME starvation failure the diagnostician exists
+for, just from under-sizing instead of an oversized phase) or risks
+overflowing a smaller one. Wiggum resolves the actual window per call — the
+Claude/OpenAI providers call those vendors' APIs directly, so they're keyed
+against the vendors' own published windows (Claude Opus 4.8: 1,000,000; GPT-5:
+400,000), not a local fleet's internal operational settings for an unrelated
+routing path. DSH/bebop genuinely do route through this fleet's local
+infrastructure, so THEIR numbers come from there instead: a locally-served
+Qwen3.8 at whatever this fleet measured it can actually load (229,376 on the
+reference 24 GB card), GLM-5.3 at its declared 128,000. The byte budget scales
+from whichever of these actually applies, instead of guessing or hardcoding
+one provider's number for all of them.
+Override with `WIGGUM_CRITIC_CONTEXT_TOKENS` for any backend the built-in
+table doesn't know (in particular Prime, whose backing model isn't visible to
+`critic.py` at all) or to correct a host-specific deployment.
+
 ## Quick start
 
 Clone, set your key, alias, run:
@@ -455,6 +515,9 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | `attempt_archived` | orchestrator | a rejected evidence file was archived before retry |
 | `verdict` | critic | the critic's APPROVED/REJECTED decision |
 | `reject` | orchestrator | phase N rejected (attempt M) with feedback |
+| `diagnostician_trigger` / `diagnostician_start` / `diagnostician_done` / `diagnostician_error` | orchestrator / critic | a NEW unmet-criteria signature: one tool-free full-file pass wrote `GATE<N>-HINT.md` |
+| `accelerator_start` | orchestrator | attempt M is an accelerator pass (narrowed prompt) acting on the hint for `criteria` |
+| `acceleration_note` | orchestrator | `GATE<N>-ACCELERATION.md` written: what the accelerator pass changed |
 | `git_checkpoint` / `gates_migrated` | orchestrator | per-phase commit / one-time relocation of pre-v2 state into `features/default/` |
 | `agent_observability` | agent tap | the capability this invocation begins with — `mode` (`structured` \| `degraded` \| `raw-text`) + `supported_signals` + `reason` + `provider_format` + `role`. Re-emitted if a fatal schema diagnostic degrades `structured`→`degraded` mid-stream, so a loss of fine-grained capture is explicit, never silent |
 | `agent_init` | agent tap | once per pass: model + tool count |

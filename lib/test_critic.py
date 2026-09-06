@@ -34,7 +34,9 @@ from critic import (_DSH_TASK_ARG_MAX_BYTES, _dsh_task_args, extract_dirs,  # no
                     _WORKSPACE_CACHE, _anchor_cap, ANCHOR_MAX_BYTES,
                     ANCHOR_MAX_BYTES_CEIL,
                     parse_verdict, build_prompt,
-                    full_dump_snapshot, run_diagnostician)
+                    full_dump_snapshot, run_diagnostician,
+                    _critic_context_tokens, _scaled_cap, grounding_total_cap_for,
+                    REFERENCE_CONTEXT_TOKENS, _DEFAULT_CONTEXT_TOKENS)
 
 
 def test_w14_anchor_cap_scales_with_file_size():
@@ -979,3 +981,118 @@ def test_run_diagnostician_never_raises_when_critic_call_fails(tmp_path, monkeyp
     run_diagnostician(_diagnostician_args(), str(work), 4, feature_dir, str(gates_dir),
                       gates_rel, "### T032\n", "evidence\n", events_path=None)
     assert not (gates_dir / "GATE4-HINT.md").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Provider-aware context windows. Locks in the fix for using ONE flat byte
+#  budget for every critic backend regardless of its real context window --
+#  wastes headroom on a bigger window (Claude/GPT-5, both 200k), risks overflow
+#  on a smaller one (an unmapped local model), and was silently blind to the
+#  cases where wiggum already KNOWS the real number (this fleet's own
+#  llama-swap/compass-shim/prime/dsh configuration).
+# ─────────────────────────────────────────────────────────────────────────────
+def test_context_tokens_env_override_wins_over_everything(monkeypatch):
+    monkeypatch.setenv("WIGGUM_CRITIC_CONTEXT_TOKENS", "12345")
+    assert _critic_context_tokens("claude") == 12345
+    assert _critic_context_tokens("dsh:qwen3.8-27b") == 12345
+    assert _critic_context_tokens("prime") == 12345
+
+
+def test_context_tokens_invalid_override_falls_back(monkeypatch):
+    monkeypatch.setenv("WIGGUM_CRITIC_CONTEXT_TOKENS", "not-a-number")
+    # claude-opus-4-8 (the default model): verified 1,000,000-token window (claude-api
+    # skill's current model table) -- NOT the 200,000 an earlier, wrong attempt at this
+    # table used (that number was this fleet's own Compass/Prime operational ceiling
+    # for an unrelated code path, not Anthropic's real published window).
+    assert _critic_context_tokens("claude") == 1000000
+
+
+def test_context_tokens_claude_and_codex_defaults(monkeypatch):
+    monkeypatch.delenv("WIGGUM_CRITIC_CONTEXT_TOKENS", raising=False)
+    monkeypatch.delenv("WIGGUM_CLAUDE_CRITIC_MODEL", raising=False)
+    monkeypatch.delenv("WIGGUM_CODEX_CRITIC_MODEL", raising=False)
+    assert _critic_context_tokens("claude") == 1000000
+    # gpt-5 (the default model): verified 400,000 total (272k in + 128k out) from
+    # OpenAI's official API model docs -- NOT the 200,000 the fleet's Compass/Prime
+    # config uses for its own unrelated routing.
+    assert _critic_context_tokens("codex") == 400000
+
+
+def test_context_tokens_dsh_resolves_the_real_local_window(monkeypatch):
+    monkeypatch.delenv("WIGGUM_CRITIC_CONTEXT_TOKENS", raising=False)
+    # qwen3.8-27b: measured max that loads on this fleet's 3090 (llama-swap config.yaml).
+    assert _critic_context_tokens("dsh:qwen3.8-27b") == 229376
+    # provider/model form (zai/glm-5.3): the LAST path segment is the model id.
+    assert _critic_context_tokens("dsh:zai/glm-5.3") == 128000
+    # an unrecognized model falls back to the shim's own conservative default,
+    # not a guess.
+    assert _critic_context_tokens("dsh:some-unknown-model") == _DEFAULT_CONTEXT_TOKENS
+    # dsh routed THROUGH compass to gpt-5 (multi-segment ref, real production config:
+    # 003-datacenter-service-constructs' saved run uses exactly
+    # dsh:compass-gpt5-high/gpt-5) must resolve against the SHIM's own 300,000 guard,
+    # not the direct-API codex table's 400,000 -- a compass-routed call answers to the
+    # shim's enforced ceiling, not OpenAI's raw vendor limit.
+    assert _critic_context_tokens("dsh:compass-gpt5-high/gpt-5") == 300000
+
+
+def test_context_tokens_bebop_resolves_the_real_local_window(monkeypatch):
+    monkeypatch.delenv("WIGGUM_CRITIC_CONTEXT_TOKENS", raising=False)
+    monkeypatch.setenv("WIGGUM_BEBOP_CRITIC_MODEL", "qwen3.8-27b-q5")
+    assert _critic_context_tokens("bebop") == 229376
+    monkeypatch.delenv("WIGGUM_BEBOP_CRITIC_MODEL", raising=False)
+    assert _critic_context_tokens("bebop") == _DEFAULT_CONTEXT_TOKENS
+
+
+def test_context_tokens_prime_backing_model_unknown_uses_default(monkeypatch):
+    monkeypatch.delenv("WIGGUM_CRITIC_CONTEXT_TOKENS", raising=False)
+    assert _critic_context_tokens("prime") == _DEFAULT_CONTEXT_TOKENS
+    assert _critic_context_tokens("prime:sol") == _DEFAULT_CONTEXT_TOKENS
+
+
+def test_scaled_cap_is_identity_at_the_reference_window():
+    assert _scaled_cap(GROUNDING_TOTAL_CAP, REFERENCE_CONTEXT_TOKENS) == GROUNDING_TOTAL_CAP
+
+
+def test_scaled_cap_scales_up_for_a_bigger_window():
+    # qwen3.8-27b's real 229,376 > the 200,000 reference -> a bigger budget, not
+    # the same flat number a provider-blind cap would give it.
+    bigger = _scaled_cap(GROUNDING_TOTAL_CAP, 229376)
+    assert bigger > GROUNDING_TOTAL_CAP
+    assert bigger == round(GROUNDING_TOTAL_CAP * 229376 / REFERENCE_CONTEXT_TOKENS)
+
+
+def test_scaled_cap_scales_down_for_a_smaller_window_but_respects_floor():
+    smaller = _scaled_cap(GROUNDING_TOTAL_CAP, 128000)
+    assert smaller < GROUNDING_TOTAL_CAP
+    assert smaller == round(GROUNDING_TOTAL_CAP * 128000 / REFERENCE_CONTEXT_TOKENS)
+    # a pathological override must never collapse the budget to near-nothing.
+    assert _scaled_cap(GROUNDING_TOTAL_CAP, 100, floor_bytes=65536) == 65536
+
+
+def test_grounding_total_cap_for_uses_the_resolved_provider_window(monkeypatch):
+    monkeypatch.setenv("WIGGUM_CRITIC_CONTEXT_TOKENS", str(REFERENCE_CONTEXT_TOKENS))
+    assert grounding_total_cap_for("claude") == GROUNDING_TOTAL_CAP
+    monkeypatch.setenv("WIGGUM_CRITIC_CONTEXT_TOKENS", "229376")
+    assert grounding_total_cap_for("dsh:qwen3.8-27b") > GROUNDING_TOTAL_CAP
+
+
+def test_grounding_snapshot_respects_a_custom_total_cap(tmp_path):
+    """A provider-scaled total_cap must actually reach the degrade-to-anchored path,
+    not just be accepted and ignored."""
+    work = tmp_path / "repo"
+    gates_rel = os.path.join(".wiggum", "features", "001-demo", "gates")
+    (work / gates_rel).mkdir(parents=True)
+    # ~10.5 KB: under ANCHOR_MAX_BYTES_CEIL (49152, so it's eligible for whole-file
+    # emission) but comfortably over the tiny total_cap used below.
+    (work / "big.go").write_text("\n".join("line %d filler filler filler" % i
+                                           for i in range(300)))
+    sd = grounding_search_dirs(gates_rel, str(work))
+    members = _workspace_members(str(work))
+    # A tiny total_cap must degrade the whole-file emission (W15) down to an
+    # anchored/head-tail excerpt instead of the complete file.
+    g_tiny = grounding_snapshot(["big.go"], str(work), sd, priority=["big.go"],
+                                anchors=[], members=members, total_cap=2000)
+    g_generous = grounding_snapshot(["big.go"], str(work), sd, priority=["big.go"],
+                                    anchors=[], members=members, total_cap=1000000)
+    assert "(complete file, line-numbered)" in g_generous
+    assert "(complete file, line-numbered)" not in g_tiny
