@@ -54,4 +54,4 @@ core. See the [Lisa wiki](https://github.com/mairp/lisa/wiki).
 - Front-door script: [`wiggum`](../wiggum) → routes to `orchestrator.sh` or the inspection CLI
 - Orchestrator: [`orchestrator.sh`](../orchestrator.sh) · Proposer: [`proposer.sh`](../proposer.sh)
 - Python components (critic, presenter, spec parser, shippers): [`lib/`](../lib)
-- Full narrative reference: [`README.md`](../README.md) · License: MIT
+- Full narrative reference: [`README.md`](../README.md) · License: Apache-2.0
