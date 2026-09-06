@@ -52,9 +52,9 @@ sequenceDiagram
 
     loop until all phases APPROVED (or halt)
         alt a NEW hint was just written (once per signature, never twice in a row)
-            O->>P: --role accelerator — narrowed prompt: unmet criteria + feedback + hint + evidence to splice
+            O->>P: --role accelerator — narrowed prompt:<br/>unmet criteria + feedback + hint + evidence to splice
         else otherwise
-            O->>P: --role proposer — full phase prompt (+ feedback, hint, acceleration note if present)
+            O->>P: --role proposer — full phase prompt<br/>(+ feedback, hint, acceleration note if present)
         end
         activate P
         loop until evidence exists
@@ -69,7 +69,7 @@ sequenceDiagram
 
         O->>C: judge phase N (criteria + evidence)
         activate C
-        C->>FS: read-only grounding pass over cited files (byte budget scaled to the backend's context window)
+        C->>FS: read-only grounding pass over cited files<br/>(byte budget scaled to the backend's context window)
         C->>C: LLM verdict, nonce-bound
         alt APPROVED
             C->>FS: write GATE<N>-APPROVED (empty marker)
@@ -78,11 +78,11 @@ sequenceDiagram
         else REJECTED (attempt < MAX_REJECTS)
             C->>FS: write GATE<N>-FEEDBACK.md (the gaps)
             C-->>O: VERDICT nonce: REJECTED
-            O->>O: unmet-criteria signature (T### IDs the feedback names, or a prose hash)
+            O->>O: unmet-criteria signature<br/>(task IDs the feedback names, or a prose hash)
             opt signature is NEW for this phase
-                O->>C: --diagnose (same backend, FULL untruncated files, rejection history)
+                O->>C: --diagnose<br/>(same backend, FULL untruncated files, rejection history)
                 activate C
-                C->>FS: write GATE<N>-HINT.md (CASE: GROUNDING or CASE: REAL-GAP + the fix)
+                C->>FS: write GATE<N>-HINT.md<br/>(CASE: GROUNDING or CASE: REAL-GAP + the fix)
                 deactivate C
                 Note over O: next attempt = accelerator
             end
