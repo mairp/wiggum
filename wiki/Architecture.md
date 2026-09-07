@@ -42,8 +42,10 @@ sequenceDiagram
     autonumber
     actor Human
     participant O as orchestrator.sh<br/>(orchestrator)
-    participant P as proposer.sh<br/>(proposer · also the accelerator pass)
-    participant C as lib/critic.py<br/>(critic · also the diagnostician pass)
+    participant P as proposer.sh<br/>(proposer · coding-agent CLI)
+    participant A as proposer.sh --role accelerator<br/>(accelerator · same tools, narrowed prompt)
+    participant C as lib/critic.py<br/>(critic · LLM gate)
+    participant D as lib/critic.py --diagnose<br/>(diagnostician · same backend, no budget)
     participant FS as .wiggum/gates/<br/>(on-disk contract)
 
     Human->>O: run -w WORKDIR -s SPECS.md
@@ -51,20 +53,24 @@ sequenceDiagram
     Note over O: no stored counter — phase is derived
 
     loop until all phases APPROVED (or halt)
-        alt a NEW hint was just written (once per signature, never twice in a row)
-            O->>P: --role accelerator — narrowed prompt:<br/>unmet criteria + feedback + hint + evidence to splice
-        else otherwise
-            O->>P: --role proposer — full phase prompt<br/>(+ feedback, hint, acceleration note if present)
-        end
-        activate P
-        loop until evidence exists
-            P->>P: read PROGRESS.md, do the work
-            P->>FS: write GATE<N>-EVIDENCE.md (atomic)
-        end
-        P-->>O: loop exits (test -f passes)
-        deactivate P
-        opt accelerator attempt
-            O->>FS: write GATE<N>-ACCELERATION.md (files this pass changed)
+        alt attempt right after a NEW diagnostician hint<br/>(once per signature, never twice in a row)
+            O->>A: narrowed prompt: ONLY the unmet criteria<br/>+ critic feedback + hint (primary instruction)
+            activate A
+            A->>FS: read GATE<N>-HINT.md + the archived (rejected) evidence
+            A->>A: fix ONLY the unmet criteria<br/>(footprint rule: touch just the files they cite)
+            A->>FS: write GATE<N>-EVIDENCE.md<br/>(previous evidence spliced, atomic)
+            A-->>O: pass exits (test -f passes)
+            deactivate A
+            O->>FS: write GATE<N>-ACCELERATION.md<br/>(files this pass changed)
+        else ordinary attempt
+            O->>P: full phase prompt<br/>(+ feedback, hint, acceleration note if present)
+            activate P
+            loop until evidence exists
+                P->>P: read PROGRESS.md, do the work
+                P->>FS: write GATE<N>-EVIDENCE.md (atomic)
+            end
+            P-->>O: loop exits (test -f passes)
+            deactivate P
         end
 
         O->>C: judge phase N (criteria + evidence)
@@ -79,15 +85,19 @@ sequenceDiagram
             C->>FS: write GATE<N>-FEEDBACK.md (the gaps)
             C-->>O: VERDICT nonce: REJECTED
             O->>O: unmet-criteria signature<br/>(task IDs the feedback names, or a prose hash)
-            opt signature is NEW for this phase
-                O->>C: --diagnose<br/>(same backend, FULL untruncated files, rejection history)
-                activate C
-                C->>FS: write GATE<N>-HINT.md<br/>(CASE: GROUNDING or CASE: REAL-GAP + the fix)
-                deactivate C
-                Note over O: next attempt = accelerator
+            alt signature is NEW for this phase
+                O->>D: diagnose phase N<br/>(full rejection history, same critic backend)
+                activate D
+                D->>FS: read the FULL, untruncated cited files<br/>(no grounding budget)
+                D->>D: classify the stall:<br/>CASE: GROUNDING (restage the proof)<br/>or CASE: REAL-GAP (the concrete fix)
+                D->>FS: write GATE<N>-HINT.md
+                D-->>O: hint written (advisory — never approves or rejects)
+                deactivate D
+                Note over O,A: next attempt = ACCELERATOR
+            else same signature as last time
+                Note over O,P: next attempt = wide PROPOSER<br/>(reads feedback + hint + acceleration note)
             end
-            O->>FS: archive stale evidence (+ feedback, hint, acceleration note)
-            Note over O,P: re-run SAME phase
+            O->>FS: archive stale evidence<br/>(+ feedback, hint, acceleration note)
         else MAX_REJECTS exceeded (accelerator attempts count too)
             C-->>O: still REJECTED
             O->>Human: halt (exit 2) — arbitrate
