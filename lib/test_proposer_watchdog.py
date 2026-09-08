@@ -281,3 +281,42 @@ def test_finished_long_job_prompt_forbids_new_open_ended_work(tmp_path):
     assert "only task now is the gate evidence" in out
     assert "Do NOT start any new open-ended work" in out
     assert "An honest blocked report is a" in out
+
+
+def test_claude_prompt_over_the_argv_limit_arrives_on_stdin(tmp_path):
+    """A 151 KB phase prompt failed exec as one argv ("Argument list too long",
+    semantic-router-sovereign phase 17). The claude backend feeds it on stdin."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "claude"
+    fake.write_text(
+        "#!/bin/bash\n"
+        'cat > "$PROMPT_LOG"\n'
+        'echo "ok"\n'
+    )
+    fake.chmod(0o755)
+    prompt = tmp_path / "prompt.txt"
+    big = "x" * 140000 + "\nEND-OF-PROMPT\n"
+    prompt.write_text(big)
+    evidence = tmp_path / ".wiggum" / "features" / "f" / "gates" / "GATE1-EVIDENCE.md"
+    env = os.environ.copy()
+    env.update({
+        "PATH": str(fake_bin) + os.pathsep + env.get("PATH", ""),
+        "WIGGUM_AGENT_STREAM": "false",
+        "WIGGUM_EVENTS": str(tmp_path / ".wiggum" / "events.jsonl"),
+        "WIGGUM_WATCHDOG_TICK": "1",
+        "PROMPT_LOG": str(tmp_path / "received.txt"),
+        "WIGGUM_PROPOSER_IDLE_TIMEOUT": "900",
+        "WIGGUM_PROPOSER_PROGRESS_TIMEOUT": "0",
+        "WIGGUM_PROPOSER_REPEAT_LIMIT": "0",
+    })
+    (tmp_path / ".wiggum").mkdir(exist_ok=True)
+    result = subprocess.run(
+        ["bash", str(PROPOSER), "-w", str(tmp_path), "-e", str(evidence),
+         "-f", str(prompt), "--backend", "claude", "-n", "1", "-s", "0",
+         "--feature", "f", "--phase", "1", "--timeout", "120"],
+        text=True, capture_output=True, env=env, timeout=180,
+    )
+    assert "Argument list too long" not in result.stderr, result.stderr
+    received = (tmp_path / "received.txt").read_text()
+    assert "END-OF-PROMPT" in received and received.count("x") == 140000

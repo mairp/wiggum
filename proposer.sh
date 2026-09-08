@@ -392,7 +392,17 @@ run_agent() {
       ;;
     claude)
       [[ -n "$MODEL" ]] && args+=( --model "$MODEL" )
-      run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" claude -p "$prompt" "${args[@]}"
+      # The prompt goes in on stdin (claude -p reads it when no positional prompt
+      # is given): a phase's standing prompt plus its cumulative verification
+      # block can exceed the 128 KiB single-argument limit.
+      local prompt_file
+      prompt_file="$(mktemp "${TMPDIR:-/tmp}/wiggum-prompt.XXXXXX")"
+      printf '%s' "$prompt" > "$prompt_file"
+      WIGGUM_STDIN_FILE="$prompt_file" \
+        run_with_idle_watchdog "$TIMEOUT" "$IDLE_TIMEOUT" claude -p "${args[@]}"
+      rc=$?
+      rm -f "$prompt_file"
+      return "$rc"
       ;;
     codex)
       # OpenAI Codex CLI — UNVERIFIED on this host (no codex CLI here to test).
@@ -707,7 +717,17 @@ run_with_idle_watchdog() {
   # ran on. Sampling also self-selects for expensive commands: a `make` that runs
   # for minutes is always caught, a sub-second `docker ps` poll almost never is.
   local -A seen_procs=() cmd_runs=()
-  "$@" &
+  # An async command without job control gets /dev/null on stdin unless the
+  # command itself carries a redirection, so a caller that piped into this
+  # function never reached the agent. WIGGUM_STDIN_FILE names a file to feed the
+  # command instead: the claude backend uses it for the prompt, which as one argv
+  # string hits the kernel's 128 KiB per-argument limit (semantic-router-sovereign
+  # phase 17, 2026-09-08: 151 KB prompt, "Argument list too long" every pass).
+  if [[ -n "${WIGGUM_STDIN_FILE:-}" ]]; then
+    "$@" < "$WIGGUM_STDIN_FILE" &
+  else
+    "$@" &
+  fi
   local cmd_pid=$! start_ts last_cpu last_change_ts last_disk_ts now cpu elapsed offender
   local sample_pid sample_args sample_key sample_head
   start_ts="$(date +%s)"; last_cpu=-1; last_change_ts="$start_ts"; last_disk_ts="$start_ts"
