@@ -133,6 +133,12 @@ IDLE_TIMEOUT="${WIGGUM_PROPOSER_IDLE_TIMEOUT:-900}"
 # disable.
 PROGRESS_TIMEOUT="${WIGGUM_PROPOSER_PROGRESS_TIMEOUT:-1800}"
 REPEAT_LIMIT="${WIGGUM_PROPOSER_REPEAT_LIMIT:-5}"
+# Command lines the process-level repetition counter ignores (extended regex,
+# empty = none). A test-driven pass legitimately re-runs its suite many times
+# between edits (2026-09-08, semantic-router-sovereign phase 3: pytest x5 in 23
+# minutes of landing work was killed as a stall). Set it to the project's test
+# runners and linters, e.g. 'pytest|ruff|mypy'. The tool-level check still runs.
+REPEAT_IGNORE="${WIGGUM_PROPOSER_REPEAT_IGNORE:-}"
 PROGRESS_PATHS=()
 STREAM_JSON="false"
 LOKI_URL="${WIGGUM_LOKI_URL:-http://localhost:3100}"
@@ -727,6 +733,7 @@ run_with_idle_watchdog() {
         # per process per tick, so it must not fork.
         sample_head="${sample_args%% *}"
         [[ "${sample_head##*/}" == "sleep" ]] && continue
+        [[ -n "$REPEAT_IGNORE" && "$sample_args" =~ $REPEAT_IGNORE ]] && continue
         sample_key="${sample_pid}|${sample_args}"
         [[ -n "${seen_procs[$sample_key]:-}" ]] && continue
         seen_procs["$sample_key"]=1

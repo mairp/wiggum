@@ -138,6 +138,19 @@ def test_rerunning_one_command_ends_the_pass_without_any_agent_stream(tmp_path):
     assert "tail -f /dev/null" in kills[0]["detail"]
 
 
+def test_ignored_commands_are_not_process_repetition(tmp_path):
+    """A test-driven pass re-runs its suite between edits; that is progress, not a
+    stall. WIGGUM_PROPOSER_REPEAT_IGNORE names the command lines to leave alone."""
+    body = ("for i in 1 2 3 4 5 6; do timeout 2 tail -f /dev/null; done\n"
+            "exit 0\n")
+    result, evs = _run(tmp_path, _agent(tmp_path, body),
+                       env_extra={"WIGGUM_PROPOSER_REPEAT_LIMIT": "5",
+                                  "WIGGUM_PROPOSER_REPEAT_IGNORE": "tail -f|pytest"})
+
+    assert result.returncode == 4, result.stderr
+    assert _kills(evs) == []
+
+
 def test_one_long_command_is_not_repetition(tmp_path):
     """A single slow command is one pid however often it is sampled."""
     body = "timeout 8 tail -f /dev/null\nexit 0\n"
