@@ -605,6 +605,14 @@ try:
                 continue
             if event.get("event") != "agent_tool":
                 continue
+            # A file-mutating tool's target is only the path: five distinct edits
+            # to one file look identical here, and editing one file repeatedly is
+            # how implementation work lands (2026-09-08, semantic-router-sovereign
+            # phase 4: seven Edits to selection.py in 6 minutes killed the pass).
+            # A pass that edits without producing anything is the disk-progress
+            # watchdog's case, not this one.
+            if (event.get("tool") or "") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                continue
             calls.append((event.get("tool") or "?", (event.get("target") or "").strip()))
 except OSError:
     sys.exit(0)

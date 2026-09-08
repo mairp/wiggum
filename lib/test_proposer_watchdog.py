@@ -99,6 +99,19 @@ def test_repeated_tool_call_ends_the_pass(tmp_path):
     assert "repeat_stall" in body_text and "make -C build-gnmi" in body_text
 
 
+def test_repeated_edits_to_one_file_are_not_repetition(tmp_path):
+    """Five Edits to the same path are five different edits: the summary carries
+    only the path, so this is how work lands, not a stall."""
+    events = tmp_path / ".wiggum" / "events.jsonl"
+    body = "for i in 1 2 3 4 5 6; do\n" + _emit_tool(events, "Edit", "/w/services/policy/selection.py") + \
+        "sleep 1\ndone\nexit 0\n"
+    result, evs = _run(tmp_path, _agent(tmp_path, body),
+                       env_extra={"WIGGUM_PROPOSER_REPEAT_LIMIT": "5"})
+
+    assert result.returncode == 4, result.stderr
+    assert _kills(evs) == []
+
+
 def test_varied_tool_calls_are_left_alone(tmp_path):
     """The same COUNT of calls, none repeated: a working pass is never killed."""
     events = tmp_path / ".wiggum" / "events.jsonl"
