@@ -113,6 +113,22 @@ def test_stale_source_hash_fails_closed(tmp_path):
         verification_plan.load_plan(canonical, specs)
 
 
+def test_ticking_task_checkboxes_does_not_stale_the_plan(tmp_path):
+    """Spec Kit ticks `- [ ]` to `- [x]` as tasks land; that is the same spec."""
+    workdir, specs = project(tmp_path)
+    plan = verification_plan.create_plan(workdir, specs)
+    canonical = str(tmp_path / ".wiggum" / "verification" / "plan.json")
+    verification_plan.persist_plan(
+        plan, str(tmp_path / "testautomation" / "TEST_PLAN.md"), canonical
+    )
+    with open(specs, encoding="utf-8") as handle:
+        text = handle.read()
+    with open(specs, "w", encoding="utf-8") as handle:
+        handle.write(text.replace("- [ ] Starting", "- [x] Starting", 1))
+    loaded = verification_plan.load_plan(canonical, specs)
+    assert loaded["source"]["contentHash"] == plan["source"]["contentHash"]
+
+
 def test_scaffold_is_confined_idempotent_and_never_overwrites_changes(tmp_path):
     workdir, specs = project(tmp_path)
     plan = verification_plan.create_plan(workdir, specs)

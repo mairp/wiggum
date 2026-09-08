@@ -405,6 +405,17 @@ def _workspace_export_artifacts(workdir):
     return sorted(artifacts)
 
 
+_CHECKBOX_TICK = re.compile(r"(?m)^([ \t]*-[ \t]*)\[[xX]\]")
+
+
+def spec_source_text(text):
+    """The specification text as hashed for staleness: a ticked task checkbox
+    (`- [x]`) reads as unticked. Spec Kit ticks tasks.md as work lands, which is
+    progress on the same spec, not a different one (semantic-router-sovereign
+    phase 12, 2026-09-08: seven ticks made every gate report the plan stale)."""
+    return _CHECKBOX_TICK.sub(r"\1[ ]", text)
+
+
 def _criterion_text(criterion):
     match = re.match(r"^[ \t]*-[ \t]*\[[ xX]?\][ \t]*(.*)$", criterion)
     return (match.group(1) if match else criterion).strip()
@@ -425,7 +436,7 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
         raise VerificationError("invalid specification: %s" % "; ".join(errors))
     phases = wiggum_spec.get_phases(text, resolved_format)
     discovery = discover_project(workdir, environ)
-    spec_hash = sha256_text(text)
+    spec_hash = sha256_text(spec_source_text(text))
     bundle_id = deterministic_ulid(
         "%s:%s:%s" % (specs_path, resolved_format, spec_hash)
     )
@@ -646,7 +657,7 @@ def validate_plan(plan, expected_specs=None):
                 % (expected_specs, plan["source"]["specPath"])
             )
         with open(expected_specs, encoding="utf-8", errors="replace") as handle:
-            actual_hash = sha256_text(handle.read())
+            actual_hash = sha256_text(spec_source_text(handle.read()))
         if actual_hash != plan["source"]["contentHash"]:
             raise VerificationError(
                 "verification plan is stale: expected source hash %s got %s"
