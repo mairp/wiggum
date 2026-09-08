@@ -35,7 +35,11 @@ import verdict_pins  # noqa: E402  (W9 — per-criterion verdict pinning)
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config knobs (env-overridable; flags override env).
 # ─────────────────────────────────────────────────────────────────────────────
-GROUNDING_MAX_FILES   = 80         # hard cap on PRESENCE LINES (one per cited path).
+GROUNDING_MAX_FILES   = int(os.environ.get("WIGGUM_GROUNDING_MAX_FILES", 80))
+                                   # hard cap on PRESENCE LINES (one per cited path).
+                                   # Env-overridable: a 45-task polish phase cited 236
+                                   # paths (semantic-router-sovereign phase 17, 2026-09-08)
+                                   # and 156 of them were never shown.
                                    # Must exceed the artifact count of the busiest
                                    # phase (Phase 1 cites ~65) so no cited path is
                                    # silently dropped and mistaken for "absent".
@@ -219,7 +223,11 @@ _GROUNDING_SKIP_DIRS = frozenset((
 _GROUNDING_DIR_EXPAND_MAX = 40     # a dir with MORE files than this is too broad to
                                    # be evidence (a package root) — skip it entirely
 _GROUNDING_DIR_EXPAND_TOTAL = 45   # global cap across ALL expanded dirs
-ANCHOR_MAX_BYTES_CEIL = 49152      # per-file CEILING (W14): a large criterion-named file
+ANCHOR_MAX_BYTES_CEIL = int(os.environ.get("WIGGUM_ANCHOR_MAX_BYTES_CEIL", 49152))
+                                   # per-file CEILING (W14): a large criterion-named file
+                                   # Env-overridable: anchored excerpts bypass the byte
+                                   # budget, and three 50 KB prose documents cited by one
+                                   # task starved 48 other files of any excerpt (phase 17).
                                    # scales its anchor budget with its own size so a symbol
                                    # implemented LATE (past where dense common-word anchor
                                    # matches near the top would exhaust a fixed 6 KB budget)
