@@ -611,8 +611,6 @@ try:
             # phase 4: seven Edits to selection.py in 6 minutes killed the pass).
             # A pass that edits without producing anything is the disk-progress
             # watchdog's case, not this one.
-            if (event.get("tool") or "") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-                continue
             calls.append((event.get("tool") or "?", (event.get("target") or "").strip()))
 except OSError:
     sys.exit(0)
@@ -622,6 +620,11 @@ last = calls[-1]
 # An empty target is too coarse to judge repetition on (e.g. a tool whose input
 # carried nothing summarizable) — never kill a pass on that.
 if not last[1]:
+    sys.exit(0)
+# A file-mutating tool is never the offender (its target is only the path, so
+# distinct edits to one file look identical), but it stays in the sequence so an
+# agent that moved on from a repeated command to editing counts as moved on.
+if last[0] in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
     sys.exit(0)
 count = calls.count(last)
 if count >= limit:
