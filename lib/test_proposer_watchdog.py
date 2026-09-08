@@ -164,6 +164,18 @@ def test_ignored_commands_are_not_process_repetition(tmp_path):
     assert _kills(evs) == []
 
 
+def test_default_ignore_pattern_exempts_test_runners(tmp_path):
+    """With no WIGGUM_PROPOSER_REPEAT_IGNORE set, a command line naming a test
+    runner is not counted: re-running the suite between edits is normal work."""
+    body = ("for i in 1 2 3 4 5 6; do (exec -a pytest sleep 2); done\n"
+            "exit 0\n")
+    result, evs = _run(tmp_path, _agent(tmp_path, body),
+                       env_extra={"WIGGUM_PROPOSER_REPEAT_LIMIT": "5"})
+
+    assert result.returncode == 4, result.stderr
+    assert _kills(evs) == []
+
+
 def test_one_long_command_is_not_repetition(tmp_path):
     """A single slow command is one pid however often it is sampled."""
     body = "timeout 8 tail -f /dev/null\nexit 0\n"

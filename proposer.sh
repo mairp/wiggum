@@ -69,7 +69,7 @@ OPTIONS
                           Default: the whole workdir, minus the dirs above.
   --repeat-limit N        Kill the pass when the agent has issued the SAME tool
                           call (identical tool + target) N times in this pass and
-                          is still issuing it (default: 5; 0 disables). Catches
+                          is still issuing it (default: 12; 0 disables). Catches
                           a fast retry loop, which no cpu- or wall-clock watchdog
                           can see. Needs the agent stream (on by default for
                           claude/bebop/prime; inert with WIGGUM_AGENT_STREAM=false).
@@ -132,13 +132,15 @@ IDLE_TIMEOUT="${WIGGUM_PROPOSER_IDLE_TIMEOUT:-900}"
 # the same tool call repeating with no result (REPEAT_LIMIT). Set either to 0 to
 # disable.
 PROGRESS_TIMEOUT="${WIGGUM_PROPOSER_PROGRESS_TIMEOUT:-1800}"
-REPEAT_LIMIT="${WIGGUM_PROPOSER_REPEAT_LIMIT:-5}"
+REPEAT_LIMIT="${WIGGUM_PROPOSER_REPEAT_LIMIT:-12}"
 # Command lines the process-level repetition counter ignores (extended regex,
 # empty = none). A test-driven pass legitimately re-runs its suite many times
 # between edits (2026-09-08, semantic-router-sovereign phase 3: pytest x5 in 23
 # minutes of landing work was killed as a stall). Set it to the project's test
 # runners and linters, e.g. 'pytest|ruff|mypy'. The tool-level check still runs.
-REPEAT_IGNORE="${WIGGUM_PROPOSER_REPEAT_IGNORE:-}"
+# Default covers the usual test runners, linters and type checkers; override to
+# extend or (with an empty value) to count everything except sleep.
+REPEAT_IGNORE="${WIGGUM_PROPOSER_REPEAT_IGNORE-pytest|ruff|mypy|black|flake8|eslint|prettier|tsc|jest|vitest|go (test|vet)|cargo (test|clippy|fmt)|make (test|lint|check)}"
 PROGRESS_PATHS=()
 STREAM_JSON="false"
 LOKI_URL="${WIGGUM_LOKI_URL:-http://localhost:3100}"
