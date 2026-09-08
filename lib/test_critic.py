@@ -311,6 +311,22 @@ def test_priority_file_content_never_elided_by_budget():
         assert snap.index("target.ts") < snap.index("filler.ts")
 
 
+# ── W20: proof slices are grounded first and never elided ────────────────────
+def test_proof_slices_are_ordered_first_and_never_elided():
+    """A proposer's proof slice (a file under gates/proofs/) is the evidence the critic
+    asked for; cited last among big files it must still be shown in full."""
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "filler.ts"), "w").write("x = 1\n" * 40000)
+        pdir = os.path.join(d, ".wiggum", "features", "f", "gates", "proofs")
+        os.makedirs(pdir)
+        open(os.path.join(pdir, "PHASE9-T1-slice.txt"), "w").write(
+            "\n".join("%d: line" % i for i in range(30)) + "\nproofMarker_here\n")
+        rel = ".wiggum/features/f/gates/proofs/PHASE9-T1-slice.txt"
+        snap = grounding_snapshot(["filler.ts", rel], d, total_cap=20000)
+        assert "proofMarker_here" in snap, "proof slice content must never be elided"
+        assert snap.index("PHASE9-T1-slice.txt") < snap.index("filler.ts")
+
+
 # ── W10-W13: workspace-aware resolution in a pnpm monorepo ───────────────────
 def _monorepo(root, members=("sdk", "core"), exports_map=None,
               workspace_glob="packages/*"):

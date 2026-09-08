@@ -1097,6 +1097,19 @@ def grounding_snapshot(paths, workdir, search_dirs=None, priority=None, anchors=
 
         paths = ([p for p in paths if p in priority]
                  + [p for p in paths if p not in priority])
+    # W20: proof slices — files under the feature's gates/proofs/ — exist only to be
+    # read by the critic: line-numbered excerpts the proposer staged for exactly the
+    # criteria the feedback named. Order them first and treat them as priority so the
+    # byte budget cannot elide them behind ordinary citations. Measured on
+    # semantic-router-sovereign phase 17 (2026-09-08): 45 slices, 189 KB, cited last
+    # among 230 paths, every one "content excerpt omitted", four rejects in a row
+    # each asking for the very slice that was on disk.
+    proof_paths = [p for p in paths
+                   if "/proofs/" in p.replace("\\", "/") or p.startswith("proofs/")]
+    if proof_paths:
+        priority = set(priority or ()) | set(proof_paths)
+        seen = set(proof_paths)
+        paths = proof_paths + [p for p in paths if p not in seen]
     lines = ["", "## Grounding snapshot (verified by the critic, read-only)",
              "The following is the ACTUAL on-disk state of files the evidence cites.",
              "Claims about files that do not exist, are empty, or contradict this "
