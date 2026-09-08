@@ -394,6 +394,42 @@ GATES_DIR="$FEATURE_DIR/gates"
 WIGGUM_RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 RUN_DIR="$FEATURE_DIR/runs/$WIGGUM_RUN_ID"
 VERIFICATION_JSON="$RUN_DIR/verification/verification-plan.json"
+# The lock comes BEFORE the run directory, the workdir symlinks and last-run.conf:
+# a launch that loses the lock must leave no trace. Observed 2026-09-08 on
+# semantic-router-sovereign: a second `wiggum run` exited 5 as designed but had
+# already retargeted .wiggum/run.log and events.jsonl at its own empty run dir
+# and rewritten last-run.conf, so status/watch/tail went blank for the live run.
+mkdir -p "$STATE_DIR"
+LOCK="$STATE_DIR/lock"
+# ── single-run lock (flock if available, else mkdir) ─────────────────────────
+LOCK_FD=""
+acquire_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    exec {LOCK_FD}>"$LOCK"
+    if ! flock -n "$LOCK_FD"; then
+      echo "orchestrator.sh: another run holds the lock on $WORKDIR ($LOCK). Exiting." >&2
+      exit "$E_LOCK"
+    fi
+    echo "$WIGGUM_RUN_ID $(date -Is)" >&"$LOCK_FD"
+  else
+    if ! mkdir "$LOCK.d" 2>/dev/null; then
+      echo "orchestrator.sh: another run holds the lock on $WORKDIR ($LOCK.d). Exiting." >&2
+      exit "$E_LOCK"
+    fi
+    trap 'rmdir "$LOCK.d" 2>/dev/null || true' EXIT
+    echo "$WIGGUM_RUN_ID $(date -Is)" > "$LOCK.d/owner"
+  fi
+}
+acquire_lock
+# proposer.sh (a separate `bash proposer.sh` process) inherits this SAME open
+# fd by number across fork/exec regardless of shell-variable export — but only
+# knows what that number MEANS if told. Exporting it lets proposer.sh's own
+# ensure_long_job() calls close their inherited copy before backgrounding a
+# long-job, the same reason described in wiggum-lib.sh. Empty/unset (mkdir
+# lock fallback) exports as empty, which ensure_long_job already treats as a
+# no-op guard.
+export LOCK_FD
+
 mkdir -p "$RUN_DIR" "$FEATURE_DIR/verdicts" "$FEATURE_DIR/attempts" \
          "$FEATURE_DIR/debug" "$GATES_DIR/proofs" "$RUN_DIR/verification"
 # Workdir-relative paths for the proposer prompt + critic threading (Phase 2). The
@@ -534,7 +570,6 @@ write_last_run_conf "$FEATURE_DIR/last-run.conf"
 write_last_run_conf "$STATE_DIR/last-run.conf"
 
 STOP_FLAG="$STATE_DIR/stop.flag"
-LOCK="$STATE_DIR/lock"
 WIGGUM_TASK="$(basename "$WORKDIR")"
 WIGGUM_BACKEND_LABEL="prop:${PROPOSER_BACKEND}/crit:${CRITIC_BACKEND}"
 WIGGUM_SHIP="$LIB_DIR/ralph_loki_ship.py"
@@ -617,34 +652,6 @@ else
   emit_out() { tee -a "$LOG"; }        # legacy: raw output tee'd to the terminal
 fi
 
-# ── single-run lock (flock if available, else mkdir) ─────────────────────────
-LOCK_FD=""
-acquire_lock() {
-  if command -v flock >/dev/null 2>&1; then
-    exec {LOCK_FD}>"$LOCK"
-    if ! flock -n "$LOCK_FD"; then
-      echo "orchestrator.sh: another run holds the lock on $WORKDIR ($LOCK). Exiting." >&2
-      exit "$E_LOCK"
-    fi
-    echo "$WIGGUM_RUN_ID $(date -Is)" >&"$LOCK_FD"
-  else
-    if ! mkdir "$LOCK.d" 2>/dev/null; then
-      echo "orchestrator.sh: another run holds the lock on $WORKDIR ($LOCK.d). Exiting." >&2
-      exit "$E_LOCK"
-    fi
-    trap 'rmdir "$LOCK.d" 2>/dev/null || true' EXIT
-    echo "$WIGGUM_RUN_ID $(date -Is)" > "$LOCK.d/owner"
-  fi
-}
-acquire_lock
-# proposer.sh (a separate `bash proposer.sh` process) inherits this SAME open
-# fd by number across fork/exec regardless of shell-variable export — but only
-# knows what that number MEANS if told. Exporting it lets proposer.sh's own
-# ensure_long_job() calls close their inherited copy before backgrounding a
-# long-job, the same reason described in wiggum-lib.sh. Empty/unset (mkdir
-# lock fallback) exports as empty, which ensure_long_job already treats as a
-# no-op guard.
-export LOCK_FD
 
 # ── preflight spec validation (exit 3 on bad spec) ───────────────────────────
 PHASE_COUNT="$(wiggum_spec_validate "$SPECS")" || {
