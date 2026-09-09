@@ -24,7 +24,9 @@ LIB_DIR="$SCRIPT_DIR/lib"          # all Python components live here
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Exit-code contract (documented in README):
-#    0 all phases approved · 1 internal error · 2 MAX_REJECTS exceeded (human) ·
+#    0 all phases approved · 1 internal error (incl. critic_unavailable: the
+#      critic never answered, see WIGGUM_CRITIC_MALFORMED_LIMIT) ·
+#    2 MAX_REJECTS exceeded (human) ·
 #    3 invalid spec/config · 4 budget exceeded (wall/MAX_ITER) · 5 lock held ·
 #    6 stopped via stop.flag (clean; rerun resumes).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +71,10 @@ OPTIONS
                         longer than the default per pass to converge.
   --critic-timeout SECONDS    Hard wall-clock limit on a single critic call
                         (default: 300). Also WIGGUM_CRITIC_TIMEOUT.
+                        WIGGUM_CRITIC_MALFORMED_LIMIT (default 3) halts the run
+                        after that many consecutive MALFORMED verdicts — a critic
+                        that times out or is unreachable produces no feedback, so
+                        further proposer attempts run blind. 0 disables it.
   --start-phase N       Override the derived resume phase.
   --verification MODE   Verification lifecycle: off | plan | required.
                         plan creates/attaches a hash-bound TEST_PLAN.md before the
@@ -171,6 +177,10 @@ OTEL_URL="${WIGGUM_OTEL_URL:-http://localhost:4318}"
 LIVE="${WIGGUM_LIVE:-auto}"
 PROPOSER_TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
 CRITIC_TIMEOUT="${WIGGUM_CRITIC_TIMEOUT:-300}"
+# Consecutive MALFORMED verdicts (critic timed out / unreachable / produced no
+# verdict line) before the run halts instead of spending the rest of MAX_REJECTS
+# on proposer passes the critic will never read. 0 disables the breaker.
+CRITIC_MALFORMED_LIMIT="${WIGGUM_CRITIC_MALFORMED_LIMIT:-3}"
 MAX_WALL_MIN="${WIGGUM_MAX_WALL_MIN:-0}"
 GIT_COMMITS="${WIGGUM_GIT_COMMITS:-auto}"
 VERIFICATION="${WIGGUM_VERIFICATION:-required}"
@@ -1065,6 +1075,36 @@ build_accelerator_prompt() {
 # times, stop the run early with a pointer to this failure mode instead of silently
 # burning to MAX_REJECTS. Threshold is env-overridable; default 2 reappearances.
 # Prints "OSCILLATING <criterion> <count>" to stdout when tripped, else nothing.
+# The kind of the newest critic verdict recorded for this phase+attempt —
+# "APPROVED" | "REJECTED" | "MALFORMED", or empty when the critic never got far
+# enough to record one. The event stream is the only place the kind survives:
+# critic.py exits 10 for REJECTED and MALFORMED alike, so the exit code cannot
+# tell "the critic read the evidence and said no" from "the critic never
+# answered".
+last_verdict_result() {
+  local n="$1" attempt="$2"
+  [[ -f "$WIGGUM_EVENTS" ]] || return 0
+  python3 - "$WIGGUM_EVENTS" "$n" "$attempt" <<'PY'
+import json, sys
+path, phase, attempt = sys.argv[1], sys.argv[2], sys.argv[3]
+found = ""
+try:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("event") != "verdict":
+                continue
+            if str(rec.get("phase")) == phase and str(rec.get("attempt")) == attempt:
+                found = rec.get("result", "")
+except OSError:
+    pass
+print(found)
+PY
+}
+
 WIGGUM_OSC_MAX="${WIGGUM_OSC_MAX:-2}"
 check_oscillation() {
   local n="$1"
@@ -1316,6 +1356,7 @@ run_phase() {
   fi
 
   local prev_role=""
+  local malformed_streak=0
   while (( attempt <= MAX_REJECTS + 1 )); do
     # stop.flag / budget checks at each phase-boundary step
     if [[ -f "$STOP_FLAG" ]]; then
@@ -1536,6 +1577,50 @@ run_phase() {
     # REJECTED / MALFORMED (crc == 10 or other). Record and maybe retry.
     log "----- phase $n REJECTED on attempt $attempt/$MAX_REJECTS -----"
     wiggum_emit reject phase "$n" attempt "$attempt"
+
+    # Critic-outage breaker: MALFORMED means the critic produced no usable reply
+    # at all — it timed out, was unreachable, or never emitted a verdict line —
+    # so GATE<N>-FEEDBACK.md says "(no critic output)" and the attempt learned
+    # nothing. Retrying the PROPOSER against that is a full agent pass (up to
+    # MAX_ITER iterations) spent on zero information, and no other breaker can
+    # see it: check_oscillation keys on criterion IDs, which a contentless
+    # feedback has none of. Left alone the loop burns the entire MAX_REJECTS
+    # budget on a critic that is simply down — observed live on agentflow
+    # phase 8 (2026-08-30, "critic timed out after 300s", 30 attempts). Count
+    # the consecutive ones and halt with a reason that names the real cause.
+    if (( CRITIC_MALFORMED_LIMIT > 0 )); then
+      if [[ "$(last_verdict_result "$n" "$attempt")" == "MALFORMED" ]]; then
+        # Not (( x++ )): that returns status 1 on the 0→1 step, which would be
+        # fatal if this script ever gains `set -e`.
+        malformed_streak=$(( malformed_streak + 1 ))
+        log ">>> critic returned no usable verdict (MALFORMED ${malformed_streak}/${CRITIC_MALFORMED_LIMIT})"
+        wiggum_emit critic_malformed phase "$n" attempt "$attempt" \
+          streak "$malformed_streak" limit "$CRITIC_MALFORMED_LIMIT"
+        if (( malformed_streak >= CRITIC_MALFORMED_LIMIT )); then
+          archive_attempt "$n" "$attempt"
+          log ""
+          log "############################################################"
+          log "# HALT — the critic is not answering (exit $E_INTERNAL)."
+          log "#   $malformed_streak consecutive attempts on phase $n ended in a MALFORMED"
+          log "#   verdict: the critic timed out, was unreachable, or returned no verdict"
+          log "#   line. No feedback was produced, so every further proposer attempt would"
+          log "#   run blind and the phase can never be approved. This is a CRITIC"
+          log "#   AVAILABILITY problem, not a code gap — do not edit the spec."
+          log "#   critic backend  : $CRITIC_BACKEND (timeout ${CRITIC_TIMEOUT}s)"
+          log "#   latest verdicts : wiggum verdicts -w $WORKDIR --feature $SLUG"
+          log "#   Options:"
+          log "#     - raise the critic timeout: WIGGUM_CRITIC_TIMEOUT=900 wiggum resume -w $WORKDIR"
+          log "#     - point at a reachable critic: wiggum resume -w $WORKDIR --critic <backend>"
+          log "#     - raise the tolerance:      WIGGUM_CRITIC_MALFORMED_LIMIT=5 wiggum resume -w $WORKDIR"
+          log "############################################################"
+          wiggum_emit run_stop reason critic_unavailable phase "$n" \
+            attempts "$attempt" streak "$malformed_streak"
+          exit "$E_INTERNAL"
+        fi
+      else
+        malformed_streak=0
+      fi
+    fi
 
     maybe_run_diagnostician "$n" "$attempt"
 

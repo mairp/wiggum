@@ -523,3 +523,56 @@ def test_unmet_ids_re_is_empty_for_a_prose_signature(tmp_path):
     """A prose signature has no IDs to narrow to, so the accelerator prompt must
     fall back to the whole phase rather than filtering on a literal "text:...".."""
     assert _bash_fn('unmet_ids_re "text:deadbeef"', tmp_path) == ""
+
+
+def test_critic_outage_halts_before_burning_the_reject_budget(tmp_path):
+    """A critic that never returns a usable verdict must stop the run, not spend
+    the whole MAX_REJECTS budget on proposer passes it will never read.
+
+    MALFORMED is how critic.py fails safe when the critic times out, is
+    unreachable, or answers without a verdict line — the feedback it writes is
+    contentless ("(no critic output)"), so every further attempt is a full agent
+    pass run blind. No other breaker catches it: check_oscillation keys on
+    criterion IDs, and a contentless feedback has none. The run must halt at
+    WIGGUM_CRITIC_MALFORMED_LIMIT with reason critic_unavailable (exit 1), which
+    names the real cause, rather than at max_rejects (exit 2), which would blame
+    the code.
+    """
+    result, workdir, events = _run_orchestrator(
+        tmp_path, verdict="MALFORMED", max_iter="1", max_rejects="10",
+        extra_env={"WIGGUM_CRITIC_MALFORMED_LIMIT": "2"})
+
+    assert result.returncode == 1, result.stdout + "\n" + result.stderr
+
+    # The verdicts really were MALFORMED (not ordinary rejections) …
+    verdicts = [e for e in events if e["event"] == "verdict"]
+    assert verdicts and all(v["result"] == "MALFORMED" for v in verdicts), verdicts
+
+    # … the breaker counted them consecutively and tripped on the 2nd …
+    streaks = [e for e in events if e["event"] == "critic_malformed"]
+    assert [e["streak"] for e in streaks] == ["1", "2"], streaks
+
+    # … and it stopped there instead of running the reject budget to 10.
+    stops = [e for e in events if e["event"] == "run_stop"]
+    assert stops and stops[-1]["reason"] == "critic_unavailable", stops
+    assert stops[-1]["streak"] == "2"
+    assert len([e for e in events if e["event"] == "reject"]) == 2
+
+    gates = workdir / ".wiggum" / "features" / "obs-lifecycle" / "gates"
+    assert not (gates / "GATE1-APPROVED").exists(), "an unanswered critic approves nothing"
+
+
+def test_a_genuine_rejection_resets_the_critic_outage_streak(tmp_path):
+    """The breaker must count only CONSECUTIVE malformed verdicts. A real
+    REJECTED verdict in between is information — it proves the critic is up — so
+    it resets the streak and the run stays on the normal max_rejects path."""
+    result, _workdir, events = _run_orchestrator(
+        tmp_path, verdict="REJECTED", max_iter="1", max_rejects="2",
+        extra_env={"WIGGUM_CRITIC_MALFORMED_LIMIT": "1"})
+
+    # Limit of 1 would trip on the very first malformed verdict; none occur, so
+    # the run halts the ordinary way instead.
+    assert result.returncode == 2, result.stdout + "\n" + result.stderr
+    assert not [e for e in events if e["event"] == "critic_malformed"]
+    stops = [e for e in events if e["event"] == "run_stop"]
+    assert stops and stops[-1]["reason"] == "max_rejects", stops
