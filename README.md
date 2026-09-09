@@ -752,7 +752,8 @@ applies, so use it only when you accept raw provider text in `run.log`.
 
 Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `WIGGUM_MAX_ITER`, `WIGGUM_PROPOSER_TIMEOUT` (1800s),
-`WIGGUM_CRITIC_TIMEOUT` (300s), `WIGGUM_MAX_WALL_MIN` (0 = unlimited),
+`WIGGUM_CRITIC_TIMEOUT` (300s), `WIGGUM_CRITIC_MALFORMED_LIMIT` (3),
+`WIGGUM_MAX_WALL_MIN` (0 = unlimited),
 `WIGGUM_CRITIC_GROUNDING` (on), `WIGGUM_GIT_COMMITS` (auto).
 
 ## Hardening
@@ -800,7 +801,7 @@ guarded, all cheap:
 | Code | Meaning |
 |---|---|
 | `0` | all phases approved |
-| `1` | unexpected/internal error |
+| `1` | unexpected/internal error, **and** the **critic-outage breaker**: `WIGGUM_CRITIC_MALFORMED_LIMIT` consecutive `MALFORMED` verdicts (default 3). `MALFORMED` is how the critic fails safe when it times out, is unreachable, or answers without a verdict line — the feedback it writes is contentless, so every further proposer attempt runs blind and the phase can never be approved. Without the breaker the run spends its whole `MAX_REJECTS` budget on a critic that is simply down (`check_oscillation` cannot catch it: it keys on criterion IDs, which a contentless feedback has none of). It emits `run_stop reason=critic_unavailable`; raise `WIGGUM_CRITIC_TIMEOUT`, point `--critic` at a reachable backend, or raise `WIGGUM_CRITIC_MALFORMED_LIMIT`, then `wiggum resume` |
 | `2` | MAX_REJECTS exceeded — a human needs to arbitrate |
 | `3` | invalid spec/config |
 | `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or the **failure breaker** tripping (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive proposer passes ending in an agent error: crash, timeout, auth/model error, malformed output, no terminal record, or a **watchdog kill**; default 2). The breaker emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume` |
