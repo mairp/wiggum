@@ -17,6 +17,16 @@ This directory contains implementation roadmaps and operational guides for plann
   each capped alone and never summed against the backend's context window; the rejection
   history has no cap at all. **Done.**
 
+- [A cleanly-blocked phase looks like work to every futility detector](futility-detectors-miss-a-cleanly-blocked-phase.md) —
+  all three futility detectors ask "is this pass stuck?"; none asked whether the
+  SEQUENCE was going anywhere, so a phase blocked on an operator decision burned all
+  twenty passes. Fixed by a consecutive-no-progress breaker (exit 8). **Done.**
+
+- [The repeat-stall watchdog punishes polling a backgrounded long job](repeat-stall-punishes-polling-a-backgrounded-long-job.md) —
+  open: `REPEAT_IGNORE` exempts long jobs by command NAME, so foreground `make test` is
+  safe and backgrounding the same suite then tailing its log is killed. Three kills,
+  ~1h40m, in one run. **Planned.**
+
 ## Status legend
 
 - **Current**: verified against the repository and recorded run artifacts.
