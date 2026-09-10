@@ -1478,6 +1478,21 @@ run_phase() {
         wiggum_emit run_stop reason proposer_max_iter phase "$n"
         exit "$E_BUDGET"
       fi
+      if [[ "$prc" -eq 8 ]]; then
+        log ">>> proposer made no progress for phase $n — halting (exit $E_BUDGET)."
+        log "#   Consecutive passes completed cleanly and changed NOTHING outside the"
+        log "#   loop's own bookkeeping. That is what a phase blocked on a decision looks"
+        log "#   like: the agent will not break a spec rule or weaken a criterion to get"
+        log "#   past it, so it writes its reasoning and waits. This is NOT a timeout and"
+        log "#   raising a budget will not clear it."
+        log "#   Read, in this order:"
+        log "#     - the newest agent note in $FEATURE_DIR/PROGRESS.md (it names the blocker)"
+        log "#     - the phase's run note under the spec's runs/ directory (it usually lists"
+        log "#       the options the operator has to choose between)"
+        log "#   Record the decision where the note asks for it, then: wiggum resume -w $WORKDIR"
+        wiggum_emit run_stop reason proposer_no_progress phase "$n"
+        exit "$E_BUDGET"
+      fi
       if [[ "$prc" -eq 7 ]]; then
         log ">>> proposer aborted on consecutive agent errors for phase $n — halting (exit $E_BUDGET)."
         log "#   the agent pass repeatedly ended in error, or was repeatedly killed by the"

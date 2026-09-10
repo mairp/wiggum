@@ -102,6 +102,9 @@ EXIT
   0  evidence file appeared      4  max-iter reached without evidence
   6  stopped via stop.flag       1  bad usage
   7  consecutive agent errors (WIGGUM_PROPOSER_MAX_ERRORS, default 2)
+  8  consecutive passes that changed nothing outside the loop's own bookkeeping
+     (WIGGUM_PROPOSER_MAX_NOPROGRESS, default 3) — the phase is blocked on
+     something the agent cannot decide for itself
 EOF
 }
 
@@ -1074,6 +1077,17 @@ trap 'rm -f "$PIDFILE"' EXIT
 # Non-Prime backends keep the legacy event-log is_error tail-scan below.
 : "${WIGGUM_PROPOSER_MAX_ERRORS:=2}"
 consec_err=0
+# Consecutive-NO-PROGRESS breaker. The error breaker above keys on `is_error`, so a
+# pass that completes cleanly, reports success, and changes nothing resets it. That is
+# exactly what a phase blocked on an operator decision looks like: observed 2026-09-10
+# on semantic-router-sovereign phase 6, where the agent correctly refused to break a
+# spec rule (FR-243), wrote its reasoning, and asked for a decision -- then the loop
+# re-ran it every ~60s for all 20 passes and halted with the generic "max-iter" message.
+# Twenty passes of nothing is not information; three is. Reuses _disk_progress_since,
+# which already prunes .git/.wiggum/node_modules/.venv, so the agent's own bookkeeping
+# (PROGRESS.md and the loop's state) does NOT count as progress -- only real work does.
+: "${WIGGUM_PROPOSER_MAX_NOPROGRESS:=3}"
+consec_noprogress=0
 FINALIZER="$LIB_DIR/finalize_invocation.py"
 BREAKER_STATE="$STATE_DIR/.breaker-state.$RUN_ID.json"
 rm -f "$BREAKER_STATE"
@@ -1085,6 +1099,10 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   fi
   wiggum_emit iter_start iter "$i" max_iter "$MAX_ITER"
   echo "----- proposer pass $i/$MAX_ITER  $(date -Is) -----" >&2
+  # Stamped before the pass so the no-progress breaker can ask, afterwards, whether
+  # this pass changed anything real. One second back: find's -newermt is strictly
+  # greater-than, and a write landing in the same second would otherwise be missed.
+  pass_started_at=$(( $(date +%s) - 1 ))
 
   # Idempotent: a no-op once the phase's long job (if any) is already running
   # or already done. Called every pass, not just once, because the
@@ -1254,6 +1272,21 @@ PY
   else
     consec_err=0
   fi
+
+  # Did this pass change anything outside the loop's own bookkeeping?
+  if (( WIGGUM_PROPOSER_MAX_NOPROGRESS > 0 )) && ! _disk_progress_since "$pass_started_at"; then
+    consec_noprogress=$(( consec_noprogress + 1 ))
+    echo "proposer.sh: pass $i changed nothing outside .wiggum — consecutive no-progress passes: $consec_noprogress/$WIGGUM_PROPOSER_MAX_NOPROGRESS" >&2
+    wiggum_emit iter_no_progress iter "$i" consec "$consec_noprogress"
+    if (( consec_noprogress >= WIGGUM_PROPOSER_MAX_NOPROGRESS )); then
+      echo "proposer.sh: $consec_noprogress consecutive passes wrote nothing — the phase is blocked on something the agent cannot decide for itself (exit 8). Read the newest agent note and the phase's run note; record the decision it asks for, then resume." >&2
+      wiggum_emit run_stop reason proposer_no_progress iter "$i" consec "$consec_noprogress"
+      exit 8
+    fi
+  else
+    consec_noprogress=0
+  fi
+
   if [[ -f "$STATE_DIR/stop.flag" ]]; then
     echo "proposer.sh: stop.flag detected — stopping after pass $i" >&2
     exit 6
