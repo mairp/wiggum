@@ -1,6 +1,6 @@
 # The critic's byte budget is per-block, never per-prompt
 
-**Status**: open defect, not yet triggered in a run. Found 2026-09-10 while tracking
+**Status**: FIXED 2026-09-10 (W21), same day it was found. Found while tracking
 the `semantic-router-sovereign` 002 loop. Sibling of the F6 incident in that run's
 `.mixture-of-loops/runs/002-extproc-data-path/TROUBLESHOOTING.md`, which fixed a
 *different* symptom of the same missing check.
@@ -83,3 +83,32 @@ F6's own lesson was "widening grounding is not free — check it against the bud
 The stronger form: **a budget that is only enforced per-block is not a budget.**
 The context window is a property of the whole prompt, so it has to be checked
 where the whole prompt exists, which is the one place none of these caps look.
+
+---
+
+## Fixed — W21, 2026-09-10
+
+`fit_to_window()` assembles the prompt and then shrinks it until the **whole**
+thing fits `_critic_context_tokens(provider)`, less `PROMPT_REPLY_RESERVE_TOKENS`
+(8000) for the backend's own answer — a prompt that fills the window exactly still
+overflows once the reply starts. Applied on both paths that build a prompt:
+the critic (`context` -> `grounding` -> `evidence`) and the diagnostician
+(`files_block` -> `history` -> `evidence`).
+
+The criteria section is deliberately absent from both shrink orders: eliding what
+the verdict is judged against would trade a crash for a wrong verdict.
+
+`history` gained the ceiling it never had — `DIAGNOSTICIAN_HISTORY_CAP`, 120 KB
+scaled to the real window.
+
+Elisions are marked `BUDGET elision, not missing content` and keep the block's head
+AND tail, so the critic can still tell an elision from an absence — the same
+distinction the grounding backstop exists to protect.
+
+And `call_dsh` now reports the provider's own error text: dsh writes provider
+failures to **stdout**, so keying only on stderr produced `exit 1: ` with an empty
+tail and `CONTEXT_WINDOW_EXCEEDED` was findable only by reading `run.log`.
+
+Regression tests, `lib/test_critic.py` (70 passed): one asserts the raw blocks
+still sum past the window, so the guard stays load-bearing rather than quietly
+becoming a no-op if a cap changes.

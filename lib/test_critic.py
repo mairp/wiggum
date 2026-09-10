@@ -1145,3 +1145,61 @@ def test_w20_a_placeholder_never_invents_a_file_that_is_absent(tmp_path):
     assert _resolve_cited("../<anything>/passwd", str(work)) is None
     # glob metacharacters in the citation itself are escaped, not honoured
     assert _resolve_cited("specs/002-x/runs/d*-2026-09-<dd>.md", str(work)) is None
+
+
+# ---------------------------------------------------------------------------
+# W21 — the assembled prompt is budgeted, not just each block.
+# Regression for the 2026-09-10 incident: every block fitted its own cap, their
+# sum did not fit the window, and dsh answered CONTEXT_WINDOW_EXCEEDED. That
+# scores MALFORMED, and MALFORMED is a reject — it burnt one of ten attempts on
+# phase 2 of the 002 run and killed three diagnostician calls.
+# ---------------------------------------------------------------------------
+def test_w21_worst_case_diagnostician_blocks_sum_past_the_window_without_fitting():
+    """The caps ALONE are not enough: prove the sum overflows, so the guard is load-bearing."""
+    ct = critic_mod._critic_context_tokens("dsh:compass-gpt5-high/gpt-5")
+    files = critic_mod._scaled_cap(critic_mod.DIAGNOSTICIAN_TOTAL_CAP, ct)
+    raw_tokens = (files + critic_mod.EVIDENCE_MAX_BYTES) / critic_mod.BYTES_PER_TOKEN
+    assert raw_tokens > ct, (
+        "file dump + evidence alone should exceed the window; if this ever stops being "
+        "true the caps changed and the guard below needs re-deriving")
+
+
+def test_w21_fit_to_window_shrinks_until_the_whole_prompt_fits():
+    ct = critic_mod._critic_context_tokens("dsh:compass-gpt5-high/gpt-5")
+    build = lambda section, evidence, history, files_block: (
+        section + evidence + history + files_block)
+    blocks = {
+        "section": "S" * 5000,
+        "evidence": "E" * critic_mod.EVIDENCE_MAX_BYTES,
+        "history": "H" * 300_000,          # the block that used to have NO cap
+        "files_block": "F" * critic_mod._scaled_cap(critic_mod.DIAGNOSTICIAN_TOTAL_CAP, ct),
+    }
+    prompt, notes = critic_mod.fit_to_window(
+        build, dict(blocks), ["files_block", "history", "evidence"], ct)
+
+    budget = int((ct - critic_mod.PROMPT_REPLY_RESERVE_TOKENS) * critic_mod.BYTES_PER_TOKEN)
+    assert critic_mod.prompt_bytes(prompt) <= budget
+    assert notes, "a prompt this size must record what it trimmed"
+    assert "STILL OVER" not in " ".join(notes)
+
+
+def test_w21_the_criteria_section_is_never_elided():
+    """Eliding what the verdict is judged against trades a crash for a wrong verdict."""
+    ct = 50_000
+    section = "CRITERION-" * 2000
+    build = lambda section, evidence: section + evidence
+    prompt, _ = critic_mod.fit_to_window(
+        build, {"section": section, "evidence": "E" * 400_000}, ["evidence"], ct)
+    assert section in prompt, "the section must survive verbatim"
+
+
+def test_w21_an_elision_is_marked_so_it_is_not_read_as_absence():
+    trimmed = critic_mod.elide_middle("A" * 90_000, 20_000, "files_block")
+    assert "BUDGET elision, not missing content" in trimmed
+    assert trimmed.startswith("A") and trimmed.rstrip().endswith("A")
+    assert len(trimmed.encode("utf-8")) < 90_000
+
+
+def test_w21_a_block_already_under_budget_is_returned_untouched():
+    small = "already small"
+    assert critic_mod.elide_middle(small, 20_000, "evidence") is small

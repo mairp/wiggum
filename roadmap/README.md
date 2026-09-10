@@ -15,7 +15,7 @@ This directory contains implementation roadmaps and operational guides for plann
 - [The critic's byte budget is per-block, never per-prompt](critic-prompt-budget-is-per-block-not-per-prompt.md) —
   open defect: `GROUNDING_TOTAL_CAP`, `DIAGNOSTICIAN_TOTAL_CAP` and `EVIDENCE_MAX_BYTES` are
   each capped alone and never summed against the backend's context window; the rejection
-  history has no cap at all. **Planned.**
+  history has no cap at all. **Done.**
 
 ## Status legend
 

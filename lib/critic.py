@@ -261,6 +261,75 @@ DIAGNOSTICIAN_TOTAL_CAP = 600000  # ~600 KB (~190k tokens at the critic's measur
                                    # is scoped narrower than a full phase's citations.
 
 
+PROMPT_REPLY_RESERVE_TOKENS = 8000  # room the backend still needs for its OWN answer
+                                   # after the prompt is counted. A prompt that fills the
+                                   # window exactly still overflows once the reply starts.
+DIAGNOSTICIAN_HISTORY_CAP = 120000 # the rejection history was the ONE block with no
+                                   # ceiling; it grows linearly with --max-rejects, so a
+                                   # late attempt on a heavily-rejected phase could push a
+                                   # prompt over the window on its own.
+
+
+def prompt_bytes(text):
+    """Byte length of an assembled prompt — what the window is actually spent on."""
+    return len(text.encode("utf-8"))
+
+
+def elide_middle(text, max_bytes, label):
+    """Trim a block to `max_bytes`, keeping its head AND tail and saying so.
+
+    Head-and-tail rather than a plain truncation because the end of an evidence or
+    history block routinely carries the conclusion; and the marker is explicit so the
+    critic can tell an elision from an absence — the distinction the whole grounding
+    backstop exists to protect (see grounding_gap)."""
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    keep = max(1024, max_bytes // 2 - 256)
+    head = raw[:keep].decode("utf-8", "replace")
+    tail = raw[-keep:].decode("utf-8", "replace")
+    return ("%s\n\n… [%s: %d bytes elided to fit the critic's context window; this is a "
+            "BUDGET elision, not missing content] …\n\n%s"
+            % (head, label, len(raw) - 2 * keep, tail))
+
+
+def fit_to_window(build, blocks, order, context_tokens,
+                  reserve=PROMPT_REPLY_RESERVE_TOKENS):
+    """Assemble a prompt and shrink it until the WHOLE thing fits the real window.
+
+    Every byte budget in this file caps ONE block against a reference window. Nothing
+    summed them, so two blocks that each "fit" could — and did — sum past the window:
+    on 2026-09-10 the dsh critic answered `CONTEXT_WINDOW_EXCEEDED: pi-ai detected
+    context overflow for model "gpt-5"`, which scores MALFORMED, and MALFORMED is a
+    reject. A budget enforced per-block is not a budget; the context window is a
+    property of the assembled prompt, so it is checked here, where the assembled
+    prompt exists.
+
+    `order` names blocks to shrink, least-load-bearing first. The criteria section is
+    deliberately never in it: eliding what the verdict is judged against would trade a
+    crash for a wrong verdict. Returns (prompt, notes)."""
+    budget = int(max(1, context_tokens - reserve) * BYTES_PER_TOKEN)
+    notes = []
+    prompt = build(**blocks)
+    for name in order:
+        over = prompt_bytes(prompt) - budget
+        if over <= 0:
+            break
+        current = blocks.get(name) or ""
+        size = len(current.encode("utf-8"))
+        target = size - over
+        if target >= size or size <= 4096:
+            continue
+        target = max(4096, target)
+        blocks[name] = elide_middle(current, target, name)
+        notes.append("%s %d->%d B" % (name, size, target))
+        prompt = build(**blocks)
+    if prompt_bytes(prompt) > budget:
+        notes.append("STILL OVER by %d B after shrinking %s"
+                     % (prompt_bytes(prompt) - budget, ",".join(order)))
+    return prompt, notes
+
+
 def warn(msg):
     sys.stderr.write("critic.py: %s\n" % msg)
 
@@ -1507,8 +1576,20 @@ def run_diagnostician(args, workdir, n, feature_dir, gates_dir, gates_rel, secti
         except OSError:
             pass
     history = "\n\n".join(history_parts) or "(no prior rejection recorded)"
+    # The history block had no ceiling at all while every other block had one.
+    history = elide_middle(history, _scaled_cap(DIAGNOSTICIAN_HISTORY_CAP, context_tokens),
+                           "rejection history")
 
-    prompt = build_diagnostician_prompt(n, section, evidence, history, files_block)
+    prompt, budget_notes = fit_to_window(
+        lambda section, evidence, history, files_block: build_diagnostician_prompt(
+            n, section, evidence, history, files_block),
+        {"section": section, "evidence": evidence, "history": history,
+         "files_block": files_block},
+        ["files_block", "history", "evidence"],
+        context_tokens)
+    if budget_notes:
+        warn("diagnostician prompt trimmed to fit the %d-token window: %s"
+             % (context_tokens, "; ".join(budget_notes)))
     emit(events_path, "diagnostician_start", phase=n, attempt=args.attempt,
          provider=args.provider)
     try:
@@ -1924,8 +2005,12 @@ def call_dsh_shell(prompt, timeout, workdir=None, model_ref=None):
             import shutil
             shutil.rmtree(overlay_home, ignore_errors=True)
     if out.returncode != 0:
+        # dsh reports provider failures (CONTEXT_WINDOW_EXCEEDED among them) on STDOUT,
+        # so keying only on stderr produced "exit 1: " with an empty tail and the real
+        # cause was findable only by reading run.log. Prefer stderr, fall back to stdout.
+        detail = (out.stderr or "").strip() or (out.stdout or "").strip()
         raise RuntimeError("DeepSeek Harness critic exit %d: %s" %
-                           (out.returncode, (out.stderr or "")[:300]))
+                           (out.returncode, detail[:300]))
     if not out.stdout.strip():
         raise RuntimeError("DeepSeek Harness critic returned empty stdout")
     return out.stdout
@@ -2375,7 +2460,18 @@ def main():
         backing = None
 
     nonce = secrets.token_hex(8)
-    prompt = build_prompt(n, section, evidence, grounding + pin_block, nonce, context)
+    # Same missing sum as the diagnostician: grounding, evidence and the design context
+    # are each capped alone and can still exceed the window together.
+    prompt, budget_notes = fit_to_window(
+        lambda section, evidence, grounding, context: build_prompt(
+            n, section, evidence, grounding, nonce, context),
+        {"section": section, "evidence": evidence,
+         "grounding": grounding + pin_block, "context": context},
+        ["context", "grounding", "evidence"],
+        _critic_context_tokens(args.provider))
+    if budget_notes:
+        warn("critic prompt trimmed to fit the %d-token window: %s"
+             % (_critic_context_tokens(args.provider), "; ".join(budget_notes)))
 
     if args.debug:
         with open(os.path.join(debug_dir, "critic-prompt.phase%d.att%d.txt" % (n, args.attempt)), "w") as fh:
