@@ -23,6 +23,7 @@ The orchestrator maps these onto phase advancement; the marker files are the
 real contract, the exit code is a convenience.
 """
 import sys, os, re, json, time, argparse, secrets, urllib.request, urllib.error
+import glob  # W20 — placeholder-in-citation resolution
 
 # Spec parsing is owned by ONE module (lib/wiggum_spec.py) shared with the bash
 # side — critic.py no longer carries its own copy of the grammar. Import it from
@@ -123,7 +124,16 @@ _LOCAL_MODEL_CONTEXT_TOKENS = {
     "nemotron": 131072, "nemotron-lightning-30b": 131072,
     "auto": 131072, "qwen-auto": 131072,
     "glm-5.3": 128000, "glm-5.3-flash": 128000,
-    "gpt-5": 300000, "gpt-5.5": 300000, "gpt-5.6-sol": 300000, "gpt-5.2": 300000,
+    # W20a: 200000, NOT 300000. These reach Compass through this fleet's LiteLLM,
+    # and /root/.prime/agent/models.json — the config that route actually honours —
+    # declares every one of them `"contextWindow": 200000`. At 300000 the scaled
+    # grounding budget reaches ~491 KB and the call dies
+    # `CONTEXT_WINDOW_EXCEEDED: pi-ai detected context overflow for model "gpt-5"`,
+    # which reads as MALFORMED and burns an attempt (semantic-router-sovereign
+    # phase 2 attempt 3, 2026-09-10, once W20 made four large run notes groundable).
+    # GROUNDING_TOTAL_CAP above was tuned against 200k and calls it "gpt-5's
+    # window" in its own comment, so the table was contradicting the constant.
+    "gpt-5": 200000, "gpt-5.5": 200000, "gpt-5.6-sol": 200000, "gpt-5.2": 200000,
 }
 _DEFAULT_CONTEXT_TOKENS = 98304    # cc-compass-shim/.env's own QWEN_CTX fallback for
                                    # a model absent from its map — used for Prime
@@ -577,6 +587,56 @@ def _member_hint(text, members):
     return None
 
 
+# W20: a criterion that names the file it wants with a PLACEHOLDER in it —
+# `specs/002-extproc-data-path/runs/d0-2026-09-<dd>.md`, the Spec Kit spelling for
+# "a dated run note" — cited that path verbatim, the extractor resolved the literal
+# string `<dd>`, and every such criterion read MISSING no matter how complete the
+# work was. Confirmed live (2026-09-10, semantic-router-sovereign phase 2): the
+# critic rejected T322/T328/T339/T347 for four "missing" run notes while
+# d0-2026-09-09.md, d1-2026-09-10.md, d2-2026-09-10.md and d3-2026-09-10.md all sat
+# on disk, written that hour. Ten of those and the phase HALTs on a true criterion.
+#
+# The placeholder becomes a glob and NOTHING ELSE does: every other metacharacter is
+# escaped, so `<dd>` is the only wildcard and this can never resolve a path the
+# criterion did not describe. A real file must still match, so nothing that is
+# genuinely absent can read as present.
+_PLACEHOLDER_RE = re.compile(r"<[^<>/]{1,40}>")
+
+
+def _placeholder_pattern(p):
+    """`runs/d0-2026-09-<dd>.md` -> `runs/d0-2026-09-*.md` (rest glob-escaped)."""
+    return "*".join(glob.escape(part) for part in _PLACEHOLDER_RE.split(p))
+
+
+def _resolve_placeholder(p, workdir, search_dirs, members, hint):
+    """`_resolve_cited` for a citation carrying a placeholder: same candidate order,
+    matched by glob instead of by exists(). First hit in sorted order, so two dated
+    notes resolve deterministically."""
+    def first(pattern):
+        hits = sorted(glob.glob(pattern))
+        return hits[0] if hits else None
+
+    pattern = _placeholder_pattern(p.replace("\\", "/"))
+    if os.path.isabs(p):
+        return first(pattern)
+    norm = os.path.normpath(pattern)
+    if norm in (".", "") or norm == ".." or norm.startswith(".." + os.sep):
+        return None
+    candidates = [os.path.join(workdir, norm)]
+    if members is None:
+        members = _workspace_members(workdir)
+    if members and "/" in norm:
+        ordered = ([hint] + [m for m in members if m != hint]) if hint else members
+        candidates += [os.path.join(workdir, m, norm) for m in ordered if m]
+    candidates += [os.path.join(workdir, d, norm) for d in search_dirs]
+    candidates += [os.path.join(workdir, d, os.path.basename(norm)) for d in search_dirs]
+    for candidate in candidates:
+        hit = first(candidate)
+        if hit:
+            return hit
+    return None
+
+
 def _resolve_cited(p, workdir, search_dirs=None, members=None, hint=None):
     """Return the first existing on-disk path for a cited reference, searching the
     workdir root and the conventional proof directories. Returns None if the file
@@ -590,6 +650,8 @@ def _resolve_cited(p, workdir, search_dirs=None, members=None, hint=None):
     first so an artifact present in many packages resolves to the criterion's package."""
     if search_dirs is None:
         search_dirs = GROUNDING_SEARCH_DIRS
+    if _PLACEHOLDER_RE.search(p):                       # W20
+        return _resolve_placeholder(p, workdir, search_dirs, members, hint)
     if os.path.isabs(p):
         return p if os.path.exists(p) else None
     # W15: normalize the cited RELATIVE form before any join. Collapse a leading

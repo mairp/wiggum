@@ -1045,10 +1045,14 @@ def test_context_tokens_dsh_resolves_the_real_local_window(monkeypatch):
     assert _critic_context_tokens("dsh:some-unknown-model") == _DEFAULT_CONTEXT_TOKENS
     # dsh routed THROUGH compass to gpt-5 (multi-segment ref, real production config:
     # 003-datacenter-service-constructs' saved run uses exactly
-    # dsh:compass-gpt5-high/gpt-5) must resolve against the SHIM's own 300,000 guard,
-    # not the direct-API codex table's 400,000 -- a compass-routed call answers to the
-    # shim's enforced ceiling, not OpenAI's raw vendor limit.
-    assert _critic_context_tokens("dsh:compass-gpt5-high/gpt-5") == 300000
+    # dsh:compass-gpt5-high/gpt-5) resolves to 200,000 -- NOT the direct-API codex
+    # table's 400,000, and NOT cc-compass-shim's QWEN_CTX_MAP 300,000 either. The
+    # shim is not on this path: `dsh` answers to /root/.dsh/settings.yaml, which
+    # declares this provider's gpt-5 `contextWindow: 200000`, and it dispatches
+    # through pi-ai, whose /root/.prime/agent/models.json says the same. Corrected
+    # 2026-09-10 after a live call died `CONTEXT_WINDOW_EXCEEDED: pi-ai detected
+    # context overflow for model "gpt-5"` with the budget scaled off 300,000.
+    assert _critic_context_tokens("dsh:compass-gpt5-high/gpt-5") == 200000
 
 
 def test_context_tokens_bebop_resolves_the_real_local_window(monkeypatch):
@@ -1112,3 +1116,32 @@ def test_grounding_snapshot_respects_a_custom_total_cap(tmp_path):
                                     anchors=[], members=members, total_cap=1000000)
     assert "(complete file, line-numbered)" in g_generous
     assert "(complete file, line-numbered)" not in g_tiny
+
+
+def test_w20_a_placeholder_citation_resolves_to_the_dated_file(tmp_path):
+    """W20 — a criterion naming `runs/d0-2026-09-<dd>.md` must ground against the
+    dated note that satisfies it (semantic-router-sovereign phase 2, 2026-09-10:
+    four true criteria rejected as MISSING while the notes sat on disk)."""
+    work = tmp_path / "repo"
+    (work / "specs" / "002-x" / "runs").mkdir(parents=True)
+    (work / "specs" / "002-x" / "runs" / "d0-2026-09-09.md").write_text("D0\n")
+    (work / "specs" / "002-x" / "runs" / "d1-2026-09-10.md").write_text("D1\n")
+
+    resolved = _resolve_cited("specs/002-x/runs/d0-2026-09-<dd>.md", str(work))
+    assert resolved and resolved.endswith("d0-2026-09-09.md")
+    resolved = _resolve_cited("specs/<feature>/runs/d1-2026-09-<dd>.md", str(work))
+    assert resolved and resolved.endswith("d1-2026-09-10.md")
+
+
+def test_w20_a_placeholder_never_invents_a_file_that_is_absent(tmp_path):
+    """The placeholder is the ONLY wildcard, and a real file must still match — a
+    criterion whose artifact was never written keeps reading MISSING."""
+    work = tmp_path / "repo"
+    (work / "specs" / "002-x" / "runs").mkdir(parents=True)
+    (work / "specs" / "002-x" / "runs" / "d0-2026-09-09.md").write_text("D0\n")
+
+    assert _resolve_cited("specs/002-x/runs/d9-2026-09-<dd>.md", str(work)) is None
+    # containment still holds: a placeholder cannot walk out of the workdir
+    assert _resolve_cited("../<anything>/passwd", str(work)) is None
+    # glob metacharacters in the citation itself are escaped, not honoured
+    assert _resolve_cited("specs/002-x/runs/d*-2026-09-<dd>.md", str(work)) is None
