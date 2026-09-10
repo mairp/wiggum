@@ -378,3 +378,248 @@ def test_required_mode_refuses_when_no_test_command_exists(tmp_path):
     )
     assert plan["ambiguities"]
     assert verification_plan.run_gate(plan, 1)["passed"] is False
+
+
+# ── --verification-commands ─────────────────────────────────────────────────
+
+
+def commands_document(tmp_path, entries):
+    path = tmp_path / "verification-commands.json"
+    path.write_text(json.dumps({"schema_version": "1.0.0", "commands": entries}))
+    return str(path)
+
+
+def declared_entry(tmp_path, **over):
+    entry = {
+        "id": "p1-check",
+        "phase": 1,
+        "executable": sys.executable,
+        "args": ["-c", "print('declared ok')"],
+        "cwd": str(tmp_path),
+        "timeoutSec": 30,
+    }
+    entry.update(over)
+    return entry
+
+
+def test_declared_commands_join_their_phase_suite_and_the_release_suite(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(
+        tmp_path,
+        [
+            declared_entry(tmp_path, id="p1-check", phase=1),
+            declared_entry(tmp_path, id="p2-check", phase=2),
+        ],
+    )
+    plan = verification_plan.create_plan(workdir, specs, commands_path=document)
+
+    declared = [c for c in plan["commands"] if c.get("source") == "declared"]
+    assert [c["declaredId"] for c in declared] == ["p1-check", "p2-check"]
+    assert all(os.path.isabs(c["executable"]) for c in declared)
+
+    by_id = {c["id"]: c for c in plan["commands"]}
+    suites = {s["id"]: s for s in plan["suites"]}
+    phase1 = [by_id[r].get("declaredId") for r in suites["SUITE-phase-1"]["commandRefs"]]
+    phase2 = [by_id[r].get("declaredId") for r in suites["SUITE-phase-2"]["commandRefs"]]
+    assert "p1-check" in phase1 and "p2-check" not in phase1
+    assert "p2-check" in phase2 and "p1-check" not in phase2
+    release = [by_id[r].get("declaredId") for r in suites["SUITE-release"]["commandRefs"]]
+    assert {"p1-check", "p2-check"} <= set(release)
+
+    # The discovered suite still runs, and runs first.
+    assert any(by_id[r].get("source") != "declared"
+               for r in suites["SUITE-phase-1"]["commandRefs"])
+    assert plan["declaredCommands"]["count"] == 2
+    assert plan["declaredCommands"]["phases"] == [1, 2]
+
+
+def test_declared_document_hash_is_bound_into_the_plan(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(tmp_path, [declared_entry(tmp_path)])
+    plan = verification_plan.create_plan(workdir, specs, commands_path=document)
+    verification_plan.validate_plan(plan)
+
+    # Editing the document after planning must move the plan hash: a stale plan
+    # cannot pass itself off as the current one.
+    with open(document) as handle:
+        payload = json.load(handle)
+    payload["commands"][0]["args"] = ["-c", "print('edited')"]
+    with open(document, "w") as handle:
+        json.dump(payload, handle)
+    edited = verification_plan.create_plan(workdir, specs, commands_path=document)
+    assert edited["contentHash"] != plan["contentHash"]
+    assert edited["declaredCommands"]["contentHash"] != plan["declaredCommands"]["contentHash"]
+
+
+def test_declared_commands_run_at_the_gate_with_their_env(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(
+        tmp_path,
+        [
+            declared_entry(
+                tmp_path,
+                id="p1-env",
+                args=["-c", "import os,sys; sys.exit(0 if os.environ.get('WIGGUM_T') == 'fixture' else 9)"],
+                env={"WIGGUM_T": "fixture"},
+            )
+        ],
+    )
+    plan = verification_plan.create_plan(workdir, specs, commands_path=document)
+    evidence = verification_plan.run_gate(plan, 1)
+    declared = [c for c in evidence["commands"] if c["source"] == "declared"]
+    assert len(declared) == 1
+    assert declared[0]["declaredId"] == "p1-env"
+    assert declared[0]["exitCode"] == 0, declared[0]["stderr"]
+    assert declared[0]["env"] == {"WIGGUM_T": "fixture"}
+    # The overlay must not replace the environment it runs in.
+    assert os.path.isabs(declared[0]["executable"])
+
+
+def test_a_failing_declared_command_fails_the_gate(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(
+        tmp_path,
+        [declared_entry(tmp_path, id="p1-fail", args=["-c", "raise SystemExit(3)"])],
+    )
+    plan = verification_plan.create_plan(workdir, specs, commands_path=document)
+    evidence = verification_plan.run_gate(plan, 1)
+    assert evidence["passed"] is False
+    assert "p1-fail" in [c["declaredId"] for c in evidence["commands"] if not c["passed"]]
+
+
+def test_gate_evidence_records_the_revision_it_ran_against(tmp_path):
+    workdir, specs = project(tmp_path)
+    subprocess.run(["git", "init", "-q", workdir], check=True)
+    subprocess.run(["git", "-C", workdir, "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", workdir, "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "initial"],
+        check=True,
+    )
+    plan = verification_plan.create_plan(workdir, specs)
+    evidence = verification_plan.run_gate(plan, 1)
+    revision = evidence["sourceRevision"]
+    assert revision["available"] is True
+    assert len(revision["revision"]) == 40
+    assert revision["workingTreeDirty"] is False
+
+    (tmp_path / "dirty.txt").write_text("uncommitted")
+    assert verification_plan.run_gate(plan, 1)["sourceRevision"]["workingTreeDirty"] is True
+
+
+def test_revision_unavailable_is_recorded_with_a_reason_not_omitted(tmp_path):
+    workdir, specs = project(tmp_path)
+    plan = verification_plan.create_plan(workdir, specs)
+    revision = verification_plan.run_gate(plan, 1)["sourceRevision"]
+    assert revision["available"] is False
+    assert revision["reason"]
+
+
+def test_unresolvable_declared_command_fails_closed(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(
+        tmp_path, [declared_entry(tmp_path, executable="definitely-not-on-path-xyz")]
+    )
+    with pytest.raises(verification_plan.VerificationError) as excinfo:
+        verification_plan.create_plan(workdir, specs, commands_path=document)
+    assert "not found on PATH" in str(excinfo.value)
+
+
+def test_declared_phase_outside_the_spec_fails_closed(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(tmp_path, [declared_entry(tmp_path, phase=7)])
+    with pytest.raises(verification_plan.VerificationError) as excinfo:
+        verification_plan.create_plan(workdir, specs, commands_path=document)
+    assert "does not define" in str(excinfo.value)
+
+
+def test_malformed_declared_entries_are_refused(tmp_path):
+    workdir, specs = project(tmp_path)
+    for over, expected in [
+        ({"phase": 0}, "positive integer"),
+        ({"cwd": "relative/path"}, "absolute path"),
+        ({"cwd": str(tmp_path / "missing")}, "not a directory"),
+        ({"timeoutSec": 0}, "positive integer"),
+        ({"args": "not-a-list"}, "list of strings"),
+        ({"env": {"K": 1}}, "string to string"),
+        ({"id": ""}, "non-empty string"),
+    ]:
+        document = commands_document(tmp_path, [declared_entry(tmp_path, **over)])
+        with pytest.raises(verification_plan.VerificationError) as excinfo:
+            verification_plan.create_plan(workdir, specs, commands_path=document)
+        assert expected in str(excinfo.value), (over, str(excinfo.value))
+
+
+def test_duplicate_declared_ids_are_refused(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(
+        tmp_path, [declared_entry(tmp_path), declared_entry(tmp_path)]
+    )
+    with pytest.raises(verification_plan.VerificationError) as excinfo:
+        verification_plan.create_plan(workdir, specs, commands_path=document)
+    assert "duplicate declared command id" in str(excinfo.value)
+
+
+def test_rendered_command_line_carries_the_env_overlay(tmp_path):
+    workdir, specs = project(tmp_path)
+    document = commands_document(
+        tmp_path, [declared_entry(tmp_path, env={"ADLC_SPECIALIST_SOURCE": "fixture"})]
+    )
+    plan = verification_plan.create_plan(workdir, specs, commands_path=document)
+    declared = next(c for c in plan["commands"] if c.get("source") == "declared")
+    assert verification_plan._command_line(declared).startswith(
+        "ADLC_SPECIALIST_SOURCE=fixture "
+    )
+    assert "ADLC_SPECIALIST_SOURCE=fixture" in verification_plan.render_phase_context(plan, 1)
+
+
+def test_declared_commands_satisfy_required_mode_without_a_discovered_test(tmp_path):
+    """A project whose verification is declared rather than discoverable must still
+    be allowed into required mode — the gate has real commands to run."""
+    workdir = str(tmp_path)
+    specs = tmp_path / "SPECS.md"
+    specs.write_text(SPEC)  # no package.json, no pytest.ini: nothing to discover
+
+    bare = verification_plan.create_plan(workdir, str(specs), required=True)
+    assert any("No safe automated test command" in a for a in bare["ambiguities"])
+
+    document = commands_document(
+        tmp_path,
+        [
+            declared_entry(tmp_path, id="p1-check", phase=1),
+            declared_entry(tmp_path, id="p2-check", phase=2),
+        ],
+    )
+    plan = verification_plan.create_plan(
+        workdir, str(specs), required=True, commands_path=document
+    )
+    assert plan["ambiguities"] == []
+    assert any("declared command(s) from" in a for a in plan["assumptions"])
+
+    evidence = verification_plan.run_gate(plan, 1)
+    assert evidence["passed"] is True
+    assert [c["declaredId"] for c in evidence["commands"]] == ["p1-check"]
+    # Phase gates are cumulative: phase 2 re-runs phase 1's declared command as a
+    # regression guard before its own.
+    assert [c["declaredId"] for c in verification_plan.run_gate(plan, 2)["commands"]] == [
+        "p1-check",
+        "p2-check",
+    ]
+
+
+def test_a_phase_with_no_command_at_all_is_named_at_preflight(tmp_path):
+    """Declared commands only clear required mode when every phase has one; an empty
+    gate must be caught here, not hours later when the phase is reached."""
+    workdir = str(tmp_path)
+    specs = tmp_path / "SPECS.md"
+    specs.write_text(SPEC)  # two phases, nothing discoverable
+    document = commands_document(tmp_path, [declared_entry(tmp_path, phase=1)])
+
+    plan = verification_plan.create_plan(
+        workdir, str(specs), required=True, commands_path=document
+    )
+    assert any("No safe automated test command" in a for a in plan["ambiguities"])
+    assert any(
+        "Phase(s) 2 have neither a discovered nor a declared" in a
+        for a in plan["ambiguities"]
+    )

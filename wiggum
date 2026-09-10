@@ -458,6 +458,9 @@ for o in keep[-5:]:
     [[ -n "${SPEC_FORMAT:-}" ]] && args+=( --spec-format "$SPEC_FORMAT" )
     [[ -n "${VERIFICATION:-}" ]] && args+=( --verification "$VERIFICATION" )
     [[ -n "${TEST_PLAN:-}" ]] && args+=( --test-plan "$TEST_PLAN" )
+    # Without this a resume re-plans from the discovered heuristic alone and every
+    # later gate quietly narrows to it (older confs won't carry the key).
+    [[ -n "${VERIFICATION_COMMANDS:-}" ]] && args+=( --verification-commands "$VERIFICATION_COMMANDS" )
     [[ -n "${GENERATE_TESTS:-}" ]] && args+=( --generate-tests "$GENERATE_TESTS" )
     [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )
     [[ "${OTEL:-false}" == "true" ]] && args+=( --otel --otel-url "$OTEL_URL" )

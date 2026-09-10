@@ -72,6 +72,55 @@ specification, while `TEST_PLAN.md` is its human-readable projection.
 - `--verification plan` creates and injects the plan without executing its gates.
 - `--verification off` explicitly disables test-plan creation and execution.
 
+#### Declaring the commands a gate must execute
+
+Left alone, every executable command in the plan comes from `discover_project()`,
+a per-framework prober that reads the filesystem: a `package.json` yields its
+`test`/`build`/`lint` scripts, a `pyproject.toml` mentioning pytest yields exactly
+one `python3 -m pytest <workdir>`. A spec whose phases name *specific* verification
+commands is therefore gated on something it never asked for, and the gap is silent —
+the gate passes, the evidence looks clean, and the commands the spec named were
+never run.
+
+`--verification-commands FILE` closes that gap. The document lists the commands the
+gates MUST execute; each joins its phase's suite (after the discovered ones) and the
+release suite:
+
+```json
+{
+  "schema_version": "1.0.0",
+  "commands": [
+    {
+      "id": "p0-canonical-embedded",
+      "phase": 3,
+      "executable": "uv",
+      "args": ["run", "python", "scripts/verify_canonical_run_e2e.py", "--mode", "embedded"],
+      "cwd": "/abs/path/to/project",
+      "timeoutSec": 900,
+      "env": {"ADLC_SPECIALIST_SOURCE": "fixture"}
+    }
+  ]
+}
+```
+
+- `phase` is the spec's phase number. A phase the spec does not define aborts the
+  preflight — commands no gate could reach would otherwise sit unexecuted while the
+  run reported success.
+- `executable` may be a bare name; it is resolved on `PATH` **at plan time** and
+  stored absolute, so the plan records what will actually run. Unresolvable aborts.
+- `env` is an overlay on the run environment, not a replacement, and is rendered
+  into the command line the proposer and `TEST_PLAN.md` see.
+- Commands still execute with `shell=False` by argv. There is no shell string form.
+- The document's hash is bound into the plan hash, so editing it after planning
+  invalidates the plan rather than quietly changing what a gate checks.
+- Declared commands satisfy `--verification required` on their own: a project with
+  nothing discoverable is no longer refused when it has declared commands to run.
+
+Gate evidence records the revision it ran against — `sourceRevision.revision` from
+`git rev-parse HEAD` plus `workingTreeDirty` — because an exit code proves nothing
+if you cannot say which tree produced it. When the workdir is not a repository the
+field carries `available: false` and a reason rather than being omitted.
+
 By default, each feature gets isolated artifacts at
 `<workdir>/testautomation/<feature>/TEST_PLAN.md` and
 `<workdir>/testautomation/<feature>/generated/`. Operator overrides must be absolute,

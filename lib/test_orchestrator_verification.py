@@ -576,3 +576,121 @@ def test_a_genuine_rejection_resets_the_critic_outage_streak(tmp_path):
     assert not [e for e in events if e["event"] == "critic_malformed"]
     stops = [e for e in events if e["event"] == "run_stop"]
     assert stops and stops[-1]["reason"] == "max_rejects", stops
+
+
+# ── --verification-commands, end to end through orchestrator.sh ──────────────
+
+
+def test_orchestrator_refuses_a_missing_verification_commands_document(tmp_path):
+    """Fail at launch, not four hours later at a phase gate."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    spec = tmp_path / "spec.md"
+    spec.write_text(TWO_PHASE_SPEC)
+    fake = _fake_prime(tmp_path)
+    env = dict(os.environ)
+    env.update({
+        "WIGGUM_PRIME_AGENT_BIN": str(fake),
+        "WORKDIR_ABS": str(workdir),
+        "WIGGUM_GIT_COMMITS": "off",
+        "WIGGUM_AGENT_STREAM": "false",
+    })
+    result = subprocess.run(
+        [
+            "/usr/bin/bash", ORCHESTRATOR,
+            "--workdir", str(workdir), "--specs", str(spec),
+            "--proposer", "prime", "--critic", "prime",
+            "--verification", "required",
+            "--verification-commands", str(tmp_path / "nope.json"),
+            "--feature", "obs-lifecycle", "--no-live",
+        ],
+        cwd=str(workdir), env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, check=False,
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "--verification-commands not found or empty" in result.stderr
+
+
+def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_path):
+    """A declared command runs at its phase gate, with its env, and the evidence
+    document names the revision the gate ran against."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    spec = tmp_path / "spec.md"
+    spec.write_text(TWO_PHASE_SPEC)
+    fake = _fake_prime(tmp_path)
+    witness = workdir / "declared-ran.txt"
+    commands = tmp_path / "verification-commands.json"
+    # Both phases need a command: the spec has two, and a phase with neither a
+    # discovered nor a declared command is refused at preflight by design.
+    commands.write_text(json.dumps({
+        "schema_version": "1.0.0",
+        "commands": [
+            {
+                "id": "p1-witness",
+                "phase": 1,
+                "executable": "/usr/bin/env",
+                "args": ["sh", "-c",
+                         'test "$WIGGUM_TEST_MARK" = declared && echo ran > "$1"',
+                         "sh", str(witness)],
+                "cwd": str(workdir),
+                "timeoutSec": 60,
+                "env": {"WIGGUM_TEST_MARK": "declared"},
+            },
+            {
+                "id": "p2-noop",
+                "phase": 2,
+                "executable": "/usr/bin/env",
+                "args": ["true"],
+                "cwd": str(workdir),
+                "timeoutSec": 60,
+            },
+        ],
+    }))
+    subprocess.run(["git", "init", "-q", str(workdir)], check=True)
+    subprocess.run(["git", "-C", str(workdir), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(workdir), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "initial", "--allow-empty"],
+        check=True,
+    )
+
+    env = dict(os.environ)
+    env.update({
+        "WIGGUM_PRIME_AGENT_BIN": str(fake),
+        "WORKDIR_ABS": str(workdir),
+        "WIGGUM_GIT_COMMITS": "off",
+        "WIGGUM_AGENT_STREAM": "false",
+        "FAKE_VERDICT": "APPROVED",
+    })
+    result = subprocess.run(
+        [
+            "/usr/bin/bash", ORCHESTRATOR,
+            "--workdir", str(workdir), "--specs", str(spec),
+            "--proposer", "prime", "--critic", "prime",
+            "--verification", "required",
+            "--verification-commands", str(commands),
+            "--max-iter", "1", "--feature", "obs-lifecycle", "--no-live",
+        ],
+        cwd=str(workdir), env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False,
+    )
+
+    assert witness.is_file(), (
+        "declared command never ran\n" + result.stdout + result.stderr
+    )
+    runs = workdir / ".wiggum" / "features" / "obs-lifecycle" / "runs"
+    evidence_files = sorted(runs.rglob("verification/phase-1-attempt-*.json"))
+    assert evidence_files, result.stdout + result.stderr
+    evidence = json.loads(evidence_files[0].read_text())
+    declared = [c for c in evidence["commands"] if c["source"] == "declared"]
+    assert [c["declaredId"] for c in declared] == ["p1-witness"]
+    assert declared[0]["env"] == {"WIGGUM_TEST_MARK": "declared"}
+    assert evidence["sourceRevision"]["available"] is True
+    assert len(evidence["sourceRevision"]["revision"]) == 40
+
+    # The saved config carries the document so `wiggum resume` cannot silently
+    # narrow later gates back to the discovered heuristic.
+    conf = (workdir / ".wiggum" / "features" / "obs-lifecycle" / "last-run.conf").read_text()
+    assert "VERIFICATION_COMMANDS=" in conf
+    assert str(commands) in conf

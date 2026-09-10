@@ -35,6 +35,14 @@ BUILD_ARTIFACT = re.compile(
     re.I,
 )
 GENERATED_MARKER = "<!-- wiggum-verification-plan content-hash:"
+# Emitted by discover_project when the filesystem yields no test command, and
+# resolved by create_plan when --verification-commands supplies real ones — the
+# two must agree on the exact text, so it lives here rather than being matched
+# by hand at either end.
+NO_TEST_COMMAND_AMBIGUITY = (
+    "No safe automated test command was discovered below %s; required "
+    "verification cannot start until one is configured"
+)
 
 
 class VerificationError(Exception):
@@ -156,6 +164,157 @@ def _command(kind, label, executable, args, workdir, timeout):
         "args": list(args),
         "cwd": workdir,
         "timeoutSec": timeout,
+    }
+
+
+def _git_revision(workdir):
+    """The revision the gate actually ran against.
+
+    Constitution III (Gates 4/5) wants gate evidence bound to a revision: an exit
+    code proves nothing if you cannot say which tree produced it. Fail-soft — a
+    workdir need not be a repository — but never silently: an unavailable revision
+    is recorded with its reason rather than omitted.
+    """
+    git = shutil.which("git")
+    if not git:
+        return {"available": False, "reason": "git not found on PATH"}
+    if not workdir or not os.path.isdir(workdir):
+        return {"available": False, "reason": "workdir is not a directory"}
+    try:
+        head = subprocess.run(
+            [git, "-C", workdir, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if head.returncode != 0:
+            return {
+                "available": False,
+                "reason": (head.stderr or "git rev-parse failed").strip()[:400],
+            }
+        porcelain = subprocess.run(
+            [git, "-C", workdir, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"available": False, "reason": str(exc)[:400]}
+    dirty = None if porcelain.returncode != 0 else bool((porcelain.stdout or "").strip())
+    return {
+        "available": True,
+        "revision": (head.stdout or "").strip(),
+        "workingTreeDirty": dirty,
+        "capturedAt": int(time.time()),
+    }
+
+
+def _declared_entry_command(entry, index, environ):
+    """One declared entry -> one plan command, or a VerificationError naming it."""
+    def bad(message):
+        return VerificationError(
+            "declared command %s (index %d): %s"
+            % (json.dumps(entry.get("id", "?")), index, message)
+        )
+
+    if not isinstance(entry, dict):
+        raise bad("entry must be an object")
+    declared_id = entry.get("id")
+    if not isinstance(declared_id, str) or not declared_id.strip():
+        raise bad("id must be a non-empty string")
+    phase = entry.get("phase")
+    if not isinstance(phase, int) or isinstance(phase, bool) or phase < 1:
+        raise bad("phase must be a positive integer")
+    executable = entry.get("executable")
+    if not isinstance(executable, str) or not executable:
+        raise bad("executable must be a non-empty string")
+    args = entry.get("args", [])
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise bad("args must be a list of strings")
+    cwd = entry.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        raise bad("cwd must be an absolute path")
+    if not os.path.isdir(cwd):
+        raise bad("cwd is not a directory: %s" % cwd)
+    timeout = entry.get("timeoutSec")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise bad("timeoutSec must be a positive integer")
+    env = entry.get("env") or {}
+    if not isinstance(env, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+    ):
+        raise bad("env must be an object of string to string")
+
+    # A bare name is resolved to an absolute path HERE, at plan time, so the plan
+    # records what will actually be executed. Unresolvable fails closed: a declared
+    # command silently dropped is the failure mode this whole flag exists to end.
+    if os.path.isabs(executable):
+        resolved = executable
+    else:
+        resolved = shutil.which(executable, path=environ.get("PATH", ""))
+        if not resolved:
+            raise bad("executable %r not found on PATH" % executable)
+    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+        raise bad("executable is not an executable file: %s" % resolved)
+
+    command = _command(
+        entry.get("kind") or "verify",
+        entry.get("label") or "%s (declared)" % declared_id,
+        resolved,
+        args,
+        cwd,
+        timeout,
+    )
+    command["source"] = "declared"
+    command["declaredId"] = declared_id
+    command["phase"] = phase
+    if env:
+        command["env"] = dict(env)
+    # _command() seeds its id on kind/executable/args/cwd alone. Two declared entries
+    # that differ only in id, phase or env would collapse onto one command id and one
+    # of them would silently never run, so the declared identity joins the seed.
+    command["id"] = stable_id(
+        "CMD",
+        "declared:%s:%s:%s:%s:%s:%s"
+        % (declared_id, phase, resolved, json.dumps(args), cwd, canonical_json(env)),
+    )
+    return command
+
+
+def load_declared_commands(path, environ=None):
+    """Read a --verification-commands document into plan commands.
+
+    The document is the caller's contract about what its gates must execute; this
+    function's only job is to refuse anything it cannot run exactly as written.
+    """
+    environ = dict(os.environ if environ is None else environ)
+    if not os.path.isabs(path):
+        raise VerificationError(
+            "verification commands path must be absolute: %s" % path
+        )
+    if not os.path.isfile(path):
+        raise VerificationError("verification commands not found: %s" % path)
+    document = _read_json(path)
+    if not isinstance(document, dict):
+        raise VerificationError("verification commands document must be an object")
+    entries = document.get("commands")
+    if not isinstance(entries, list) or not entries:
+        raise VerificationError(
+            "verification commands document has no non-empty 'commands' array"
+        )
+    commands = []
+    seen = set()
+    for index, entry in enumerate(entries):
+        command = _declared_entry_command(entry, index, environ)
+        if command["declaredId"] in seen:
+            raise VerificationError(
+                "duplicate declared command id: %s" % command["declaredId"]
+            )
+        seen.add(command["declaredId"])
+        commands.append(command)
+    with open(path, "rb") as handle:
+        content_hash = sha256_bytes(handle.read())
+    return {
+        "path": os.path.realpath(path),
+        "contentHash": content_hash,
+        "schemaVersion": document.get("schema_version"),
+        "commands": commands,
     }
 
 
@@ -286,10 +445,7 @@ def discover_project(workdir, environ=None):
             "obligations remain operator-verifiable" % workdir
         )
     if not any(command["kind"] == "test" for command in commands):
-        ambiguities.append(
-            "No safe automated test command was discovered below %s; required "
-            "verification cannot start until one is configured" % workdir
-        )
+        ambiguities.append(NO_TEST_COMMAND_AMBIGUITY % workdir)
 
     fingerprint = sha256_text(
         canonical_json({"workdir": workdir, "entries": _project_files(workdir)})
@@ -421,7 +577,8 @@ def _criterion_text(criterion):
     return (match.group(1) if match else criterion).strip()
 
 
-def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
+def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
+                commands_path=None):
     workdir = require_absolute_directory(workdir, "workdir")
     if not os.path.isabs(specs_path):
         raise VerificationError("specification path must be absolute: %s" % specs_path)
@@ -436,6 +593,27 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
         raise VerificationError("invalid specification: %s" % "; ".join(errors))
     phases = wiggum_spec.get_phases(text, resolved_format)
     discovery = discover_project(workdir, environ)
+    declared = (
+        load_declared_commands(commands_path, environ) if commands_path else None
+    )
+    declared_by_phase = {}
+    if declared:
+        spec_phases = {phase.n for phase in phases}
+        for command in declared["commands"]:
+            declared_by_phase.setdefault(command["phase"], []).append(command)
+        # Fail closed on a phase the spec does not have: the document would
+        # otherwise carry commands no gate could ever reach, and the run would
+        # look verified while they sat unexecuted.
+        orphans = sorted(set(declared_by_phase) - spec_phases)
+        if orphans:
+            raise VerificationError(
+                "verification commands name phase(s) %s, which the specification "
+                "does not define (it has %s)"
+                % (
+                    ", ".join(str(value) for value in orphans),
+                    ", ".join(str(value) for value in sorted(spec_phases)),
+                )
+            )
     spec_hash = sha256_text(spec_source_text(text))
     bundle_id = deterministic_ulid(
         "%s:%s:%s" % (specs_path, resolved_format, spec_hash)
@@ -529,6 +707,14 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
             phase_command_refs += [
                 ref for ref in build_command_refs if ref not in phase_command_refs
             ]
+        # Declared commands run after the discovered ones, in document order: the
+        # discovered suite is the cheap regression net, the declared list is what
+        # this phase actually claims to prove.
+        phase_command_refs += [
+            command["id"]
+            for command in declared_by_phase.get(phase.n, [])
+            if command["id"] not in phase_command_refs
+        ]
         suites.append(
             {
                 "id": suite_id,
@@ -550,14 +736,45 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
                 "required": bool(required),
             }
         )
+    ambiguities = list(discovery["ambiguities"])
+    extra_assumptions = []
+    if declared_by_phase:
+        # "no test command was discovered" stops being true the moment the caller
+        # declares commands the gates will actually execute; leaving it in would
+        # refuse required mode for any project whose verification is declared
+        # rather than inferable from the filesystem.
+        #
+        # Only when EVERY phase has one, though. A phase with neither a discovered
+        # nor a declared command has an empty gate, and that is far better caught
+        # here at preflight than hours later when the gate is reached.
+        uncovered = sorted(
+            phase.n for phase in phases if not declared_by_phase.get(phase.n)
+        )
+        resolved = NO_TEST_COMMAND_AMBIGUITY % workdir
+        if resolved in ambiguities and not uncovered:
+            ambiguities.remove(resolved)
+            extra_assumptions.append(
+                "No test command was discovered below %s; the gates run the %d "
+                "declared command(s) from %s instead."
+                % (workdir, len(declared["commands"]), declared["path"])
+            )
+        elif resolved in ambiguities:
+            ambiguities.append(
+                "Phase(s) %s have neither a discovered nor a declared verification "
+                "command; their gates would execute nothing"
+                % ", ".join(str(value) for value in uncovered)
+            )
     all_refs = [value["id"] for value in obligations]
+    all_commands = list(discovery["commands"]) + (
+        declared["commands"] if declared else []
+    )
     suites.append(
         {
             "id": "SUITE-release",
             "name": "Complete release verification",
             "scope": "release",
             "obligationRefs": all_refs,
-            "commandRefs": [value["id"] for value in discovery["commands"]],
+            "commandRefs": [value["id"] for value in all_commands],
         }
     )
     gates.append(
@@ -573,7 +790,13 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
     without_hash = {
         "id": stable_id(
             "verification",
-            "%s:%s:%s" % (bundle_id, spec_hash, discovery["fingerprint"]),
+            "%s:%s:%s:%s"
+            % (
+                bundle_id,
+                spec_hash,
+                discovery["fingerprint"],
+                declared["contentHash"] if declared else "",
+            ),
         ),
         "kind": "verification-plan",
         "version": 1,
@@ -588,17 +811,28 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None):
             "frameworks": discovery["frameworks"],
         },
         "obligations": obligations,
-        "commands": discovery["commands"],
+        "commands": all_commands,
         "suites": suites,
         "gates": gates,
         "assumptions": discovery["assumptions"]
+        + extra_assumptions
         + [
             "The verification plan is a derived companion artifact; it does not "
             "mutate the authoritative specification."
         ],
-        "ambiguities": discovery["ambiguities"],
+        "ambiguities": ambiguities,
         "unsupportedCapabilities": [],
     }
+    if declared:
+        # Inside the hashed body: editing the document after planning changes the
+        # plan hash, so a stale plan cannot pass itself off as the current one.
+        without_hash["declaredCommands"] = {
+            "path": declared["path"],
+            "contentHash": declared["contentHash"],
+            "schemaVersion": declared["schemaVersion"],
+            "count": len(declared["commands"]),
+            "phases": sorted(declared_by_phase),
+        }
     plan = dict(without_hash)
     plan["contentHash"] = sha256_text(canonical_json(without_hash))
     validate_plan(plan)
@@ -728,6 +962,31 @@ def render_phase_context(plan, phase):
         )
         lines.extend("- %s — %s" % (o["id"], o["title"]) for o in inherited)
         lines.append("")
+    suites = {value["id"]: value for value in plan["suites"]}
+    commands = {value["id"]: value for value in plan["commands"]}
+    gate_command_ids = []
+    for suite_id in gate["suiteRefs"]:
+        for command_id in suites.get(suite_id, {}).get("commandRefs", []):
+            if command_id not in gate_command_ids:
+                gate_command_ids.append(command_id)
+    if gate_command_ids:
+        lines.extend(
+            [
+                "### Commands this phase's gate will execute",
+                "These run with shell=False before the critic sees anything. They are "
+                "the only thing that can clear the gate — restating the evidence "
+                "cannot.",
+            ]
+        )
+        for command_id in gate_command_ids:
+            command = commands.get(command_id)
+            if not command:
+                continue
+            lines.append(
+                "- `%s` (cwd %s, timeout %ss)"
+                % (_command_line(command), command["cwd"], command["timeoutSec"])
+            )
+        lines.append("")
     lines.append(
         "Create or update automated tests for these obligations. Generated TODO/skip "
         "scaffolds are starting points only and are never passing evidence."
@@ -740,9 +999,19 @@ def render_phase_context(plan, phase):
 
 
 def _command_line(command):
+    # The env overlay is part of the command as far as a reader is concerned: a
+    # proposer handed `uv run python verify.py` for a command that only passes under
+    # ADLC_SPECIALIST_SOURCE=fixture cannot reproduce the gate it is being judged by.
+    prefix = [
+        "%s=%s" % (key, json.dumps(value) if re.search(r"\s", value) else value)
+        for key, value in sorted((command.get("env") or {}).items())
+    ]
     return " ".join(
-        json.dumps(value) if re.search(r"\s", value) else value
-        for value in [command["executable"]] + command["args"]
+        prefix
+        + [
+            json.dumps(value) if re.search(r"\s", value) else value
+            for value in [command["executable"]] + command["args"]
+        ]
     )
 
 
@@ -1048,6 +1317,7 @@ def run_gate(plan, phase):
             "planId": plan["id"],
             "planHash": plan["contentHash"],
             "gateId": "missing-%s-gate" % phase,
+            "sourceRevision": _git_revision(plan.get("project", {}).get("workdir", "")),
             "passed": False,
             "commands": [],
             "summary": "No verification gate exists for %s" % phase,
@@ -1067,6 +1337,7 @@ def run_gate(plan, phase):
             "gateId": gate["id"],
             "phase": gate.get("phase"),
             "passed": not gate["required"],
+            "sourceRevision": _git_revision(plan.get("project", {}).get("workdir", "")),
             "commands": [],
             "summary": (
                 "Required gate %s has no safe executable verification commands"
@@ -1081,11 +1352,17 @@ def run_gate(plan, phase):
     # gate carries independent of the critic's textual grounding. Empty for a non-monorepo.
     workdir = plan.get("project", {}).get("workdir", "")
     declared_artifacts = _workspace_export_artifacts(workdir) if workdir else []
+    source_revision = _git_revision(workdir)
     evidence = []
     build_artifacts = []
     for command in selected:
         started = time.monotonic()
         wall_start = time.time()
+        # A declared command may need environment the orchestrator does not carry
+        # (ADLC_SPECIALIST_SOURCE=fixture and the like). It is an overlay, never a
+        # replacement: PATH and the rest of the run's environment still apply.
+        command_env = os.environ.copy()
+        command_env.update(command.get("env") or {})
         try:
             result = subprocess.run(
                 [command["executable"]] + command["args"],
@@ -1094,7 +1371,7 @@ def run_gate(plan, phase):
                 capture_output=True,
                 text=True,
                 timeout=command["timeoutSec"],
-                env=os.environ.copy(),
+                env=command_env,
             )
             code = result.returncode
             stdout = (result.stdout or "")[:64000]
@@ -1113,8 +1390,11 @@ def run_gate(plan, phase):
         evidence.append(
             {
                 "commandId": command["id"],
+                "declaredId": command.get("declaredId"),
+                "source": command.get("source", "discovered"),
                 "executable": command["executable"],
                 "args": command["args"],
+                "env": dict(command.get("env") or {}),
                 "cwd": command["cwd"],
                 "exitCode": code,
                 "signal": signal,
@@ -1155,6 +1435,7 @@ def run_gate(plan, phase):
         "gateId": gate["id"],
         "phase": gate.get("phase"),
         "passed": passed,
+        "sourceRevision": source_revision,
         "commands": evidence,
         "buildArtifacts": build_artifacts,
         "summary": (
@@ -1194,6 +1475,10 @@ def main(argv=None):
     create.add_argument("--json-output", required=True)
     create.add_argument("--required", action="store_true")
     create.add_argument("--generate-tests")
+    create.add_argument(
+        "--verification-commands",
+        help="JSON document of phase-scoped commands the gates MUST execute",
+    )
 
     validate = sub.add_parser("validate")
     validate.add_argument("--plan", required=True)
@@ -1223,6 +1508,7 @@ def main(argv=None):
                 args.specs,
                 fmt=args.format,
                 required=args.required,
+                commands_path=args.verification_commands,
             )
             if args.required and plan["ambiguities"]:
                 raise VerificationError(
@@ -1242,6 +1528,7 @@ def main(argv=None):
                         "contentHash": plan["contentHash"],
                         "markdownPath": markdown,
                         "canonicalPath": canonical,
+                        "declaredCommands": plan.get("declaredCommands"),
                         "generated": [
                             {
                                 "path": value["path"],

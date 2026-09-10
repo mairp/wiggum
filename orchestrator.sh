@@ -83,6 +83,23 @@ OPTIONS
   --test-plan FILE      Absolute TEST_PLAN.md projection path (default when
                         verification is enabled: <workdir>/testautomation/<feature>/TEST_PLAN.md).
                         Also WIGGUM_TEST_PLAN.
+  --verification-commands FILE
+                        JSON document of phase-scoped commands the gates MUST
+                        execute, added to each phase suite after the discovered
+                        ones and to the release suite. Without it a gate runs only
+                        what discover_project() infers from the filesystem (for a
+                        Python project: one `python3 -m pytest <workdir>`), so a
+                        spec naming specific verification commands is gated on
+                        something it never asked for. Shape:
+                          {"commands": [{"id","phase","executable","args",
+                                         "cwd","timeoutSec","env"?}, ...]}
+                        `executable` may be a bare name (resolved on PATH at plan
+                        time and stored absolute); `env` is an overlay on the run
+                        environment. Fails closed: an unresolvable executable, a
+                        missing cwd or a phase the spec does not define aborts the
+                        preflight rather than dropping the command. The document's
+                        hash is bound into the plan hash. Also
+                        WIGGUM_VERIFICATION_COMMANDS.
   --generate-tests DIR  Safely scaffold tests below this absolute directory (default:
                          <workdir>/testautomation/<feature>/generated).
                         Existing changed artifacts are never overwritten. Supplying
@@ -185,6 +202,7 @@ MAX_WALL_MIN="${WIGGUM_MAX_WALL_MIN:-0}"
 GIT_COMMITS="${WIGGUM_GIT_COMMITS:-auto}"
 VERIFICATION="${WIGGUM_VERIFICATION:-required}"
 TEST_PLAN="${WIGGUM_TEST_PLAN:-}"
+VERIFICATION_COMMANDS="${WIGGUM_VERIFICATION_COMMANDS:-}"
 GENERATE_TESTS="${WIGGUM_GENERATE_TESTS:-}"
 LONG_JOB_PHASE="${WIGGUM_LONG_JOB_PHASE:-}"
 LONG_JOB_CMD="${WIGGUM_LONG_JOB_CMD:-}"
@@ -204,6 +222,7 @@ while [[ $# -gt 0 ]]; do
     --start-phase)  START_PHASE="${2:?}"; shift 2 ;;
     --verification) VERIFICATION="${2:?}"; shift 2 ;;
     --test-plan)     TEST_PLAN="${2:?}"; shift 2 ;;
+    --verification-commands) VERIFICATION_COMMANDS="${2:?}"; shift 2 ;;
     --generate-tests) GENERATE_TESTS="${2:?}"; shift 2 ;;
     --telemetry)    TELEMETRY="true"; shift ;;
     --loki-url)     LOKI_URL="${2:?}"; shift 2 ;;
@@ -568,6 +587,9 @@ write_last_run_conf() {
     printf 'TEST_PLAN=%q\n'        "$TEST_PLAN"
     printf 'GENERATE_TESTS=%q\n'    "$GENERATE_TESTS"
     printf 'VERIFICATION_PLAN=%q\n' "$VERIFICATION_JSON"
+    # A resume that drops the declared commands re-plans with the discovered
+    # heuristic alone and every later gate silently narrows to it.
+    printf 'VERIFICATION_COMMANDS=%q\n' "$VERIFICATION_COMMANDS"
     # The long job is part of a phase's contract, not a launch-time nicety: a
     # resume that drops it silently starves the phase of the very evidence it
     # gates on, with nothing in the log saying so.
@@ -686,6 +708,18 @@ if [[ "$VERIFICATION" != "off" ]]; then
   )
   [[ "$VERIFICATION" == "required" ]] && _verification_args+=( --required )
   [[ -n "$GENERATE_TESTS" ]] && _verification_args+=( --generate-tests "$GENERATE_TESTS" )
+  # The declared command document is the caller's contract about what the gates
+  # must execute. A relative path would resolve against whatever cwd the launcher
+  # happened to have, so it is resolved here, once, and refused if absent —
+  # discovering it is missing at the phase-3 gate is four hours too late.
+  if [[ -n "$VERIFICATION_COMMANDS" ]]; then
+    case "$VERIFICATION_COMMANDS" in /*) : ;; *) VERIFICATION_COMMANDS="$LAUNCH_DIR/$VERIFICATION_COMMANDS" ;; esac
+    if [[ ! -s "$VERIFICATION_COMMANDS" ]]; then
+      echo "orchestrator.sh: --verification-commands not found or empty: $VERIFICATION_COMMANDS" >&2
+      exit "$E_SPEC"
+    fi
+    _verification_args+=( --verification-commands "$VERIFICATION_COMMANDS" )
+  fi
   if ! python3 "$LIB_DIR/verification_plan.py" "${_verification_args[@]}" >> "$LOG" 2>&1; then
     echo "orchestrator.sh: verification preflight failed (see $LOG)" >&2
     exit "$E_SPEC"
