@@ -257,6 +257,29 @@ def test_extractor_without_workdir_is_unchanged():
     assert ".env.example" in got and "requirements.txt" in got
 
 
+# ── W22: a line locator is not part of the cited path ────────────────────────
+def test_line_locator_citation_grounds_the_file():
+    """`path:LINE` (and `:A-B`, `:L:C`, `#L12-L20`) names the file. Observed
+    2026-09-11, 002 phase 13: `conformance/runners/live/conftest.py:101` rendered
+    MISSING for a present file and the critic rejected on it."""
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "conformance", "live"))
+        open(os.path.join(d, "conformance", "live", "conftest.py"), "w").write("x = 1\n")
+        open(os.path.join(d, "validate.py"), "w").write("y = 2\n")
+        text = ("`conformance/live/conftest.py:101` registers the option; "
+                "`validate.py:405` exposes it; see `conformance/live/conftest.py:10-20`, "
+                "`conformance/live/conftest.py#L3-L4`, the node "
+                "`conformance/live/conftest.py::test_a[case-1]` and 1700 on `127.0.0.1:1700`.")
+        got = extract_paths(text, d)
+        assert "conformance/live/conftest.py" in got, got
+        assert "validate.py" in got, "bare basename with a locator must resolve: %r" % got
+        assert not any(":" in p or "#" in p for p in got), got
+        assert "127.0.0.1" not in got, got
+        snap = grounding_snapshot(got, d)
+        assert "MISSING" not in snap, snap
+        assert grounding_gap(text, got, d) == [], grounding_gap(text, got, d)
+
+
 # ── W2: anchored excerpts around criterion symbols ───────────────────────────
 def test_extract_anchor_tokens_symbols_not_paths():
     section = ("- The `registerReconnector` hook races an `AbortSignal`; "

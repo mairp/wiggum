@@ -370,6 +370,22 @@ PATH_RE = re.compile(
     r'|(?<![\w./])(\.?[\w\-]+\.[A-Za-z][\w]{0,11})'
     r'|(?<![\w./])(\.[A-Za-z][\w\-]{1,})')
 
+# W22: a citation carrying a line locator — `conftest.py:101`, `x.py:10-20`,
+# `x.py:12:5`, `x.py#L12-L20`, a pytest node id `test_x.py::test_y` — names the FILE;
+# the locator is not part of the path.
+# Left on, the token failed to resolve and the snapshot printed "**MISSING** (does not
+# exist on disk)" for a file that was present, and the loose gap pass could not
+# resolve it either, so it was not reported as a tooling gap. Measured on
+# semantic-router-sovereign 002 (2026-09-11): such false MISSING lines in every
+# critic transcript from phase 2 on (41 in phase 4); phase 13 was REJECTED on one,
+# `conformance/runners/live/conftest.py:101`. The trailing-punctuation rstrip never
+# caught it because it strips characters, not the `:digits` run.
+_LINE_SUFFIX_RE = re.compile(r'(?:::\S+|:L?\d+(?:[-–:,]L?\d+)*|#L\d+(?:-L?\d+)?)$')
+
+
+def _strip_line_suffix(cand):
+    return _LINE_SUFFIX_RE.sub("", cand)
+
 
 def extract_paths(evidence_text, workdir=None, search_dirs=None):
     """Extract workdir-relative file paths the text cites, for grounding.
@@ -397,6 +413,7 @@ def extract_paths(evidence_text, workdir=None, search_dirs=None):
             continue
         if re.search(r'\s', cand):
             continue                          # real paths here don't contain spaces
+        cand = _strip_line_suffix(cand)       # W22: `x.py:101` cites `x.py`
         # RPC method names (`jobs.run@v1`, `events.subscribe@v2`) read like dotted
         # filenames but are never files — the `@vN` version tag is the tell. Drop them
         # before they become MISSING noise.
@@ -814,7 +831,7 @@ _LOOSE_RE = re.compile(r'`([^`\n]+)`'
 def _loose_citations(evidence_text):
     out = set()
     for m in _LOOSE_RE.finditer(evidence_text):
-        cand = (m.group(1) or m.group(2) or "").strip().rstrip(".,:;)")
+        cand = _strip_line_suffix((m.group(1) or m.group(2) or "").strip().rstrip(".,:;)"))
         if not cand or re.search(r'\s', cand):
             continue
         if cand.startswith(("http://", "https://", "ftp://")):
