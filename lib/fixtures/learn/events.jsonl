@@ -1,0 +1,73 @@
+{"ts": "1001.000", "time": "x", "event": "run_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phases": "2", "resume": "1", "proposer": "claude", "critic": "x"}
+{"ts": "1002.000", "time": "x", "event": "phase_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "1", "title": "Setup"}
+{"ts": "1003.000", "time": "x", "event": "proposer_start", "run_id": "run-A", "task": "t", "backend": "claude", "feature": "f", "phase": "1", "attempt": "1"}
+{"ts": "1004.000", "time": "x", "event": "iter_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "max_iter": "20"}
+{"ts": "1005.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Read", "target": "", "iter": 1}
+{"ts": "1006.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "ls -la", "iter": 1}
+{"ts": "1007.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "sleep 30; tail -2 x.log", "iter": 1}
+{"ts": "1008.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Edit", "target": "", "iter": 1}
+{"ts": "1108.000", "time": "x", "event": "agent_result", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "model": "m", "is_error": false, "subtype": "success", "cost_usd": 2.5, "duration_ms": 100000, "num_turns": 4, "input_tokens": 10, "output_tokens": 200, "cache_read_tokens": 1000, "cache_creation_tokens": 300, "iter": 1}
+{"ts": "1109.000", "time": "x", "event": "evidence_written", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "file": "GATE1-EVIDENCE.md", "iters": "1"}
+{"ts": "1110.000", "time": "x", "event": "iter_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "evidence": "present"}
+{"ts": "1111.000", "time": "x", "event": "verification_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "1", "attempt": "1", "plan": "p"}
+{"ts": "1112.000", "time": "x", "event": "verification_passed", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "1", "attempt": "1", "evidence": "e"}
+{"ts": "1113.000", "time": "x", "event": "critic_start", "phase": 1, "attempt": 1, "provider": "x"}
+{"ts": "1113.000", "time": "x", "event": "grounding_gap", "phase": 1, "attempt": 1, "paths": "a/b,c/d"}
+{"ts": "1173.000", "time": "x", "event": "verdict", "phase": 1, "attempt": 1, "result": "APPROVED", "title": "Setup"}
+{"ts": "1174.000", "time": "x", "event": "phase_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "1", "attempt": "1", "title": "Setup"}
+{"ts": "1175.000", "time": "x", "event": "phase_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "title": "Foundational"}
+{"ts": "1176.000", "time": "x", "event": "proposer_start", "run_id": "run-A", "task": "t", "backend": "claude", "feature": "f", "phase": "2", "attempt": "1"}
+{"ts": "1177.000", "time": "x", "event": "iter_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1"}
+{"ts": "1178.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "until grep -q done x; do sleep 5; done", "iter": 1}
+{"ts": "1179.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "pytest -q", "iter": 1}
+{"ts": "1180.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "until grep -q done x; do sleep 5; done", "iter": 1}
+{"ts": "1181.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "pytest -q", "iter": 1}
+{"ts": "1182.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "until grep -q done x; do sleep 5; done", "iter": 1}
+{"ts": "1183.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "pytest -q", "iter": 1}
+{"ts": "6583.000", "time": "x", "event": "pass_killed", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "reason": "hard_cap", "elapsed": "5400", "checkpoint": "c1"}
+{"ts": "6584.000", "time": "x", "event": "agent_result", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "is_error": true, "subtype": "missing_terminal", "iter": 1}
+{"ts": "6585.000", "time": "x", "event": "iter_error", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "subtype": "watchdog_hard_cap", "consec": "1"}
+{"ts": "6586.000", "time": "x", "event": "iter_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "evidence": "missing"}
+{"ts": "6587.000", "time": "x", "event": "iter_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "2"}
+{"ts": "6588.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "tail -4 /tmp/x.log", "iter": 2}
+{"ts": "6589.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "tail -4 /tmp/x.log", "iter": 2}
+{"ts": "6590.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "tail -4 /tmp/x.log", "iter": 2}
+{"ts": "6591.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Bash", "target": "tail -4 /tmp/x.log", "iter": 2}
+{"ts": "6891.000", "time": "x", "event": "pass_killed", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "2", "reason": "repeat_stall", "elapsed": "300", "detail": "re-ran 4x: tail -4 /tmp/x.log", "checkpoint": "c2"}
+{"ts": "6892.000", "time": "x", "event": "agent_result", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "is_error": true, "subtype": "missing_terminal", "iter": 2}
+{"ts": "6893.000", "time": "x", "event": "iter_error", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "2", "subtype": "watchdog_repeat_stall", "consec": "1"}
+{"ts": "6894.000", "time": "x", "event": "iter_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "2", "evidence": "missing"}
+{"ts": "6895.000", "time": "x", "event": "iter_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "3"}
+{"ts": "6896.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Read", "target": "x", "iter": 3}
+{"ts": "6946.000", "time": "x", "event": "agent_result", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "is_error": false, "subtype": "success", "cost_usd": 1.0, "duration_ms": 50000, "iter": 3, "output_tokens": 10, "cache_read_tokens": 5, "cache_creation_tokens": 5}
+{"ts": "6947.000", "time": "x", "event": "iter_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "3", "evidence": "missing"}
+{"ts": "6948.000", "time": "x", "event": "iter_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "4"}
+{"ts": "6949.000", "time": "x", "event": "agent_tool", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "tool": "Write", "target": "y", "iter": 4}
+{"ts": "7149.000", "time": "x", "event": "agent_result", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "is_error": false, "subtype": "success", "cost_usd": 4.0, "duration_ms": 200000, "iter": 4, "output_tokens": 40, "cache_read_tokens": 5, "cache_creation_tokens": 5}
+{"ts": "7150.000", "time": "x", "event": "evidence_written", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "file": "GATE2-EVIDENCE.md", "iters": "4"}
+{"ts": "7151.000", "time": "x", "event": "iter_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "4", "evidence": "present"}
+{"ts": "7152.000", "time": "x", "event": "verification_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "1", "plan": "p"}
+{"ts": "7153.000", "time": "x", "event": "verification_passed", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "1", "evidence": "e"}
+{"ts": "7154.000", "time": "x", "event": "critic_start", "phase": 2, "attempt": 1, "provider": "x"}
+{"ts": "7184.000", "time": "x", "event": "verdict", "phase": 2, "attempt": 1, "result": "REJECTED", "reason": "Unmet criteria:", "title": "Foundational"}
+{"ts": "7185.000", "time": "x", "event": "attempt_archived", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "1", "dir": "d"}
+{"ts": "7186.000", "time": "x", "event": "proposer_start", "run_id": "run-A", "task": "t", "backend": "claude", "feature": "f", "phase": "2", "attempt": "2"}
+{"ts": "7187.000", "time": "x", "event": "iter_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1"}
+{"ts": "7267.000", "time": "x", "event": "agent_result", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "is_error": false, "subtype": "success", "cost_usd": 3.0, "duration_ms": 80000, "iter": 1, "output_tokens": 30, "cache_read_tokens": 5, "cache_creation_tokens": 5}
+{"ts": "7268.000", "time": "x", "event": "evidence_written", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "file": "GATE2-EVIDENCE.md", "iters": "1"}
+{"ts": "7269.000", "time": "x", "event": "iter_done", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "evidence": "present"}
+{"ts": "7270.000", "time": "x", "event": "verification_start", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "2", "plan": "p"}
+{"ts": "7271.000", "time": "x", "event": "verification_failed", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "2", "rc": "3", "evidence": "e"}
+{"ts": "7272.000", "time": "x", "event": "run_stop", "run_id": "run-A", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "reason": "stop_flag", "phase": "2"}
+{"ts": "7273.000", "time": "x", "event": "run_start", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phases": "2", "resume": "2"}
+{"ts": "7274.000", "time": "x", "event": "phase_start", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "title": "Foundational"}
+{"ts": "7275.000", "time": "x", "event": "proposer_start", "run_id": "run-B", "task": "t", "backend": "claude", "feature": "f", "phase": "2", "attempt": "1"}
+{"ts": "7276.000", "time": "x", "event": "iter_start", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1"}
+{"ts": "7366.000", "time": "x", "event": "agent_result", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "is_error": false, "subtype": "success", "cost_usd": 6.0, "duration_ms": 90000, "iter": 1, "output_tokens": 60, "cache_read_tokens": 5, "cache_creation_tokens": 5}
+{"ts": "7367.000", "time": "x", "event": "evidence_written", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "file": "GATE2-EVIDENCE.md", "iters": "1"}
+{"ts": "7368.000", "time": "x", "event": "iter_done", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "iter": "1", "evidence": "present"}
+{"ts": "7369.000", "time": "x", "event": "verification_passed", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "1", "evidence": "e"}
+{"ts": "7370.000", "time": "x", "event": "critic_start", "phase": 2, "attempt": 1, "provider": "x"}
+{"ts": "7415.000", "time": "x", "event": "verdict", "phase": 2, "attempt": 1, "result": "APPROVED", "title": "Foundational"}
+{"ts": "7416.000", "time": "x", "event": "phase_done", "run_id": "run-B", "task": "t", "backend": "prop:claude/crit:x", "feature": "f", "phase": "2", "attempt": "1", "title": "Foundational"}
+{"event":"agent_tool","truncated
