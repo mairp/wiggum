@@ -466,7 +466,7 @@ def extract_paths(evidence_text, workdir=None, search_dirs=None):
 GROUNDING_SEARCH_DIRS = ("", ".wiggum/gates/proofs", ".wiggum/gates", "out")
 
 
-def grounding_search_dirs(gates_rel, workdir=None):
+def grounding_search_dirs(gates_rel, workdir=None, specs_path=None):
     """The workdir-relative proof dirs to resolve a bare citation against, for the
     ACTIVE feature. `gates_rel` is .wiggum/features/<slug>/gates. Root first (so an
     exact path wins), then the feature's proofs/ and gates/, then a bare `out`.
@@ -475,7 +475,17 @@ def grounding_search_dirs(gates_rel, workdir=None):
     dir (e.g. `gates/c6-run/`). Proposers routinely stage proofs in a per-run
     subdir and cite them by bare basename; without those subdirs here a bare
     citation of a file that plainly exists resolves to MISSING, and the critic
-    rejects a genuinely-satisfied criterion forever. Read-only listdir, best-effort."""
+    rejects a genuinely-satisfied criterion forever. Read-only listdir, best-effort.
+
+    W23: when `specs_path` is given, ALSO include the spec file's own directory
+    (workdir-relative, e.g. `specs/002-extproc-data-path`). A Spec Kit feature
+    keeps its contracts and run notes beside tasks.md, and the spec/plan cite them
+    the natural way -- `contracts/live-runner.md`, `runs/us11-2026-09-11.md` --
+    relative to that directory. The proposer's evidence copies the citation form,
+    it resolves at neither the repo root nor the proof dirs, and a present file
+    reads MISSING. Observed 2026-09-11, semantic-router-sovereign 002 phase 13
+    (F12 in the run's TROUBLESHOOTING.md). A spec outside the workdir adds nothing:
+    grounding never resolves against a file the sandbox cannot see."""
     dirs = ["", os.path.join(gates_rel, "proofs"), gates_rel, "out"]
     if workdir:
         # W20: one level under gates/ (the original rule) AND one level under
@@ -501,6 +511,16 @@ def grounding_search_dirs(gates_rel, workdir=None):
                         dirs.append(sub)
             except OSError:
                 pass
+    if workdir and specs_path:
+        try:
+            spec_dir = os.path.dirname(os.path.abspath(specs_path))
+            rel = os.path.relpath(spec_dir, os.path.abspath(workdir))
+            inside = rel != ".." and not rel.startswith(".." + os.sep) \
+                and not os.path.isabs(rel)
+            if rel != "." and inside and rel not in dirs and os.path.isdir(spec_dir):
+                dirs.append(rel)
+        except (OSError, ValueError):
+            pass
     return tuple(dirs)
 
 
@@ -1557,7 +1577,7 @@ def run_diagnostician(args, workdir, n, feature_dir, gates_dir, gates_rel, secti
     grounding snapshot — a second opinion with more room to look, not a new judge.
     Writes GATE<N>-HINT.md; NEVER writes GATE<N>-APPROVED/FEEDBACK.md and never
     raises — a diagnostician failure must not abort the run it is trying to help."""
-    search_dirs = grounding_search_dirs(gates_rel, workdir)
+    search_dirs = grounding_search_dirs(gates_rel, workdir, getattr(args, "specs", None))
     ground_sec = grounding_section(section)
     ev_paths = extract_paths(evidence, workdir, search_dirs)
     spec_paths = [p for p in extract_paths(ground_sec, workdir, search_dirs)
@@ -2377,7 +2397,7 @@ def main():
         # they win the presence-line budget; spec-only paths are appended.
         # Resolve bare citations against the ACTIVE feature's proof dirs (Phase 2),
         # not a hardcoded flat .wiggum/gates.
-        search_dirs = grounding_search_dirs(gates_rel, workdir)
+        search_dirs = grounding_search_dirs(gates_rel, workdir, args.specs)
         # Pass workdir so the extractor's de-noise pass (W5) can drop no-slash tokens
         # that don't resolve on disk (`jobs.run`, `events.subscribe`) instead of turning
         # them into spurious MISSING lines.

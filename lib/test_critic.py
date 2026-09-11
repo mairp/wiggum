@@ -1226,3 +1226,39 @@ def test_w21_an_elision_is_marked_so_it_is_not_read_as_absence():
 def test_w21_a_block_already_under_budget_is_returned_untouched():
     small = "already small"
     assert critic_mod.elide_middle(small, 20_000, "evidence") is small
+
+
+# ── W23: a spec-directory-relative citation names a file beside the spec ──────
+def test_spec_dir_relative_citation_grounds_the_file():
+    """A Spec Kit feature keeps `contracts/` and `runs/` beside tasks.md and cites
+    them relative to that directory (`contracts/live-runner.md`). The proposer
+    copies the form, it resolves at neither the workdir root nor the proof dirs,
+    and a present file reads MISSING (semantic-router-sovereign 002 phase 13,
+    2026-09-11). With `specs_path` the spec's own directory is searched too; a
+    spec outside the workdir adds nothing and a truly-absent file still misses."""
+    with tempfile.TemporaryDirectory() as d:
+        gates_rel = os.path.join(".wiggum", "features", "default", "gates")
+        os.makedirs(os.path.join(d, gates_rel))
+        spec_dir = os.path.join(d, "specs", "002-feature")
+        os.makedirs(os.path.join(spec_dir, "contracts"))
+        specs = os.path.join(spec_dir, "tasks.md")
+        open(specs, "w").write("# tasks\n")
+        open(os.path.join(spec_dir, "contracts", "live-runner.md"), "w").write("c\n")
+        # Without the spec path: the old behavior, MISSING.
+        assert _resolve_cited("contracts/live-runner.md", d,
+                              grounding_search_dirs(gates_rel, d)) is None
+        sd = grounding_search_dirs(gates_rel, d, specs)
+        assert os.path.join("specs", "002-feature") in sd, sd
+        got = _resolve_cited("contracts/live-runner.md", d, sd)
+        assert got == os.path.join(spec_dir, "contracts", "live-runner.md"), got
+        assert _resolve_cited("contracts/nope.md", d, sd) is None
+        # The snapshot labels it by the resolved workdir-relative path, not MISSING.
+        snap = grounding_snapshot(["contracts/live-runner.md"], d, sd)
+        assert "MISSING" not in snap, snap
+        assert "specs/002-feature/contracts/live-runner.md" in snap.replace(os.sep, "/")
+        # A spec outside the workdir never widens the search.
+        with tempfile.TemporaryDirectory() as elsewhere:
+            other = os.path.join(elsewhere, "tasks.md")
+            open(other, "w").write("# tasks\n")
+            assert grounding_search_dirs(gates_rel, d, other) == \
+                grounding_search_dirs(gates_rel, d)
