@@ -414,10 +414,15 @@ wiggum_prestage_phase() {
   local lib="${LIB_DIR:-$_WIGGUM_LIB_DIR/lib}"
   [[ -f "$lib/verification_plan.py" ]] || return 0
 
+  # An array, not a ${VAR:+...} expansion: a spec path with a space in it would
+  # word-split out of an unquoted conditional expansion.
+  local -a spec_args=()
+  [[ -n "${SPECS:-}" ]] && spec_args=( --specs "$SPECS" )
+
   local out rc
   out="$(python3 "$lib/verification_plan.py" prestage \
       --plan "$VERIFICATION_JSON" \
-      ${SPECS:+--specs "$SPECS"} \
+      ${spec_args[@]+"${spec_args[@]}"} \
       --phase "$n" --attempt "$attempt" 2>>"${LOG:-/dev/null}")"
   rc=$?
   out="${out##*$'\n'}"
