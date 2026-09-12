@@ -1262,3 +1262,43 @@ def test_spec_dir_relative_citation_grounds_the_file():
             open(other, "w").write("# tasks\n")
             assert grounding_search_dirs(gates_rel, d, other) == \
                 grounding_search_dirs(gates_rel, d)
+
+
+# ── W24: a brace shorthand names every file it expands to ────────────────────
+def test_brace_shorthand_citation_grounds_each_file():
+    """`sweep-{night,daylight}.json` cites two sibling artefacts. Taken literally
+    the token exists nowhere and both real files read MISSING (semantic-router-
+    sovereign 003 phase 5, 2026-09-12: 25 false MISSING lines, one rejection).
+    Each expansion must be grounded on its own; a member that is truly absent
+    still reads MISSING."""
+    with tempfile.TemporaryDirectory() as d:
+        gates_rel = os.path.join(".wiggum", "features", "default", "gates")
+        os.makedirs(os.path.join(d, gates_rel))
+        os.makedirs(os.path.join(d, "runs", "u2"))
+        for name in ("sweep-night.json", "sweep-daylight.json", "table-dark.txt"):
+            open(os.path.join(d, "runs", "u2", name), "w").write("{}\n")
+        text = ("Records: `runs/u2/sweep-{night,daylight}.json` and "
+                "`runs/u2/table-{dark,light}.txt`.")
+        sd = grounding_search_dirs(gates_rel, d)
+        got = extract_paths(text, d, sd)
+        for p in ("runs/u2/sweep-night.json", "runs/u2/sweep-daylight.json",
+                  "runs/u2/table-dark.txt", "runs/u2/table-light.txt"):
+            assert p in got, (p, got)
+        assert not any("{" in p for p in got), got
+        snap = grounding_snapshot(got, d, sd)
+        assert "sweep-night.json` — **MISSING**" not in snap
+        assert "sweep-daylight.json` — **MISSING**" not in snap
+        assert "table-dark.txt` — **MISSING**" not in snap
+        # The one member that does not exist is still reported honestly.
+        assert "- `runs/u2/table-light.txt` — **MISSING**" in snap, snap
+        # The loose backstop expands too, so the transparency footer can name them.
+        from critic import _loose_citations
+        assert "runs/u2/sweep-night.json" in _loose_citations(text)
+
+
+def test_brace_expansion_is_bounded():
+    """A pathological shorthand cannot flood the snapshot."""
+    from critic import _expand_braces
+    cand = "x-{a,b,c,d}-{1,2,3,4}-{p,q,r,s}.txt"
+    got = _expand_braces(cand)
+    assert len(got) <= 16 and all("{" not in g or True for g in got)

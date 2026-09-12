@@ -387,6 +387,34 @@ def _strip_line_suffix(cand):
     return _LINE_SUFFIX_RE.sub("", cand)
 
 
+# W24: a brace shorthand names EVERY file it expands to. Proposers write
+# `runs/u2/sweep-{night,daylight}.json` or `contrast-table-{dark,light}.txt` for a
+# pair of sibling artefacts; taken literally the token exists nowhere and the
+# snapshot said MISSING for files that were all on disk (semantic-router-sovereign
+# 003 phase 5, 2026-09-12: 25 false MISSING lines, one rejection). Expand each
+# `{a,b,…}` group — bounded, so a pathological citation cannot flood the snapshot.
+_BRACE_RE = re.compile(r'\{([^{}]*,[^{}]*)\}')
+_BRACE_EXPAND_MAX = 16
+
+
+def _expand_braces(cand):
+    out = [cand]
+    while True:
+        grown, changed = [], False
+        for c in out:
+            m = _BRACE_RE.search(c)
+            if not m:
+                grown.append(c)
+                continue
+            changed = True
+            for alt in m.group(1).split(","):
+                grown.append(c[:m.start()] + alt.strip() + c[m.end():])
+        out = grown
+        if not changed or len(out) >= _BRACE_EXPAND_MAX:
+            break
+    return out[:_BRACE_EXPAND_MAX]
+
+
 def extract_paths(evidence_text, workdir=None, search_dirs=None):
     """Extract workdir-relative file paths the text cites, for grounding.
 
@@ -414,6 +442,15 @@ def extract_paths(evidence_text, workdir=None, search_dirs=None):
         if re.search(r'\s', cand):
             continue                          # real paths here don't contain spaces
         cand = _strip_line_suffix(cand)       # W22: `x.py:101` cites `x.py`
+        # W24: `a-{night,daylight}.png` cites two files; ground each of them.
+        if "{" in cand and "}" in cand:
+            for sub in _expand_braces(cand):
+                if "{" in sub or sub in seen or not sub:
+                    continue
+                if re.search(r'\.[A-Za-z][A-Za-z0-9]{1,11}$', sub) or "/" in sub:
+                    seen.add(sub)
+                    out.append(sub)
+            continue
         # RPC method names (`jobs.run@v1`, `events.subscribe@v2`) read like dotted
         # filenames but are never files — the `@vN` version tag is the tell. Drop them
         # before they become MISSING noise.
@@ -859,7 +896,9 @@ def _loose_citations(evidence_text):
         # must at least look filenameish: a dot or a slash somewhere
         if "." not in cand and "/" not in cand:
             continue
-        out.add(cand)
+        for sub in _expand_braces(cand):      # W24
+            if "{" not in sub:
+                out.add(sub)
     return out
 
 
