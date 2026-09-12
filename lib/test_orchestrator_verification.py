@@ -741,6 +741,41 @@ def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_pa
     conf = (workdir / ".wiggum" / "features" / "obs-lifecycle" / "last-run.conf").read_text()
     assert "VERIFICATION_COMMANDS=" in conf
     assert str(commands) in conf
+    # ── step 4: the pre-stage ran ONCE, and it ran BEFORE the proposer ────────
+    order = ordering.read_text().split()
+    assert order, "nothing recorded its order\n" + result.stdout + result.stderr
+    # Pre-stage, then the pass; the phase-1 gate does NOT run it a third time.
+    # The release gate does run it — `cumulative: false` gates a command at its
+    # own phase and at release, which is exactly what the second entry is.
+    assert order[:3] == ["prestage", "proposer", "proposer"], order
+    assert order.count("prestage") == 2, order
+
+    prestage_files = sorted(runs.rglob("verification/prestage-phase-1-attempt-*.json"))
+    assert prestage_files, result.stdout + result.stderr
+    prestaged = json.loads(prestage_files[0].read_text())
+    assert prestaged["phase"] == 1 and prestaged["attempt"] == 1
+    assert prestaged["passed"] is True
+    assert [c["declaredId"] for c in prestaged["commands"]] == ["p1-prestage"]
+    assert prestaged["commands"][0]["reportPath"] == "declared-ran.txt"
+
+    # The phase-1 gate adopted that result instead of re-running it, and says so.
+    reused = [c for c in evidence["commands"] if c.get("declaredId") == "p1-prestage"]
+    assert len(reused) == 1, evidence["commands"]
+    assert reused[0]["reused"] is True
+    assert reused[0]["reusedFrom"]["evidencePath"] == str(prestage_files[0])
+    assert reused[0]["reusedFrom"]["revision"] == evidence["sourceRevision"]["revision"]
+
+    # `cumulative: false`: phase 2's gate never sees it again.
+    phase2 = json.loads(
+        sorted(runs.rglob("verification/phase-2-attempt-*.json"))[0].read_text()
+    )
+    assert "p1-prestage" not in [c.get("declaredId") for c in phase2["commands"]]
+    assert "p1-witness" in [c.get("declaredId") for c in phase2["commands"]]
+
+    events = _read_events(workdir)
+    prestage_events = [e for e in events if e["event"] == "prestage_done"]
+    assert len(prestage_events) == 1, [e["event"] for e in events]
+    assert prestage_events[0]["phase"] == "1" and prestage_events[0]["attempt"] == "1"
 
 
 # ── per-phase proposer cap (design §4.1) ─────────────────────────────────────
@@ -934,38 +969,42 @@ def test_an_explicit_override_outranks_the_declared_document(tmp_path):
     caps = {c["phase"]: c for c in _caps(_read_events(workdir))}
     assert caps, result.stdout + result.stderr
     assert caps["2"]["seconds"] == "77" and caps["2"]["source"] == "override"
-    # ── step 4: the pre-stage ran ONCE, and it ran BEFORE the proposer ────────
-    order = ordering.read_text().split()
-    assert order, "nothing recorded its order\n" + result.stdout + result.stderr
-    # Pre-stage, then the pass; the phase-1 gate does NOT run it a third time.
-    # The release gate does run it — `cumulative: false` gates a command at its
-    # own phase and at release, which is exactly what the second entry is.
-    assert order[:3] == ["prestage", "proposer", "proposer"], order
-    assert order.count("prestage") == 2, order
 
-    prestage_files = sorted(runs.rglob("verification/prestage-phase-1-attempt-*.json"))
-    assert prestage_files, result.stdout + result.stderr
-    prestaged = json.loads(prestage_files[0].read_text())
-    assert prestaged["phase"] == 1 and prestaged["attempt"] == 1
-    assert prestaged["passed"] is True
-    assert [c["declaredId"] for c in prestaged["commands"]] == ["p1-prestage"]
-    assert prestaged["commands"][0]["reportPath"] == "declared-ran.txt"
 
-    # The phase-1 gate adopted that result instead of re-running it, and says so.
-    reused = [c for c in evidence["commands"] if c.get("declaredId") == "p1-prestage"]
-    assert len(reused) == 1, evidence["commands"]
-    assert reused[0]["reused"] is True
-    assert reused[0]["reusedFrom"]["evidencePath"] == str(prestage_files[0])
-    assert reused[0]["reusedFrom"]["revision"] == evidence["sourceRevision"]["revision"]
+# ── route 1.5: the learned ceiling (step 5 wired into step 2) ────────────────
+def _seed_applied(tmp_path, phase, value):
+    learning = tmp_path / "work" / ".wiggum" / "features" / "obs-lifecycle" / "learning"
+    learning.mkdir(parents=True, exist_ok=True)
+    (learning / "applied.json").write_text(json.dumps(
+        {"knob": "proposer_timeout", "phase": phase, "value": value,
+         "previous": 900, "samples": 3, "runs": ["seed"], "ts": "2026-09-12T00:00:00Z"}) + "\n")
 
-    # `cumulative: false`: phase 2's gate never sees it again.
-    phase2 = json.loads(
-        sorted(runs.rglob("verification/phase-2-attempt-*.json"))[0].read_text()
-    )
-    assert "p1-prestage" not in [c.get("declaredId") for c in phase2["commands"]]
-    assert "p1-witness" in [c.get("declaredId") for c in phase2["commands"]]
 
-    events = _read_events(workdir)
-    prestage_events = [e for e in events if e["event"] == "prestage_done"]
-    assert len(prestage_events) == 1, [e["event"] for e in events]
-    assert prestage_events[0]["phase"] == "1" and prestage_events[0]["attempt"] == "1"
+def test_an_applied_learning_decision_resolves_as_learned_only_when_applying(tmp_path):
+    """With WIGGUM_LEARNING=apply an applied decision for phase 1 is the ceiling
+    and is SOURCED as learned; phase 2, with no decision, stays global."""
+    _seed_applied(tmp_path, 1, 1234)
+    _result, _workdir, events = _run_orchestrator(
+        tmp_path, proposer_timeout=900, extra_env={"WIGGUM_LEARNING": "apply"})
+    caps = {c["phase"]: c for c in _caps(events)}
+    assert caps["1"]["seconds"] == "1234" and caps["1"]["source"] == "learned"
+    assert caps["2"]["seconds"] == "900" and caps["2"]["source"] == "global"
+
+
+def test_learning_unset_never_reads_an_applied_decision(tmp_path):
+    """The §5.5 invariant: with the layer off, an applied file on disk changes
+    nothing — the resolution is byte-identical to the plain run."""
+    _seed_applied(tmp_path, 1, 1234)
+    _result, _workdir, events = _run_orchestrator(tmp_path, proposer_timeout=900)
+    caps = {c["phase"]: c for c in _caps(events)}
+    assert all(c["seconds"] == "900" and c["source"] == "global" for c in caps.values())
+
+
+def test_an_explicit_override_outranks_a_learned_value(tmp_path):
+    """Resolution order: the operator's override is route 1 and wins over 1.5."""
+    _seed_applied(tmp_path, 1, 1234)
+    _result, _workdir, events = _run_orchestrator(
+        tmp_path, proposer_timeout=900, phase_timeouts=("1=777",),
+        extra_env={"WIGGUM_LEARNING": "apply"})
+    caps = {c["phase"]: c for c in _caps(events)}
+    assert caps["1"]["seconds"] == "777" and caps["1"]["source"] == "override"

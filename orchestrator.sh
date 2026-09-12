@@ -1541,8 +1541,8 @@ build_proposer_prompt() {
 #   1. --proposer-timeout-phase N=SECONDS / WIGGUM_PROPOSER_TIMEOUT_PHASE_<N>
 #   2. "phaseTimeouts": {"N": SECONDS} in the --verification-commands document
 #   3. the global --proposer-timeout
-# (§4.1's learned value slots in between 1 and 2 when the learning layer exists;
-# it is deliberately absent here rather than stubbed.)
+#   1.5 the learned value (step 5, `learn.py resolve`) — only under WIGGUM_LEARNING=apply,
+#       and only when an applied decision exists for this phase
 #
 # Prints "<seconds>\t<source>". The source is not decoration: an unsourced number
 # is what makes budget archaeology expensive six hours into a run, so it is
@@ -1554,10 +1554,28 @@ resolve_proposer_timeout() {
   local n="$1"
   if [[ -n "${PHASE_TIMEOUT_OVERRIDE[$n]:-}" ]]; then
     printf '%s\t%s\n' "${PHASE_TIMEOUT_OVERRIDE[$n]}" "override"
-  elif [[ -n "${PHASE_TIMEOUT_DECLARED[$n]:-}" ]]; then
-    printf '%s\t%s\n' "${PHASE_TIMEOUT_DECLARED[$n]}" "declared"
   else
-    printf '%s\t%s\n' "$PROPOSER_TIMEOUT" "global"
+    # Routes 2 and 3 first, as the fallback the learning layer is asked against.
+    local fallback fallback_src
+    if [[ -n "${PHASE_TIMEOUT_DECLARED[$n]:-}" ]]; then
+      fallback="${PHASE_TIMEOUT_DECLARED[$n]}"; fallback_src="declared"
+    else
+      fallback="$PROPOSER_TIMEOUT"; fallback_src="global"
+    fi
+    # Route 1.5 (§4.1's learned value; step 5): ONLY when the operator has turned
+    # application on. `learn.py resolve` prints the applied value for this
+    # (knob, phase) or the fallback unchanged; anything unparseable falls through.
+    if [[ "${WIGGUM_LEARNING:-}" == "apply" ]]; then
+      local learned
+      learned="$(python3 "$LIB_DIR/learn.py" resolve --knob proposer_timeout \
+                   --phase "$n" --default "$fallback" --feature-dir "$FEATURE_DIR" \
+                   2>/dev/null)" || learned=""
+      if [[ "$learned" =~ ^[0-9]+$ && "$learned" != "$fallback" ]]; then
+        printf '%s\t%s\n' "$learned" "learned"
+        return 0
+      fi
+    fi
+    printf '%s\t%s\n' "$fallback" "$fallback_src"
   fi
 }
 
