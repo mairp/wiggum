@@ -242,6 +242,13 @@ else:
         print("  state: STOPPED at phase %s — resume with: wiggum resume" % ph)
     elif r == "max_rejects":
         print("  state: HALTED at phase %s — needs human (max-rejects exceeded)" % ph)
+    elif r == "proposer_cap_exhausted":
+        # Distinct from proposer_consecutive_errors on purpose: nothing failed,
+        # the work did not fit the pass. Naming the wrong remedy here is how a
+        # project ends up with its error breaker disabled.
+        print("  state: HALTED at phase %s — the phase's work does not fit one pass "
+              "(consecutive hard_cap kills). Make the long step outlive the pass "
+              "(--long-job-cmd) or split the phase; raising the cap is the last resort" % ph)
     else:
         print("  state: HALTED at phase %s — %s" % (ph, r))
 PYEOF

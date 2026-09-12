@@ -39,7 +39,7 @@ def _emit_tool(events, tool, target):
     )
 
 
-def _run(tmp_path, agent, *, max_iter=1, env_extra=None):
+def _run(tmp_path, agent, *, max_iter=1, env_extra=None, timeout="120"):
     evidence = tmp_path / ".wiggum" / "features" / "f" / "gates" / "GATE1-EVIDENCE.md"
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("standing prompt")
@@ -59,7 +59,7 @@ def _run(tmp_path, agent, *, max_iter=1, env_extra=None):
     result = subprocess.run(
         ["bash", str(PROPOSER), "-w", str(tmp_path), "-e", str(evidence),
          "-f", str(prompt), "--backend", "dsh", "-n", str(max_iter), "-s", "0",
-         "--feature", "f", "--phase", "1", "--timeout", "120"],
+         "--feature", "f", "--phase", "1", "--timeout", timeout],
         text=True, capture_output=True, env=env, timeout=180,
     )
     events = []
@@ -250,18 +250,77 @@ def test_hard_cap_kill_is_carried_into_the_next_pass(tmp_path):
     assert len(_checkpoints(tmp_path)) == 2
 
 
-def test_repeated_kills_halt_the_attempt(tmp_path):
-    """Six consecutive killed passes is the bug; two is a halt an operator sees."""
+def test_repeated_futility_kills_halt_the_attempt(tmp_path):
+    """Six consecutive killed passes is the bug; two is a halt an operator sees.
+
+    A FUTILITY kill (here progress_stall) says the agent failed, so it belongs on
+    the consecutive-error breaker and exits 7."""
     body = "end=$((SECONDS+120)); while (( SECONDS < end )); do :; done\n"
     result, evs = _run(tmp_path, _agent(tmp_path, body), max_iter=6, env_extra={
         "WIGGUM_PROPOSER_PROGRESS_TIMEOUT": "4", "WIGGUM_PROPOSER_MAX_ERRORS": "2",
     })
 
     assert result.returncode == 7, result.stderr
-    assert len(_kills(evs)) == 2
+    kills = _kills(evs)
+    assert len(kills) == 2
+    assert all(k["class"] == "futility" for k in kills)
     assert "watchdog_progress_stall" in result.stderr
     stops = [e for e in evs if e["event"] == "run_stop"]
     assert stops and stops[0]["reason"] == "proposer_consecutive_errors"
+    assert stops[0]["kill_class"] == "futility"
+
+
+# A cap kill is a BUDGET signal, not a failure: the pass was productive right up
+# to the ceiling and the work simply did not fit. Conflating the two is what put
+# WIGGUM_PROPOSER_MAX_ERRORS=30 into a real .env — disabling the error breaker for
+# genuine crashes as well (semantic-router-sovereign phase 15, 2026-09-11). The
+# two tests below pin the split: same watchdog, two counters, two exit codes.
+def _capped_body():
+    """Busy and PRODUCTIVE until the ceiling: writes a file every second, so
+    neither the disk-progress watchdog nor the no-progress breaker can fire and
+    the only thing that ends the pass is the hard cap."""
+    return "for i in $(seq 1 60); do echo $i > tick-$i.txt; sleep 1; done\n"
+
+
+def test_repeated_cap_kills_halt_with_the_cap_code(tmp_path):
+    """Cap kills have their own bounded counter and their own exit code (10), so
+    the halt can name the right remedy instead of 'raise the cap'."""
+    result, evs = _run(tmp_path, _agent(tmp_path, _capped_body()), max_iter=6,
+                       timeout="3", env_extra={
+                           "WIGGUM_PROPOSER_MAX_CAPS": "2",
+                           "WIGGUM_PROPOSER_MAX_ERRORS": "2",
+                       })
+
+    assert result.returncode == 10, result.stderr
+    kills = _kills(evs)
+    assert len(kills) == 2
+    assert all(k["reason"] == "hard_cap" and k["class"] == "budget" for k in kills)
+    caps = [e for e in evs if e["event"] == "iter_cap"]
+    assert [c["consec"] for c in caps] == ["1", "2"]
+    assert all(c["reason"] == "hard_cap" for c in caps)
+    # A killed pass reports no usage at all; say "unmeasured", never "cheap".
+    assert [e["event"] for e in evs].count("pass_cost_unknown") == 2
+    stops = [e for e in evs if e["event"] == "run_stop"]
+    assert stops and stops[0]["reason"] == "proposer_cap_exhausted"
+    assert "does not fit one pass" in result.stderr
+
+
+def test_a_cap_kill_does_not_count_as_an_agent_error(tmp_path):
+    """The accounting split itself: three cap kills with MAX_ERRORS=2 must NOT
+    trip the error breaker. Before the split this halted at exit 7 and told the
+    operator to raise a number that was never the problem."""
+    result, evs = _run(tmp_path, _agent(tmp_path, _capped_body()), max_iter=3,
+                       timeout="3", env_extra={
+                           "WIGGUM_PROPOSER_MAX_CAPS": "9",
+                           "WIGGUM_PROPOSER_MAX_ERRORS": "2",
+                       })
+
+    # max-iter, not the error breaker: the loop ran all three passes.
+    assert result.returncode == 4, result.stderr
+    assert len(_kills(evs)) == 3
+    assert [e for e in evs if e["event"] == "iter_error"] == []
+    assert [e["consec"] for e in evs if e["event"] == "iter_cap"] == ["1", "2", "3"]
+    assert "consecutive agent errors" not in result.stderr
 
 
 def test_finished_long_job_prompt_forbids_new_open_ended_work(tmp_path):

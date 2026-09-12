@@ -576,7 +576,7 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | Event | Emitted by | Meaning |
 |---|---|---|
 | `run_start` / `run_end` | orchestrator | a run begins / all phases approved (`outcome`) |
-| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_no_evidence`, `critic_config`) + `phase` |
+| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_cap_exhausted`, `proposer_no_progress`, `proposer_no_evidence`, `critic_config`) + `phase` |
 | `phase_start` / `phase_done` | orchestrator | phase N entered / approved |
 | `proposer_start` | orchestrator | a proposer pass for phase N begins |
 | `iter_start` / `iter_done` | proposer | one headless proposer iteration |
@@ -802,6 +802,7 @@ applies, so use it only when you accept raw provider text in `run.log`.
 Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `WIGGUM_MAX_ITER`, `WIGGUM_PROPOSER_TIMEOUT` (1800s),
 `WIGGUM_CRITIC_TIMEOUT` (300s), `WIGGUM_CRITIC_MALFORMED_LIMIT` (3),
+`WIGGUM_PROPOSER_MAX_ERRORS` (2), `WIGGUM_PROPOSER_MAX_CAPS` (3),
 `WIGGUM_MAX_WALL_MIN` (0 = unlimited),
 `WIGGUM_CRITIC_GROUNDING` (on), `WIGGUM_GIT_COMMITS` (auto).
 
@@ -830,8 +831,15 @@ guarded, all cheap:
   pass, and each kill writes a checkpoint (reason, elapsed, the pass's last tool
   calls and words) to `.wiggum/features/<f>/pass-checkpoints/` that the **next
   pass's prompt carries forward**, so a killed hour degrades into a note instead
-  of vanishing. A kill counts as an erroring pass, so repeats trip the failure
-  breaker and surface to you (exit 4) rather than repeating for hours.
+  of vanishing. A kill is accounted by CLASS, not as one thing: a **futility or
+  hang** kill (`repeat_stall`, `progress_stall`, `idle_timeout`) counts as an
+  erroring pass and trips the failure breaker; a **budget** kill (`hard_cap`) says
+  only that the work did not fit the pass, so it has its own bounded counter
+  (`WIGGUM_PROPOSER_MAX_CAPS`, default 3) and its own halt. Both surface to you
+  (exit 4) rather than repeating for hours, with different remedies — see the
+  exit-code table. Every `pass_killed` event carries a stable `class` field, and
+  a capped pass also emits `pass_cost_unknown`: a kill severs the provider stream,
+  so the most expensive passes of a run report no cost at all.
 
   | Signal | Fires when | Knob (default) |
   |---|---|---|
@@ -853,7 +861,7 @@ guarded, all cheap:
 | `1` | unexpected/internal error, **and** the **critic-outage breaker**: `WIGGUM_CRITIC_MALFORMED_LIMIT` consecutive `MALFORMED` verdicts (default 3). `MALFORMED` is how the critic fails safe when it times out, is unreachable, or answers without a verdict line — the feedback it writes is contentless, so every further proposer attempt runs blind and the phase can never be approved. Without the breaker the run spends its whole `MAX_REJECTS` budget on a critic that is simply down (`check_oscillation` cannot catch it: it keys on criterion IDs, which a contentless feedback has none of). It emits `run_stop reason=critic_unavailable`; raise `WIGGUM_CRITIC_TIMEOUT`, point `--critic` at a reachable backend, or raise `WIGGUM_CRITIC_MALFORMED_LIMIT`, then `wiggum resume` |
 | `2` | MAX_REJECTS exceeded — a human needs to arbitrate |
 | `3` | invalid spec/config |
-| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or the **failure breaker** tripping (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive proposer passes ending in an agent error: crash, timeout, auth/model error, malformed output, no terminal record, or a **watchdog kill**; default 2). The breaker emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume` |
+| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or one of the two proposer breakers. The **failure breaker** (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive passes ending in an agent error: crash, timeout, auth/model error, malformed output, no terminal record, or a **futility/hang watchdog kill** — `repeat_stall`, `progress_stall`, `idle_timeout`; default 2) emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume`. The **cap breaker** (`WIGGUM_PROPOSER_MAX_CAPS` consecutive passes killed at the absolute pass ceiling, `hard_cap`; default 3) emits `run_stop reason=proposer_cap_exhausted` — that is a budget signal, not a failure: the passes may have been productive the whole time and the phase's work simply does not fit one pass. Make the long step outlive the pass (`--long-job-phase` / `--long-job-cmd`) or split the phase; raise `WIGGUM_PROPOSER_TIMEOUT` only when the work genuinely is one indivisible pass |
 | `5` | lock held by another run |
 | `6` | stopped via `stop.flag` (clean; `wiggum resume` or rerun continues). Now also produced when the stop lands **mid-proposer** — `wiggum stop --now` — which earlier versions mislabeled as `4` |
 

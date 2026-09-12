@@ -1497,7 +1497,8 @@ run_phase() {
         log ">>> proposer aborted on consecutive agent errors for phase $n — halting (exit $E_BUDGET)."
         log "#   the agent pass repeatedly ended in error, or was repeatedly killed by the"
         log "#   watchdog (subtype watchdog_*: repeat_stall = same tool call over and over,"
-        log "#   progress_stall = nothing written to disk, hard_cap/idle_timeout = out of time)."
+        log "#   progress_stall = nothing written to disk, idle_timeout = the tree is dead)."
+        log "#   A hard_cap kill is NOT counted here — it has its own breaker (exit 10)."
         log "#   Each killed pass left a checkpoint in $FEATURE_DIR/pass-checkpoints — read the"
         log "#   newest one first; it says what the agent was actually doing. Options:"
         log "#     - raise the per-pass timeout:  WIGGUM_PROPOSER_TIMEOUT=3600 wiggum resume -w $WORKDIR"
@@ -1505,6 +1506,31 @@ run_phase() {
         log "#     - loosen a futility detector:   WIGGUM_PROPOSER_REPEAT_LIMIT=0 / WIGGUM_PROPOSER_PROGRESS_TIMEOUT=0"
         log "#     - or fix the phase's live harness so a pass completes within the timeout."
         wiggum_emit run_stop reason proposer_consecutive_errors phase "$n"
+        exit "$E_BUDGET"
+      fi
+      # Cap exhaustion is a DIFFERENT cause from exit 7 and deserves different
+      # guidance, so it gets its own arm before the catch-all below. Telling an
+      # operator to "raise the cap" here is exactly how one project ended up with
+      # WIGGUM_PROPOSER_MAX_ERRORS=30 and no working breaker at all: the passes
+      # were not failing, the work simply did not fit, and a bigger number buys
+      # another full ceiling of nothing.
+      if [[ "$prc" -eq 10 ]]; then
+        log ">>> proposer hit the pass ceiling repeatedly for phase $n — halting (exit $E_BUDGET)."
+        log "#   WIGGUM_PROPOSER_MAX_CAPS (default 3) consecutive passes were killed at the"
+        log "#   absolute pass ceiling (--proposer-timeout). That is a BUDGET signal, not an"
+        log "#   agent error: the passes may have been productive the whole time. This phase's"
+        log "#   work does not fit one pass."
+        log "#   Read the newest checkpoint in $FEATURE_DIR/pass-checkpoints first. Then, in"
+        log "#   order of preference:"
+        log "#     - make the long step outlive the pass instead of filling it: declare it as"
+        log "#       a long job (--long-job-phase $n --long-job-cmd '...') so the pass reads its"
+        log "#       result rather than waiting for it"
+        log "#     - split the phase so each pass has a finishable unit of work"
+        log "#     - only if the work genuinely IS one indivisible pass, raise the ceiling:"
+        log "#       WIGGUM_PROPOSER_TIMEOUT=<seconds> wiggum resume -w $WORKDIR"
+        log "#   Note: those passes report no cost at all (a kill severs the provider stream),"
+        log "#   so their pass_cost_unknown events — not a cost metric — are the honest record."
+        wiggum_emit run_stop reason proposer_cap_exhausted phase "$n"
         exit "$E_BUDGET"
       fi
       log ">>> proposer exited ($prc) without writing evidence for phase $n — internal error."

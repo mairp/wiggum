@@ -101,10 +101,17 @@ silently dropped.
 EXIT
   0  evidence file appeared      4  max-iter reached without evidence
   6  stopped via stop.flag       1  bad usage
-  7  consecutive agent errors (WIGGUM_PROPOSER_MAX_ERRORS, default 2)
+  7  consecutive agent errors (WIGGUM_PROPOSER_MAX_ERRORS, default 2) — a pass
+     that crashed, timed out, produced no terminal record, or was killed by a
+     FUTILITY/HANG watchdog (repeat_stall, progress_stall, idle_timeout)
   8  consecutive passes that changed nothing outside the loop's own bookkeeping
      (WIGGUM_PROPOSER_MAX_NOPROGRESS, default 3) — the phase is blocked on
      something the agent cannot decide for itself
+ 10  consecutive passes killed at the absolute pass ceiling
+     (WIGGUM_PROPOSER_MAX_CAPS, default 3). A hard_cap kill is a BUDGET signal,
+     not an agent error: the work did not fit a pass. The remedy is to make the
+     work fit — declare the long step as a yield, pre-stage it as a verification
+     command, or split the phase — not to raise the cap.
 EOF
 }
 
@@ -699,7 +706,10 @@ PY
   fi
   printf '%s\n' "$file" > "$KILL_SIDECAR.path" 2>/dev/null || true
   printf '%s|%s|%s\n' "$reason" "$elapsed" "$detail" > "$KILL_SIDECAR" 2>/dev/null || true
-  wiggum_emit pass_killed iter "$CURRENT_ITER" reason "$reason" elapsed "$elapsed" \
+  # `class` is the stable classification of `reason` (budget | futility | hang):
+  # a consumer must never have to re-derive it from the reason string.
+  wiggum_emit pass_killed iter "$CURRENT_ITER" reason "$reason" \
+    class "$(watchdog_kill_class "$reason")" elapsed "$elapsed" \
     detail "$detail" checkpoint "$file"
 }
 
@@ -1077,6 +1087,32 @@ trap 'rm -f "$PIDFILE"' EXIT
 # Non-Prime backends keep the legacy event-log is_error tail-scan below.
 : "${WIGGUM_PROPOSER_MAX_ERRORS:=2}"
 consec_err=0
+# Consecutive-CAP breaker. A watchdog kill is not one thing, and counting every
+# reason as an agent error is an accounting bug with a measurable price.
+# repeat_stall / progress_stall / idle_timeout say the AGENT failed — it looped,
+# it produced nothing, its tree is dead — and belong on the error breaker above.
+# hard_cap says only that the WORK DID NOT FIT the pass: the agent may have been
+# perfectly productive right up to the ceiling. Observed 2026-09-11
+# (semantic-router-sovereign phase 15): three passes killed at the 90-minute cap
+# while running a 93-minute live suite, each landing in the error counter, and
+# the run continued only because an operator had already set
+# WIGGUM_PROPOSER_MAX_ERRORS=30 to work around exactly this — which also
+# disabled the breaker for genuine crashes. Cap kills get their own bounded
+# counter and their own exit code (10), so the halt can name the right remedy:
+# the phase's work does not fit one pass. Raising the cap is NOT that remedy.
+: "${WIGGUM_PROPOSER_MAX_CAPS:=3}"
+consec_cap=0
+# The class of each watchdog kill reason; the single source of truth in the shell,
+# mirroring lib/learn.py's KILL_CLASS. An unknown reason is treated as futility
+# (fail safe: it counts against the error breaker, as every reason did before).
+watchdog_kill_class() {
+  case "$1" in
+    hard_cap)                            echo budget ;;
+    idle_timeout)                        echo hang ;;
+    repeat_stall|progress_stall)         echo futility ;;
+    *)                                   echo futility ;;
+  esac
+}
 # Consecutive-NO-PROGRESS breaker. The error breaker above keys on `is_error`, so a
 # pass that completes cleanly, reports success, and changes nothing resets it. That is
 # exactly what a phase blocked on an operator decision looks like: observed 2026-09-10
@@ -1175,10 +1211,12 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   # ainetops-demo phase 8) burned 6.5 hours without the loop ever noticing. A kill
   # is an erroring pass: count it, so N in a row halts and surfaces to the operator
   # instead of repeating.
-  pass_kill_reason=""
+  pass_kill_reason=""; pass_kill_elapsed=""; pass_kill_class=""
   if [[ -f "$KILL_SIDECAR" ]]; then
     pass_kill_reason="$(cut -d'|' -f1 < "$KILL_SIDECAR" 2>/dev/null)"
-    echo "proposer.sh: pass $i was terminated by the watchdog ($pass_kill_reason); its checkpoint is carried into the next pass." >&2
+    pass_kill_elapsed="$(cut -d'|' -f2 < "$KILL_SIDECAR" 2>/dev/null)"
+    pass_kill_class="$(watchdog_kill_class "$pass_kill_reason")"
+    echo "proposer.sh: pass $i was terminated by the watchdog ($pass_kill_reason, class $pass_kill_class); its checkpoint is carried into the next pass." >&2
   fi
 
   # Evidence wins outright — a pass that produced the gate file is a success
@@ -1256,21 +1294,48 @@ except Exception:
 print(flag, sub or "-")
 PY
 )
-  # A watchdog kill outranks whatever the (absent or stale) agent_result said.
-  if [[ -n "$pass_kill_reason" ]]; then
+  # A watchdog kill outranks whatever the (absent or stale) agent_result said —
+  # but only a FUTILITY or HANG kill is an agent error. A budget (hard_cap) kill
+  # goes to its own counter below, and must not reset the error counter either:
+  # it is neither a failing pass nor a clean one.
+  if [[ -n "$pass_kill_reason" && "$pass_kill_class" != "budget" ]]; then
     last_flag="error"; last_subtype="watchdog_${pass_kill_reason}"
   fi
-  if [[ "$last_flag" == "error" ]]; then
+  if [[ "$pass_kill_class" == "budget" ]]; then
+    consec_cap=$(( consec_cap + 1 ))
+    echo "proposer.sh: pass $i hit the pass ceiling (${pass_kill_reason}, ${pass_kill_elapsed}s) — consecutive cap kills: $consec_cap/$WIGGUM_PROPOSER_MAX_CAPS" >&2
+    wiggum_emit iter_cap iter "$i" reason "$pass_kill_reason" \
+      elapsed "$pass_kill_elapsed" consec "$consec_cap" max "$WIGGUM_PROPOSER_MAX_CAPS"
+    # A watchdog kill severs the provider stream, so the pass reports NO usage and
+    # NO cost at all: the three most expensive passes of the phase-15 incident are
+    # invisible to cost telemetry while the one cheap pass reports $19.48, which
+    # makes any naive cost metric exactly backwards. Say "unmeasured" out loud so a
+    # reader can tell it from "cheap" (design §4.2).
+    wiggum_emit pass_cost_unknown iter "$i" reason "$pass_kill_reason" elapsed "$pass_kill_elapsed"
+    if (( WIGGUM_PROPOSER_MAX_CAPS > 0 && consec_cap >= WIGGUM_PROPOSER_MAX_CAPS )); then
+      echo "proposer.sh: $consec_cap consecutive passes hit the pass ceiling — aborting (exit 10). This phase's work does not fit one pass; do NOT just raise the cap. Declare the long step as a yield, or pre-stage it as a verification command, or split the phase." >&2
+      wiggum_emit run_stop reason proposer_cap_exhausted iter "$i" \
+        kill_reason "$pass_kill_reason" consec "$consec_cap"
+      exit 10
+    fi
+  elif [[ "$last_flag" == "error" ]]; then
+    consec_cap=0
     consec_err=$(( consec_err + 1 ))
     echo "proposer.sh: pass $i errored (subtype '$last_subtype', is_error) — consecutive errors: $consec_err/$WIGGUM_PROPOSER_MAX_ERRORS" >&2
-    wiggum_emit iter_error iter "$i" subtype "$last_subtype" consec "$consec_err"
+    # `reason`/`kill_class` are the STABLE machine-readable fields: a consumer
+    # classifies a kill from them instead of re-parsing the `watchdog_` prefix
+    # off `subtype` (which is also the agent's own subtype when no kill occurred).
+    wiggum_emit iter_error iter "$i" subtype "$last_subtype" consec "$consec_err" \
+      reason "${pass_kill_reason:-agent_error}" kill_class "${pass_kill_class:-agent}"
     if (( consec_err >= WIGGUM_PROPOSER_MAX_ERRORS )); then
       echo "proposer.sh: $consec_err consecutive agent errors — aborting (exit 7). Raise --timeout or WIGGUM_PROPOSER_MAX_ERRORS, or fix the phase harness (e.g. an over-long prompt or a run that never reaches a verdict)." >&2
-      wiggum_emit run_stop reason proposer_consecutive_errors iter "$i" subtype "$last_subtype"
+      wiggum_emit run_stop reason proposer_consecutive_errors iter "$i" subtype "$last_subtype" \
+        kill_reason "${pass_kill_reason:-agent_error}" kill_class "${pass_kill_class:-agent}"
       exit 7
     fi
   else
     consec_err=0
+    consec_cap=0
   fi
 
   # Did this pass change anything outside the loop's own bookkeeping?
