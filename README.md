@@ -121,6 +121,43 @@ Gate evidence records the revision it ran against — `sourceRevision.revision` 
 if you cannot say which tree produced it. When the workdir is not a repository the
 field carries `available: false` and a reason rather than being omitted.
 
+#### Pre-staging a long measurement, so the gate runs it once
+
+A 90-minute live suite does not fit inside a proposer pass that must cite it, and a
+cumulative gate re-runs it module by module every later phase (across feature
+`002-extproc-data-path`, one live suite was launched 159 times). Five optional
+fields on a declared entry move that measurement out of the pass and out of the
+duplicated gate:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `stage` | `"gate"` | `"prestage"` runs the command ONCE per attempt, before the proposer pass, and lets that phase's gate reuse the passing result. `"both"` pre-stages it *and* still executes it at the gate. (`"pre"` is accepted as a spelling of `"prestage"`.) |
+| `reportPath` | — | workdir-relative artifact the command produces; named in the block the proposer reads, so the pass writes evidence from a file instead of re-running the measurement |
+| `reusePolicy` | `"per-attempt"` | how far a passing pre-stage may travel: `per-attempt` (this attempt's gate), `per-phase` (any attempt of that phase), `per-run` (any later gate too) |
+| `detached` | `false` | launch it as a job Wiggum owns (its own session, its own log) instead of blocking; its `timeoutSec` becomes a polled **deadline** — an expired deadline is reported with the job left running, never signalled |
+| `cumulative` | `true` | `false` gates the command at its own phase and at release only, instead of at every later phase gate |
+
+The pre-stage report reaches the pass on the verification slice the proposer prompt
+already carries; `verification_plan.py prestage-report --plan … --phase N` prints
+the same block. An entry with no `stage` behaves exactly as it does today — same
+command id, same gate, same evidence.
+
+**Reuse fails closed, and says where the result came from.** A gate accepting a
+result it did not observe is the one change here that can weaken a verdict, so it
+is allowed only when every one of these holds: the plan hash matches, the command
+id matches, `git rev-parse HEAD` is *the same revision* the pre-stage ran against,
+and the working tree is clean at both ends. Anything else — a moved revision, a
+dirty tree, an unavailable revision, an unknown attempt, a pre-stage that failed or
+is still running — re-runs the command. Every adopted record carries `reusedFrom`
+(the pre-stage evidence path, its phase/attempt, the plan hash and the revision),
+so the gate document never claims an execution it did not perform.
+
+Because a dirty tree refuses reuse, keep the run's own artifacts out of `git status`
+— `.wiggum/` and `testautomation/` in `.gitignore` — or the tree is dirty from the
+first pass and the gate (correctly) re-runs everything. `cumulative: false` is a real
+weakening of the cumulative-regression property, so it is opt-in per command and is
+reported in the plan's `assumptions` block, never inferred.
+
 By default, each feature gets isolated artifacts at
 `<workdir>/testautomation/<feature>/TEST_PLAN.md` and
 `<workdir>/testautomation/<feature>/generated/`. Operator overrides must be absolute,
