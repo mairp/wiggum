@@ -621,15 +621,34 @@ def test_orchestrator_refuses_a_missing_verification_commands_document(tmp_path)
     assert "--verification-commands not found or empty" in result.stderr
 
 
+# The same fake Prime, plus one line: every proposer pass records that it ran, in
+# the same file the pre-staged command writes to. That file IS the ordering proof.
+_FAKE_PRIME_ORDERED = _FAKE_PRIME.replace(
+    "  rel=\"$(printf",
+    "  printf 'proposer\\n' >> \"$ORDER_WITNESS\"\n  rel=\"$(printf",
+)
+
+
 def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_path):
     """A declared command runs at its phase gate, with its env, and the evidence
-    document names the revision the gate ran against."""
+    document names the revision the gate ran against.
+
+    Extended for step 4 (pre-staged long measurements): a command declared
+    `"stage": "prestage"` runs ONCE, BEFORE the proposer pass, its passing result
+    is reused by that phase's gate with provenance, and `"cumulative": false`
+    keeps it out of the later phase's gate entirely.
+    """
     workdir = tmp_path / "work"
     workdir.mkdir()
     spec = tmp_path / "spec.md"
     spec.write_text(TWO_PHASE_SPEC)
-    fake = _fake_prime(tmp_path)
+    fake = tmp_path / "fake-prime-ordered"
+    fake.write_text(_FAKE_PRIME_ORDERED)
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     witness = workdir / "declared-ran.txt"
+    # Outside the workdir on purpose: a pre-stage that writes INTO the tree makes
+    # it dirty, and a dirty tree refuses reuse — which is the point of the rule.
+    ordering = tmp_path / "ordering.txt"
     commands = tmp_path / "verification-commands.json"
     # Both phases need a command: the spec has two, and a phase with neither a
     # discovered nor a declared command is refused at preflight by design.
@@ -648,6 +667,18 @@ def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_pa
                 "env": {"WIGGUM_TEST_MARK": "declared"},
             },
             {
+                "id": "p1-prestage",
+                "phase": 1,
+                "executable": "/usr/bin/env",
+                "args": ["sh", "-c", 'printf "prestage\n" >> "$1"', "sh",
+                         str(ordering)],
+                "cwd": str(workdir),
+                "timeoutSec": 60,
+                "stage": "prestage",
+                "reportPath": "declared-ran.txt",
+                "cumulative": False,
+            },
+            {
                 "id": "p2-noop",
                 "phase": 2,
                 "executable": "/usr/bin/env",
@@ -657,6 +688,11 @@ def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_pa
             },
         ],
     }))
+    # The run writes every artifact under .wiggum/; ignoring it keeps the tree
+    # clean, which is what lets the gate reuse the pre-stage at all.
+    (workdir / ".gitignore").write_text(
+        ".wiggum/\ntestautomation/\ndeclared-ran.txt\n"
+    )
     subprocess.run(["git", "init", "-q", str(workdir)], check=True)
     subprocess.run(["git", "-C", str(workdir), "add", "-A"], check=True)
     subprocess.run(
@@ -669,6 +705,7 @@ def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_pa
     env.update({
         "WIGGUM_PRIME_AGENT_BIN": str(fake),
         "WORKDIR_ABS": str(workdir),
+        "ORDER_WITNESS": str(ordering),
         "WIGGUM_GIT_COMMITS": "off",
         "WIGGUM_AGENT_STREAM": "false",
         "FAKE_VERDICT": "APPROVED",
@@ -694,7 +731,7 @@ def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_pa
     assert evidence_files, result.stdout + result.stderr
     evidence = json.loads(evidence_files[0].read_text())
     declared = [c for c in evidence["commands"] if c["source"] == "declared"]
-    assert [c["declaredId"] for c in declared] == ["p1-witness"]
+    assert [c["declaredId"] for c in declared] == ["p1-witness", "p1-prestage"]
     assert declared[0]["env"] == {"WIGGUM_TEST_MARK": "declared"}
     assert evidence["sourceRevision"]["available"] is True
     assert len(evidence["sourceRevision"]["revision"]) == 40
@@ -897,3 +934,38 @@ def test_an_explicit_override_outranks_the_declared_document(tmp_path):
     caps = {c["phase"]: c for c in _caps(_read_events(workdir))}
     assert caps, result.stdout + result.stderr
     assert caps["2"]["seconds"] == "77" and caps["2"]["source"] == "override"
+    # ── step 4: the pre-stage ran ONCE, and it ran BEFORE the proposer ────────
+    order = ordering.read_text().split()
+    assert order, "nothing recorded its order\n" + result.stdout + result.stderr
+    # Pre-stage, then the pass; the phase-1 gate does NOT run it a third time.
+    # The release gate does run it — `cumulative: false` gates a command at its
+    # own phase and at release, which is exactly what the second entry is.
+    assert order[:3] == ["prestage", "proposer", "proposer"], order
+    assert order.count("prestage") == 2, order
+
+    prestage_files = sorted(runs.rglob("verification/prestage-phase-1-attempt-*.json"))
+    assert prestage_files, result.stdout + result.stderr
+    prestaged = json.loads(prestage_files[0].read_text())
+    assert prestaged["phase"] == 1 and prestaged["attempt"] == 1
+    assert prestaged["passed"] is True
+    assert [c["declaredId"] for c in prestaged["commands"]] == ["p1-prestage"]
+    assert prestaged["commands"][0]["reportPath"] == "declared-ran.txt"
+
+    # The phase-1 gate adopted that result instead of re-running it, and says so.
+    reused = [c for c in evidence["commands"] if c.get("declaredId") == "p1-prestage"]
+    assert len(reused) == 1, evidence["commands"]
+    assert reused[0]["reused"] is True
+    assert reused[0]["reusedFrom"]["evidencePath"] == str(prestage_files[0])
+    assert reused[0]["reusedFrom"]["revision"] == evidence["sourceRevision"]["revision"]
+
+    # `cumulative: false`: phase 2's gate never sees it again.
+    phase2 = json.loads(
+        sorted(runs.rglob("verification/phase-2-attempt-*.json"))[0].read_text()
+    )
+    assert "p1-prestage" not in [c.get("declaredId") for c in phase2["commands"]]
+    assert "p1-witness" in [c.get("declaredId") for c in phase2["commands"]]
+
+    events = _read_events(workdir)
+    prestage_events = [e for e in events if e["event"] == "prestage_done"]
+    assert len(prestage_events) == 1, [e["event"] for e in events]
+    assert prestage_events[0]["phase"] == "1" and prestage_events[0]["attempt"] == "1"

@@ -1600,6 +1600,11 @@ run_phase() {
 
     ensure_long_job "$n" "$attempt"
 
+    # step 4: prestage — declared commands marked `"stage": "prestage"` run ONCE
+    # here, before the proposer, so the gate reuses the result instead of re-running
+    # it (wiggum-lib.sh:wiggum_prestage_phase; no-op when none are declared).
+    wiggum_prestage_phase "$n" "$attempt"
+
     # Which agent takes this attempt: the wide proposer, or — right after a NEW
     # diagnostician hint — the narrowed accelerator (see accelerator_due).
     local role="proposer" backend="$PROPOSER_BACKEND" rem_sig=""
