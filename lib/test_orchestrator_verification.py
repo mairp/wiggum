@@ -61,6 +61,9 @@ if [[ " $* " == *" --no-tools "* ]]; then
     | grep -oE "VERDICT [0-9a-f]{16}: $verdict" | head -1 | awk '{print $2}' | tr -d ':')"
   printf 'Criterion review complete.\nVERDICT %s: %s\n' "$nonce" "$verdict"
 else
+  # $FAKE_PROPOSER_SLEEP (default 0 — the original behaviour) stalls the pass so a
+  # pass-ceiling test can drive it into the watchdog instead of writing evidence.
+  sleep "${FAKE_PROPOSER_SLEEP:-0}"
   rel="$(printf '%s\n' "$prompt" \
     | grep -oE '\.wiggum/features/[^ ]*/gates/GATE[0-9]+-EVIDENCE\.md' | head -1)"
   mkdir -p "$(dirname "$WORKDIR_ABS/$rel")"
@@ -77,7 +80,8 @@ def _fake_prime(tmp_path):
 
 
 def _run_orchestrator(tmp_path, *, verdict="APPROVED", extra_env=None,
-                      max_iter="1", max_rejects="3"):
+                      max_iter="1", max_rejects="3", proposer_timeout=None,
+                      phase_timeouts=(), timeout=120):
     """Drive orchestrator.sh with the fake Prime backend; return the result plus
     the parsed events from the run's authoritative events.jsonl."""
     workdir = tmp_path / "work"
@@ -96,21 +100,27 @@ def _run_orchestrator(tmp_path, *, verdict="APPROVED", extra_env=None,
     })
     env.update(extra_env or {})
 
+    argv = [
+        "/usr/bin/bash", ORCHESTRATOR,
+        "--workdir", str(workdir),
+        "--specs", str(spec),
+        "--proposer", "prime",
+        "--critic", "prime",
+        "--verification", "off",
+        "--max-iter", max_iter,
+        "--max-rejects", max_rejects,
+        "--feature", "obs-lifecycle",
+        "--no-live",
+    ]
+    if proposer_timeout is not None:
+        argv += ["--proposer-timeout", str(proposer_timeout)]
+    for spec_entry in phase_timeouts:
+        argv += ["--proposer-timeout-phase", spec_entry]
+
     result = subprocess.run(
-        [
-            "/usr/bin/bash", ORCHESTRATOR,
-            "--workdir", str(workdir),
-            "--specs", str(spec),
-            "--proposer", "prime",
-            "--critic", "prime",
-            "--verification", "off",
-            "--max-iter", max_iter,
-            "--max-rejects", max_rejects,
-            "--feature", "obs-lifecycle",
-            "--no-live",
-        ],
+        argv,
         cwd=str(workdir), env=env, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False,
     )
     return result, workdir, _read_events(workdir)
 
@@ -694,3 +704,196 @@ def test_orchestrator_executes_declared_commands_and_records_the_revision(tmp_pa
     conf = (workdir / ".wiggum" / "features" / "obs-lifecycle" / "last-run.conf").read_text()
     assert "VERIFICATION_COMMANDS=" in conf
     assert str(commands) in conf
+
+
+# ── per-phase proposer cap (design §4.1) ─────────────────────────────────────
+# One global --proposer-timeout is set for the worst phase in the run, so every
+# other phase carries a ceiling that means nothing — and a 90-minute ceiling on a
+# pass that is stuck is 90 minutes of nothing. These pin the three properties the
+# resolution has to have: an override actually reaches the pass, the resolved
+# value and its SOURCE are recorded, and a run that declares no override behaves
+# exactly as it did before any of this existed.
+
+
+def _caps(events):
+    return [e for e in events if e["event"] == "proposer_cap"]
+
+
+def test_an_absent_override_is_the_global_timeout_unchanged(tmp_path):
+    """The back-compat case, and the common one: nothing declared, so every
+    phase resolves to the global value and the happy path is untouched."""
+    result, _workdir, events = _run_orchestrator(tmp_path, proposer_timeout=900)
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
+
+    caps = _caps(events)
+    assert [c["phase"] for c in caps] == ["1", "2"]
+    assert all(c["seconds"] == "900" and c["source"] == "global" for c in caps)
+    # And the lifecycle is byte-identical to the plain happy-path run.
+    names = _names(events)
+    assert names[0] == "run_start" and names.count("run_end") == 1
+    assert names.count("phase_done") == 2
+
+
+def test_a_per_phase_override_is_resolved_and_sourced(tmp_path):
+    """Phase 1 overridden, phase 2 not: two different ceilings in one run, each
+    naming where it came from."""
+    _result, _workdir, events = _run_orchestrator(
+        tmp_path, proposer_timeout=900, phase_timeouts=("1=1234",))
+
+    caps = {c["phase"]: c for c in _caps(events)}
+    assert caps["1"]["seconds"] == "1234" and caps["1"]["source"] == "override"
+    assert caps["2"]["seconds"] == "900" and caps["2"]["source"] == "global"
+
+
+def test_the_env_spelling_of_the_override_is_the_same_route(tmp_path):
+    """WIGGUM_PROPOSER_TIMEOUT_PHASE_<N> is what a wrapper or a resume sets; it
+    resolves identically to the flag."""
+    _result, _workdir, events = _run_orchestrator(
+        tmp_path, proposer_timeout=900,
+        extra_env={"WIGGUM_PROPOSER_TIMEOUT_PHASE_2": "1500"})
+
+    caps = {c["phase"]: c for c in _caps(events)}
+    assert caps["1"]["seconds"] == "900" and caps["1"]["source"] == "global"
+    assert caps["2"]["seconds"] == "1500" and caps["2"]["source"] == "override"
+
+
+def test_a_malformed_override_is_refused_at_launch(tmp_path):
+    """Fail at launch, not six hours in with an unparseable ceiling."""
+    result, _workdir, _events = _run_orchestrator(
+        tmp_path, phase_timeouts=("1=soon",))
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "must be N=SECONDS" in result.stderr
+
+
+def test_the_per_phase_timeout_reaches_the_proposer_subprocess(tmp_path):
+    """The resolution is worthless unless the pass actually runs under it. A
+    3-second phase-1 ceiling against a global 900 kills a stalling pass in
+    seconds — which only happens if proposer.sh received 3, not 900."""
+    result, _workdir, events = _run_orchestrator(
+        tmp_path, proposer_timeout=900, phase_timeouts=("1=3",),
+        extra_env={"FAKE_PROPOSER_SLEEP": "60",
+                   "WIGGUM_WATCHDOG_TICK": "1",
+                   "WIGGUM_PROPOSER_PROGRESS_TIMEOUT": "0",
+                   "WIGGUM_PROPOSER_REPEAT_LIMIT": "0"},
+        timeout=180)
+
+    kills = [e for e in events if e["event"] == "pass_killed"]
+    assert kills, result.stdout + "\n" + result.stderr
+    assert kills[0]["reason"] == "hard_cap"
+    # Killed at the PHASE ceiling, not the global one.
+    assert int(kills[0]["elapsed"]) < 60
+    # max-iter reached without evidence → the documented budget exit.
+    assert result.returncode == 4, result.stdout + result.stderr
+
+
+def test_last_run_conf_round_trips_the_ceiling_and_its_overrides(tmp_path):
+    """PROPOSER_TIMEOUT was never persisted, so `wiggum resume` silently reverted
+    every phase to the 1800s default. Both it and the per-phase map must survive."""
+    _result, workdir, _events = _run_orchestrator(
+        tmp_path, proposer_timeout=900, phase_timeouts=("2=1234", "1=600"))
+
+    for conf_path in (
+        workdir / ".wiggum" / "features" / "obs-lifecycle" / "last-run.conf",
+        workdir / ".wiggum" / "last-run.conf",
+    ):
+        # The file is %q-escaped and sourced by `wiggum resume`, so read it the
+        # way resume does rather than pattern-matching one escaping of a space.
+        sourced = subprocess.run(
+            ["/usr/bin/bash", "-c",
+             '. "$1"; printf "%s\n%s\n" "$PROPOSER_TIMEOUT" "$PROPOSER_TIMEOUT_PHASES"',
+             "bash", str(conf_path)],
+            text=True, stdout=subprocess.PIPE, check=True).stdout.splitlines()
+        # Sorted by phase, so the file is stable across runs and diffable.
+        assert sourced == ["900", "1=600 2=1234"], (sourced, conf_path.read_text())
+
+
+def test_the_declared_document_can_carry_the_phase_ceiling(tmp_path):
+    """A phase's ceiling is a property of the work that phase does, and the
+    verification-commands document is already where the operator declares what
+    that work IS — so it can say so there, beside the command."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    spec = tmp_path / "spec.md"
+    spec.write_text(TWO_PHASE_SPEC)
+    fake = _fake_prime(tmp_path)
+    commands = tmp_path / "verification-commands.json"
+    commands.write_text(json.dumps({
+        "schema_version": "1.0.0",
+        "phaseTimeouts": {"2": 4321},
+        "commands": [
+            {"id": "p1-noop", "phase": 1, "executable": "/usr/bin/env",
+             "args": ["true"], "cwd": str(workdir), "timeoutSec": 60},
+            {"id": "p2-noop", "phase": 2, "executable": "/usr/bin/env",
+             "args": ["true"], "cwd": str(workdir), "timeoutSec": 60},
+        ],
+    }))
+    env = dict(os.environ)
+    env.update({
+        "WIGGUM_PRIME_AGENT_BIN": str(fake),
+        "WORKDIR_ABS": str(workdir),
+        "WIGGUM_GIT_COMMITS": "off",
+        "WIGGUM_AGENT_STREAM": "false",
+        "FAKE_VERDICT": "APPROVED",
+    })
+    result = subprocess.run(
+        [
+            "/usr/bin/bash", ORCHESTRATOR,
+            "--workdir", str(workdir), "--specs", str(spec),
+            "--proposer", "prime", "--critic", "prime",
+            "--verification", "required",
+            "--verification-commands", str(commands),
+            "--proposer-timeout", "900",
+            "--max-iter", "1", "--feature", "obs-lifecycle", "--no-live",
+        ],
+        cwd=str(workdir), env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False,
+    )
+    events = _read_events(workdir)
+    caps = {c["phase"]: c for c in _caps(events)}
+    assert caps, result.stdout + result.stderr
+    assert caps["1"]["seconds"] == "900" and caps["1"]["source"] == "global"
+    assert caps["2"]["seconds"] == "4321" and caps["2"]["source"] == "declared"
+
+
+def test_an_explicit_override_outranks_the_declared_document(tmp_path):
+    """Route 1 beats route 3: the operator's flag is the more local statement."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    spec = tmp_path / "spec.md"
+    spec.write_text(TWO_PHASE_SPEC)
+    fake = _fake_prime(tmp_path)
+    commands = tmp_path / "verification-commands.json"
+    commands.write_text(json.dumps({
+        "schema_version": "1.0.0",
+        "phaseTimeouts": {"2": 4321},
+        "commands": [
+            {"id": "p1-noop", "phase": 1, "executable": "/usr/bin/env",
+             "args": ["true"], "cwd": str(workdir), "timeoutSec": 60},
+            {"id": "p2-noop", "phase": 2, "executable": "/usr/bin/env",
+             "args": ["true"], "cwd": str(workdir), "timeoutSec": 60},
+        ],
+    }))
+    env = dict(os.environ)
+    env.update({
+        "WIGGUM_PRIME_AGENT_BIN": str(fake),
+        "WORKDIR_ABS": str(workdir),
+        "WIGGUM_GIT_COMMITS": "off",
+        "WIGGUM_AGENT_STREAM": "false",
+        "FAKE_VERDICT": "APPROVED",
+    })
+    result = subprocess.run(
+        [
+            "/usr/bin/bash", ORCHESTRATOR,
+            "--workdir", str(workdir), "--specs", str(spec),
+            "--proposer", "prime", "--critic", "prime",
+            "--verification", "required",
+            "--verification-commands", str(commands),
+            "--proposer-timeout", "900", "--proposer-timeout-phase", "2=77",
+            "--max-iter", "1", "--feature", "obs-lifecycle", "--no-live",
+        ],
+        cwd=str(workdir), env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, check=False,
+    )
+    caps = {c["phase"]: c for c in _caps(_read_events(workdir))}
+    assert caps, result.stdout + result.stderr
+    assert caps["2"]["seconds"] == "77" and caps["2"]["source"] == "override"

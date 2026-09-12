@@ -469,6 +469,13 @@ for o in keep[-5:]:
     # later gate quietly narrows to it (older confs won't carry the key).
     [[ -n "${VERIFICATION_COMMANDS:-}" ]] && args+=( --verification-commands "$VERIFICATION_COMMANDS" )
     [[ -n "${GENERATE_TESTS:-}" ]] && args+=( --generate-tests "$GENERATE_TESTS" )
+    # The pass ceiling and its per-phase overrides (older confs won't carry
+    # either): a resume that drops them runs each phase under a different budget
+    # than the one it was planned for, silently reverting to the 1800s default.
+    [[ -n "${PROPOSER_TIMEOUT:-}" ]] && args+=( --proposer-timeout "$PROPOSER_TIMEOUT" )
+    for _pt in ${PROPOSER_TIMEOUT_PHASES:-}; do
+      args+=( --proposer-timeout-phase "$_pt" )
+    done
     [[ "${TELEMETRY:-false}" == "true" ]] && args+=( --telemetry --loki-url "$LOKI_URL" )
     [[ "${OTEL:-false}" == "true" ]] && args+=( --otel --otel-url "$OTEL_URL" )
     # A phase's long-running verification job must survive resume (older confs

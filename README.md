@@ -579,6 +579,9 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_cap_exhausted`, `proposer_no_progress`, `proposer_no_evidence`, `critic_config`) + `phase` |
 | `phase_start` / `phase_done` | orchestrator | phase N entered / approved |
 | `proposer_start` | orchestrator | a proposer pass for phase N begins |
+| `proposer_cap` | orchestrator | the pass ceiling this attempt runs under — `seconds` + `source` (`override` \| `declared` \| `global`). An unsourced budget is what makes budget archaeology expensive six hours in |
+| `iter_cap` | proposer | a pass was killed at the ceiling — `reason` (`hard_cap`), `elapsed`, `consec`/`max` against `WIGGUM_PROPOSER_MAX_CAPS`. A budget signal, not an error |
+| `pass_cost_unknown` | proposer | a killed pass reports NO usage or cost (the kill severs the provider stream); this says "unmeasured", never "cheap" |
 | `iter_start` / `iter_done` | proposer | one headless proposer iteration |
 | `evidence_written` / `evidence_present` | proposer | `GATE<N>-EVIDENCE.md` was just written / already existed |
 | `attempt_archived` | orchestrator | a rejected evidence file was archived before retry |
@@ -803,6 +806,11 @@ Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `WIGGUM_MAX_ITER`, `WIGGUM_PROPOSER_TIMEOUT` (1800s),
 `WIGGUM_CRITIC_TIMEOUT` (300s), `WIGGUM_CRITIC_MALFORMED_LIMIT` (3),
 `WIGGUM_PROPOSER_MAX_ERRORS` (2), `WIGGUM_PROPOSER_MAX_CAPS` (3),
+`WIGGUM_PROPOSER_TIMEOUT_PHASE_<N>` (per-phase pass ceiling; also
+`--proposer-timeout-phase N=SECONDS` and a `"phaseTimeouts"` map in the
+`--verification-commands` document — first of those three wins, else the global
+value. `--proposer-timeout` and the overrides now round-trip through
+`last-run.conf`, so `wiggum resume` keeps the budget the run was planned for),
 `WIGGUM_MAX_WALL_MIN` (0 = unlimited),
 `WIGGUM_CRITIC_GROUNDING` (on), `WIGGUM_GIT_COMMITS` (auto).
 

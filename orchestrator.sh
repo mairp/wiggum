@@ -69,6 +69,14 @@ OPTIONS
                         this when a phase's own verification work (e.g. a
                         long-job command, see --long-job-cmd) genuinely needs
                         longer than the default per pass to converge.
+  --proposer-timeout-phase N=SECONDS
+                        Override the pass ceiling for phase N only (repeatable).
+                        Also WIGGUM_PROPOSER_TIMEOUT_PHASE_<N>, and a
+                        "phaseTimeouts": {"N": SECONDS} map in the
+                        --verification-commands document. First of those three,
+                        in that order, wins; with none set the global value above
+                        is used unchanged. Round-trips through last-run.conf, so
+                        `wiggum resume` keeps it.
   --critic-timeout SECONDS    Hard wall-clock limit on a single critic call
                         (default: 300). Also WIGGUM_CRITIC_TIMEOUT.
                         WIGGUM_CRITIC_MALFORMED_LIMIT (default 3) halts the run
@@ -193,6 +201,12 @@ OTEL_URL="${WIGGUM_OTEL_URL:-http://localhost:4318}"
 # LIVE: inline scrolling timeline in this terminal. Default auto = on iff TTY.
 LIVE="${WIGGUM_LIVE:-auto}"
 PROPOSER_TIMEOUT="${WIGGUM_PROPOSER_TIMEOUT:-1800}"
+# Per-phase overrides of that ceiling, as raw `N=SECONDS` entries (design §4.1).
+# One global number cannot be right for every phase: a phase whose work is a
+# 90-minute live suite and a phase that edits three files share it, so it gets
+# set for the worst phase and every other phase carries a ceiling that means
+# nothing. Collected here, resolved once per phase by resolve_proposer_timeout.
+PHASE_TIMEOUT_ARGS=()
 CRITIC_TIMEOUT="${WIGGUM_CRITIC_TIMEOUT:-300}"
 # Consecutive MALFORMED verdicts (critic timed out / unreachable / produced no
 # verdict line) before the run halts instead of spending the rest of MAX_REJECTS
@@ -218,6 +232,7 @@ while [[ $# -gt 0 ]]; do
     --max-rejects)  MAX_REJECTS="${2:?}"; shift 2 ;;
     --max-iter)     MAX_ITER="${2:?}"; shift 2 ;;
     --proposer-timeout) PROPOSER_TIMEOUT="${2:?}"; shift 2 ;;
+    --proposer-timeout-phase) PHASE_TIMEOUT_ARGS+=( "${2:?}" ); shift 2 ;;
     --critic-timeout)   CRITIC_TIMEOUT="${2:?}"; shift 2 ;;
     --start-phase)  START_PHASE="${2:?}"; shift 2 ;;
     --verification) VERIFICATION="${2:?}"; shift 2 ;;
@@ -245,6 +260,37 @@ done
 # separate `bash proposer.sh` process, so it needs these as environment, not
 # local shell variables.
 export LONG_JOB_PHASE LONG_JOB_CMD
+
+# ── per-phase pass ceilings: collect the explicit operator overrides ──────────
+# Two spellings, one map. A flag is what a launcher writes; an env var is what a
+# `wiggum resume` or a wrapper sets. Both are the SAME route (route 1 of §4.1) —
+# they are equally explicit, so neither shadows the other silently: the flag wins
+# only because it is the more local statement of intent.
+declare -A PHASE_TIMEOUT_OVERRIDE=()
+_phase_timeout_set() {   # <source-label> <N=SECONDS>
+  local src="$1" spec="$2" n="${2%%=*}" secs="${2#*=}"
+  [[ "$spec" == *=* && "$n" =~ ^[0-9]+$ && "$secs" =~ ^[0-9]+$ && "$secs" -gt 0 ]] || {
+    echo "orchestrator.sh: $src must be N=SECONDS with positive integers (got '$spec')" >&2
+    exit "$E_SPEC"
+  }
+  PHASE_TIMEOUT_OVERRIDE["$n"]="$secs"
+}
+for _v in $(compgen -v WIGGUM_PROPOSER_TIMEOUT_PHASE_ 2>/dev/null); do
+  _phase_timeout_set "$_v" "${_v#WIGGUM_PROPOSER_TIMEOUT_PHASE_}=${!_v}"
+done
+for _spec in "${PHASE_TIMEOUT_ARGS[@]+"${PHASE_TIMEOUT_ARGS[@]}"}"; do
+  _phase_timeout_set "--proposer-timeout-phase" "$_spec"
+done
+unset _v _spec
+# Sorted `N=SECONDS …` for last-run.conf (and for anything else that wants the
+# overrides as one stable string). Empty when nothing was overridden.
+_phase_timeout_overrides_line() {
+  local n out=()
+  for n in "${!PHASE_TIMEOUT_OVERRIDE[@]}"; do
+    out+=( "$n=${PHASE_TIMEOUT_OVERRIDE[$n]}" )
+  done
+  [[ ${#out[@]} -eq 0 ]] || printf '%s\n' "${out[@]}" | sort -n -t= | tr '\n' ' ' | sed 's/ $//'
+}
 
 # ── resolve workdir + specs ──────────────────────────────────────────────────
 # Wiggum is the installed utility; the workdir + spec live in the user's project,
@@ -579,6 +625,14 @@ write_last_run_conf() {
     printf 'CRITIC_BACKEND=%q\n'   "$CRITIC_BACKEND"
     printf 'MAX_REJECTS=%q\n'      "$MAX_REJECTS"
     printf 'MAX_ITER=%q\n'         "$MAX_ITER"
+    # The pass ceiling and its per-phase overrides are part of a phase's contract
+    # in exactly the way the long job is: a resume that drops them silently runs
+    # the phase under a different budget than the one it was planned for, with
+    # nothing in the log saying so. `PROPOSER_TIMEOUT` was never persisted at all
+    # until now — a resume quietly reverted to 1800s. The per-phase map is
+    # serialised as sorted `N=SECONDS N=SECONDS`, so the file stays diffable.
+    printf 'PROPOSER_TIMEOUT=%q\n' "$PROPOSER_TIMEOUT"
+    printf 'PROPOSER_TIMEOUT_PHASES=%q\n' "$(_phase_timeout_overrides_line)"
     printf 'TELEMETRY=%q\n'        "$TELEMETRY"
     printf 'LOKI_URL=%q\n'         "$LOKI_URL"
     printf 'OTEL=%q\n'             "$OTEL"
@@ -724,6 +778,37 @@ if [[ "$VERIFICATION" != "off" ]]; then
     echo "orchestrator.sh: verification preflight failed (see $LOG)" >&2
     exit "$E_SPEC"
   fi
+fi
+
+# ── per-phase pass ceilings: the declared document's own map ──────────────────
+# Route 3 of §4.1. A phase's pass ceiling is a property of the work that phase
+# has to do, and the verification-commands document is already where the operator
+# writes what that work IS — so "phase 15 needs two hours because its command
+# takes 93 minutes" belongs beside the command, not in a launcher's flags. An
+# optional top-level {"phaseTimeouts": {"15": 7200}}; unknown top-level keys are
+# ignored by the plan loader, but the document is hash-bound into the plan, so
+# adding one re-plans (by design — the document is a contract).
+declare -A PHASE_TIMEOUT_DECLARED=()
+if [[ -n "$VERIFICATION_COMMANDS" && -s "$VERIFICATION_COMMANDS" ]]; then
+  while IFS='=' read -r _n _secs; do
+    [[ -n "$_n" ]] || continue
+    if [[ ! "$_n" =~ ^[0-9]+$ || ! "$_secs" =~ ^[0-9]+$ || "$_secs" -le 0 ]]; then
+      echo "orchestrator.sh: phaseTimeouts in $VERIFICATION_COMMANDS must map phase numbers to positive integer seconds (got '$_n' => '$_secs')" >&2
+      exit "$E_SPEC"
+    fi
+    PHASE_TIMEOUT_DECLARED["$_n"]="$_secs"
+  done < <(python3 - "$VERIFICATION_COMMANDS" <<'PY' 2>/dev/null
+import json, sys
+try:
+    document = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+timeouts = document.get("phaseTimeouts") if isinstance(document, dict) else None
+if isinstance(timeouts, dict):
+    for phase, seconds in timeouts.items():
+        print("%s=%s" % (phase, seconds))
+PY
+  )
 fi
 
 # ── IS_SANDBOX for root (headless skip-permissions) ──────────────────────────
@@ -1371,6 +1456,39 @@ build_proposer_prompt() {
 # launch (confirmed live 2026-08-30, ainetops-demo phase 8: two full 3h passes
 # ran with no long job ever launched). See wiggum-lib.sh for the full history.
 
+# ── resolve_proposer_timeout — this phase's pass ceiling, and where it came from
+#
+# `--proposer-timeout` is one number for a whole run, so it gets set for the
+# worst phase: the phase whose work is a 93-minute live suite decides the ceiling
+# for the phase that edits three files. A 90-minute cap on a pass that is stuck
+# is 90 minutes of nothing, and with a long job or a declared verification
+# command doing the waiting the ceiling should usually be derived DOWNWARD, not
+# upward (design §4.1).
+#
+# Resolution order, first hit wins:
+#   1. --proposer-timeout-phase N=SECONDS / WIGGUM_PROPOSER_TIMEOUT_PHASE_<N>
+#   2. "phaseTimeouts": {"N": SECONDS} in the --verification-commands document
+#   3. the global --proposer-timeout
+# (§4.1's learned value slots in between 1 and 2 when the learning layer exists;
+# it is deliberately absent here rather than stubbed.)
+#
+# Prints "<seconds>\t<source>". The source is not decoration: an unsourced number
+# is what makes budget archaeology expensive six hours into a run, so it is
+# carried into the proposer_cap event beside the value.
+#
+# With nothing configured this returns $PROPOSER_TIMEOUT and the run behaves
+# exactly as it did before this existed.
+resolve_proposer_timeout() {
+  local n="$1"
+  if [[ -n "${PHASE_TIMEOUT_OVERRIDE[$n]:-}" ]]; then
+    printf '%s\t%s\n' "${PHASE_TIMEOUT_OVERRIDE[$n]}" "override"
+  elif [[ -n "${PHASE_TIMEOUT_DECLARED[$n]:-}" ]]; then
+    printf '%s\t%s\n' "${PHASE_TIMEOUT_DECLARED[$n]}" "declared"
+  else
+    printf '%s\t%s\n' "$PROPOSER_TIMEOUT" "global"
+  fi
+}
+
 # ── the phase loop ───────────────────────────────────────────────────────────
 run_phase() {
   local n="$1"
@@ -1391,6 +1509,9 @@ run_phase() {
 
   local prev_role=""
   local malformed_streak=0
+  # This phase's pass ceiling, resolved once and named with its source.
+  local phase_timeout phase_timeout_source
+  IFS=$'\t' read -r phase_timeout phase_timeout_source < <(resolve_proposer_timeout "$n")
   while (( attempt <= MAX_REJECTS + 1 )); do
     # stop.flag / budget checks at each phase-boundary step
     if [[ -f "$STOP_FLAG" ]]; then
@@ -1433,6 +1554,13 @@ run_phase() {
       log "----- proposer: phase $n attempt $attempt/$MAX_REJECTS ($PROPOSER_BACKEND) -----"
       wiggum_emit proposer_start phase "$n" attempt "$attempt" backend "$PROPOSER_BACKEND"
     fi
+    # The budget this pass runs under, and WHERE IT CAME FROM, recorded beside
+    # the start of the pass it governs. Reconstructing that afterwards from a
+    # halted run's flags, env and documents is the expensive part of budget
+    # archaeology, so it is never left implicit.
+    wiggum_emit proposer_cap phase "$n" attempt "$attempt" role "$role" \
+      seconds "$phase_timeout" source "$phase_timeout_source"
+    log "      pass ceiling: ${phase_timeout}s (${phase_timeout_source})"
     prev_role="$role"
 
     local -a prop_args=(
@@ -1441,7 +1569,7 @@ run_phase() {
       --prompt-file "$prompt_file"
       --backend "$backend"
       --max-iter "$MAX_ITER"
-      --timeout "$PROPOSER_TIMEOUT"
+      --timeout "$phase_timeout"
       --feature "$SLUG"
       --role "$role"
       --phase "$n"
