@@ -285,6 +285,286 @@ def test_summarize_is_pure_and_repeatable():
     assert json.dumps(a)   # serialisable
 
 
+# ── step 5: the learning loop (design §5 / §6 step 5) ───────────────────────
+#
+# A small synthetic-events builder, independent of the step-0 FIXTURE above, so
+# these tests can control exactly how many non-futility-killed samples a phase
+# has without perturbing the step-0 assertions that already pin the fixture's
+# numbers.
+def _events_for_phase(phase, work_secs, futile_count=0, run_id="run-X"):
+    events, ts = [], [1000.0]
+
+    def emit(ev):
+        ev = dict(ev)
+        ev.setdefault("ts", str(ts[0]))
+        ev["_src"] = "synthetic"
+        events.append(ev)
+        ts[0] += 1
+
+    emit({"event": "run_start", "run_id": run_id, "feature": "f"})
+    emit({"event": "phase_start", "run_id": run_id, "phase": phase, "title": "T"})
+    attempt = 0
+    for work in work_secs:
+        attempt += 1
+        emit({"event": "proposer_start", "run_id": run_id, "phase": phase, "attempt": attempt})
+        emit({"event": "iter_start", "run_id": run_id, "iter": 1})
+        emit({"event": "agent_result", "run_id": run_id, "is_error": False, "subtype": "success",
+              "cost_usd": 1.0, "duration_ms": int(work * 1000), "iter": 1})
+        emit({"event": "evidence_written", "run_id": run_id, "file": "GATE-EVIDENCE.md", "iters": 1})
+        emit({"event": "iter_done", "run_id": run_id, "iter": 1, "evidence": "present"})
+        emit({"event": "verification_passed", "run_id": run_id, "phase": phase, "attempt": attempt, "evidence": "e"})
+        emit({"event": "critic_start", "phase": phase, "attempt": attempt})
+        emit({"event": "verdict", "phase": phase, "attempt": attempt, "result": "APPROVED"})
+        emit({"event": "attempt_archived", "run_id": run_id, "phase": phase, "attempt": attempt})
+    for _ in range(futile_count):
+        attempt += 1
+        emit({"event": "proposer_start", "run_id": run_id, "phase": phase, "attempt": attempt})
+        emit({"event": "iter_start", "run_id": run_id, "iter": 1})
+        emit({"event": "pass_killed", "run_id": run_id, "iter": 1, "reason": "repeat_stall", "elapsed": 9999})
+        emit({"event": "agent_result", "run_id": run_id, "is_error": True, "subtype": "missing_terminal", "iter": 1})
+        emit({"event": "attempt_archived", "run_id": run_id, "phase": phase, "attempt": attempt})
+    emit({"event": "phase_done", "run_id": run_id, "phase": phase, "attempt": attempt})
+    return events
+
+
+def _phase_stats(work_secs, futile_count=0, phase=9):
+    s = learn.summarize(_events_for_phase(phase, work_secs, futile_count))
+    return s["phases"][str(phase)]
+
+
+# -- the locked allowlist (§5.5) ----------------------------------------------
+def test_knob_allowlist_is_locked_so_a_critic_facing_knob_can_never_be_added():
+    # This is the test the design doc's §6 step 5 refers to: it exists so that
+    # adding a critic-facing or breaker-relaxing name to ADJUSTABLE_KNOBS requires
+    # deliberately editing a test whose name says exactly why that must not happen.
+    assert learn.ADJUSTABLE_KNOBS == frozenset({
+        "proposer_timeout", "yield_poll_interval", "inject_yield_hint",
+    })
+    never_allowed = {
+        # critic independence (§5.5) — grounding caps, critic backend/timeout, --max-rejects
+        "grounding_max_lines", "grounding_max_files", "critic_backend", "critic_timeout",
+        "max_rejects", "critic_model",
+        # the operator's contract — never tunable by the loop
+        "verification_commands", "verification_documents", "phase_timeouts_declared",
+        # breakers must not relax themselves (§5.5)
+        "WIGGUM_PROPOSER_MAX_ERRORS", "WIGGUM_PROPOSER_MAX_NOPROGRESS", "WIGGUM_PROPOSER_MAX_CAPS",
+        "repeat_limit", "repeat_ignore",
+    }
+    assert never_allowed.isdisjoint(learn.ADJUSTABLE_KNOBS)
+
+
+# -- suggestion: bounds, the evidence floor, futility exclusion ---------------
+def test_suggest_proposer_timeout_needs_a_three_sample_floor():
+    stats = _phase_stats([80.0, 90.0], futile_count=1)   # only 2 usable samples
+    adv = learn.suggest_proposer_timeout(stats, default=5400)
+    assert adv["samples"] == 2
+    assert adv["value"] is None
+    assert "3" in adv["reason"]
+
+
+def test_suggest_proposer_timeout_excludes_futility_killed_samples_from_the_floor():
+    # 3 clean samples + 2 futility kills: the floor is met on 3, not 5 — proving
+    # the futility-killed passes never count as evidence.
+    stats = _phase_stats([80.0, 90.0, 85.0], futile_count=2)
+    assert stats["work_sec_samples"] == 3
+    adv = learn.suggest_proposer_timeout(stats, default=5400)
+    assert adv["samples"] == 3
+    assert adv["value"] is not None
+
+
+def test_suggest_proposer_timeout_clamps_to_the_step_cap_when_work_is_far_below_default():
+    # work is tiny relative to the 5400 s default: the raw target would collapse
+    # to near zero, but the ±50%-per-step cap (not the 900 s hard floor) is what
+    # actually binds here, since 0.5 × 5400 = 2700 > 900.
+    stats = _phase_stats([5.0, 6.0, 5.5])
+    adv = learn.suggest_proposer_timeout(stats, default=5400)
+    assert adv["bounds"] == [900, 10800]
+    assert adv["step_cap"] == [2700, 8100]
+    assert adv["value"] == 2700
+
+
+def test_suggest_proposer_timeout_clamps_to_the_hard_upper_bound():
+    # `current`=2000 makes the step cap's ceiling (1.5×2000=3000) looser than the
+    # hard bound (2×default=1800) — so it is the hard 2× bound that must bind,
+    # not the step cap, even though huge measured work would blow through both.
+    stats = _phase_stats([100000.0, 110000.0, 105000.0])
+    adv = learn.suggest_proposer_timeout(stats, default=900, current=2000)
+    assert adv["bounds"] == [900, 1800]
+    assert adv["step_cap"] == [1000, 3000]
+    assert adv["value"] == 1800
+
+
+def test_suggest_proposer_timeout_clamps_to_the_hard_lower_bound_of_900():
+    # `current`=1000 makes the step cap's floor (0.5×1000=500) looser than the
+    # hard 900 s floor — so tiny measured work must clamp to 900, not 500.
+    stats = _phase_stats([5.0, 6.0, 5.5])
+    adv = learn.suggest_proposer_timeout(stats, default=5400, current=1000)
+    assert adv["bounds"] == [900, 10800]
+    assert adv["step_cap"] == [500, 1500]
+    assert adv["value"] == 900
+
+
+def test_suggest_proposer_timeout_respects_a_previously_applied_current_value():
+    stats = _phase_stats([100000.0, 110000.0, 105000.0])
+    adv = learn.suggest_proposer_timeout(stats, default=5400, current=1200)
+    # step cap is now relative to `current` (1200), not `default` (5400)
+    assert adv["step_cap"] == [600, 1800]
+    assert adv["bounds"] == [900, 10800]
+    assert adv["value"] == 1800   # min(hard_hi=10800, step_hi=1800) binds here
+
+
+def test_advise_reports_samples_and_reason_for_every_phase():
+    summary = learn.summarize(_events_for_phase(4, [80.0, 90.0], futile_count=1))
+    rows = learn.advise(summary, "proposer_timeout", None, default=5400)
+    assert len(rows) == 1
+    assert rows[0]["phase"] == 4 and rows[0]["samples"] == 2 and rows[0]["value"] is None
+
+
+def test_advise_rejects_a_knob_with_no_suggestion_engine():
+    summary = learn.summarize(_events_for_phase(4, [80.0, 90.0, 85.0]))
+    import pytest
+    with pytest.raises(ValueError):
+        learn.advise(summary, "yield_poll_interval", None, default=30)
+
+
+# -- apply / revert / resolve (§5.4 storage, §5.5 invariant 3) ----------------
+def _applied_paths(tmp_path):
+    return str(tmp_path / "learning" / "applied.json"), str(tmp_path / "events.jsonl")
+
+
+def test_apply_writes_applied_json_with_provenance_and_emits_knob_adjusted(tmp_path):
+    summary = learn.summarize(_events_for_phase(3, [1200.0, 1300.0, 1250.0]))
+    applied, events_file = _applied_paths(tmp_path)
+    entry = learn.apply_proposer_timeout(summary, 3, 5400, applied, events_file=events_file,
+                                          run_id="learn-fixed-1")
+    # provenance: run ids, sample count, previous value, timestamp — all present
+    assert entry["run_id"] == "learn-fixed-1"
+    assert entry["knob"] == "proposer_timeout" and entry["phase"] == 3
+    assert entry["previous"] == 5400
+    assert entry["samples"] == 3
+    assert entry["source_runs"] == ["run-X"]
+    assert entry["applied_at"]
+    # applied.json is separate from any observation file, and is JSON-lines
+    lines = [json.loads(l) for l in open(applied) if l.strip()]
+    assert len(lines) == 1 and lines[0]["action"] == "apply"
+    # one knob_adjusted event line was emitted
+    ev_lines = [json.loads(l) for l in open(events_file) if l.strip()]
+    assert len(ev_lines) == 1
+    assert ev_lines[0]["event"] == "knob_adjusted"
+    assert ev_lines[0]["knob"] == "proposer_timeout"
+    assert ev_lines[0]["from"] == 5400 and ev_lines[0]["to"] == entry["value"]
+    assert ev_lines[0]["samples"] == 3
+
+
+def test_apply_refuses_a_knob_outside_the_allowlist(tmp_path):
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, "learn.py"), "apply",
+         "--events", FIXTURE, "--knob", "critic_timeout", "--phase", "1",
+         "--default", "5400", "--feature-dir", str(tmp_path)],
+        capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "not in the adjustable-knob allowlist" in r.stderr or "invalid choice" in r.stderr
+
+
+def test_apply_refuses_below_the_evidence_floor_and_writes_nothing(tmp_path):
+    summary = learn.summarize(_events_for_phase(3, [80.0, 90.0], futile_count=1))
+    applied, events_file = _applied_paths(tmp_path)
+    import pytest
+    with pytest.raises(ValueError):
+        learn.apply_proposer_timeout(summary, 3, 5400, applied, events_file=events_file)
+    assert not os.path.exists(applied)
+    assert not os.path.exists(events_file)
+
+
+def test_revert_restores_the_prior_value(tmp_path):
+    summary = learn.summarize(_events_for_phase(3, [1200.0, 1300.0, 1250.0]))
+    applied, events_file = _applied_paths(tmp_path)
+    entry = learn.apply_proposer_timeout(summary, 3, 5400, applied, events_file=events_file,
+                                          run_id="learn-fixed-2")
+    assert entry["value"] != 5400
+    assert learn.effective_value(applied, "proposer_timeout", 3) == entry["value"]
+    rev = learn.revert_run("learn-fixed-2", applied, events_file=events_file)
+    assert rev["value"] == 5400            # restored to the previous (default) value
+    assert rev["reverts_run_id"] == "learn-fixed-2"
+    assert learn.effective_value(applied, "proposer_timeout", 3) == 5400
+    # a second revert of the same, already-reverted run id is refused, not guessed at
+    import pytest
+    with pytest.raises(ValueError):
+        learn.revert_run("learn-fixed-2", applied, events_file=events_file)
+
+
+def test_revert_refuses_a_superseded_apply_to_avoid_clobbering_a_later_one(tmp_path):
+    summary = learn.summarize(_events_for_phase(3, [1200.0, 1300.0, 1250.0]))
+    applied, events_file = _applied_paths(tmp_path)
+    learn.apply_proposer_timeout(summary, 3, 5400, applied, events_file=events_file, run_id="learn-old")
+    later = learn.apply_proposer_timeout(summary, 3, 5400, applied, events_file=events_file, run_id="learn-new")
+    import pytest
+    with pytest.raises(ValueError):
+        learn.revert_run("learn-old", applied, events_file=events_file)
+    # the later decision must still be the effective one
+    assert learn.effective_value(applied, "proposer_timeout", 3) == later["value"]
+
+
+def test_off_reverts_every_currently_applied_knob(tmp_path):
+    applied, events_file = _applied_paths(tmp_path)
+    s3 = learn.summarize(_events_for_phase(3, [1200.0, 1300.0, 1250.0], run_id="run-A"))
+    s5 = learn.summarize(_events_for_phase(5, [2000.0, 2100.0, 2050.0], run_id="run-B"))
+    learn.apply_proposer_timeout(s3, 3, 5400, applied, events_file=events_file, run_id="learn-off-1")
+    learn.apply_proposer_timeout(s5, 5, 5400, applied, events_file=events_file, run_id="learn-off-2")
+    reverted = learn.revert_all(applied, events_file=events_file)
+    assert {e["reverts_run_id"] for e in reverted} == {"learn-off-1", "learn-off-2"}
+    assert learn.effective_value(applied, "proposer_timeout", 3) == 5400
+    assert learn.effective_value(applied, "proposer_timeout", 5) == 5400
+    # idempotent: nothing left to revert
+    assert learn.revert_all(applied, events_file=events_file) == []
+
+
+# -- the shell-callable integration point: resolve ---------------------------
+def test_resolve_returns_the_default_when_nothing_is_applied(tmp_path):
+    applied, _ = _applied_paths(tmp_path)   # file does not even exist yet
+    assert learn.resolve_knob("proposer_timeout", 7, 5400, applied,
+                               env={"WIGGUM_LEARNING": "apply"}) == 5400
+
+
+def test_wiggum_learning_off_or_unset_is_a_total_no_op_for_resolve(tmp_path):
+    summary = learn.summarize(_events_for_phase(3, [1200.0, 1300.0, 1250.0]))
+    applied, events_file = _applied_paths(tmp_path)
+    entry = learn.apply_proposer_timeout(summary, 3, 5400, applied, events_file=events_file,
+                                          run_id="learn-fixed-3")
+    assert entry["value"] != 5400
+    # unset, "off", and any other spelling all ignore the applied decision entirely
+    assert learn.resolve_knob("proposer_timeout", 3, 5400, applied, env={}) == 5400
+    assert learn.resolve_knob("proposer_timeout", 3, 5400, applied, env={"WIGGUM_LEARNING": "off"}) == 5400
+    assert learn.resolve_knob("proposer_timeout", 3, 5400, applied, env={"WIGGUM_LEARNING": "suggest"}) == 5400
+    # only the explicit "apply" value turns resolve on
+    assert learn.resolve_knob("proposer_timeout", 3, 5400, applied, env={"WIGGUM_LEARNING": "apply"}) == entry["value"]
+
+
+def test_resolve_cli_is_the_documented_shell_callable_entry_point(tmp_path):
+    # the exact call the per-phase-cap branch's `resolve_proposer_timeout` makes:
+    #   python3 lib/learn.py resolve --knob proposer_timeout --phase N --default S
+    # printing one integer on stdout.
+    summary = learn.summarize(_events_for_phase(9, [1200.0, 1300.0, 1250.0]))
+    applied, _ = _applied_paths(tmp_path)
+    entry = learn.apply_proposer_timeout(summary, 9, 5400, applied, run_id="learn-cli-1")
+    env = dict(os.environ, WIGGUM_LEARNING="apply")
+    r = subprocess.run(
+        [sys.executable, os.path.join(HERE, "learn.py"), "resolve",
+         "--knob", "proposer_timeout", "--phase", "9", "--default", "5400",
+         "--applied-file", applied],
+        capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str(entry["value"])
+    # and with WIGGUM_LEARNING unset, the same call is a total no-op
+    env_off = {k: v for k, v in os.environ.items() if k != "WIGGUM_LEARNING"}
+    r2 = subprocess.run(
+        [sys.executable, os.path.join(HERE, "learn.py"), "resolve",
+         "--knob", "proposer_timeout", "--phase", "9", "--default", "5400",
+         "--applied-file", applied],
+        capture_output=True, text=True, env=env_off)
+    assert r2.returncode == 0 and r2.stdout.strip() == "5400"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-q"]))

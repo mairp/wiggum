@@ -22,6 +22,16 @@
 #                                        agent pass). Rerun/resume picks up after.
 #   wiggum resume    [-w DIR] [--feature S] [overrides…]  relaunch the orchestrator
 #                                        from the saved config of the last run.
+#   wiggum learn     [-w DIR] [--feature S] [--show|--apply|--revert <run-id>|--off]
+#                                        the self-tuning loop (roadmap/research/
+#                                        self-improvement-loops/02-wiggum-loop-design.md
+#                                        §5): --show (default) prints suggested knob
+#                                        values, changing nothing; --apply writes a
+#                                        decision (MUTATES: learning/applied.json +
+#                                        a knob_adjusted event); --revert <run-id>
+#                                        undoes one; --off reverts everything. A
+#                                        decision only takes effect at run time under
+#                                        WIGGUM_LEARNING=apply.
 # Launch defaults to required verification with feature-scoped TEST_PLAN.md and
 # generated scaffolds; `--verification plan|off` changes that behavior. Explicit
 # `--test-plan`/`--generate-tests` paths override defaults, and resume preserves
@@ -39,7 +49,7 @@ LIB_DIR="$SCRIPT_DIR/lib"          # Python components live here
 . "$SCRIPT_DIR/wiggum-lib.sh"
 
 usage() {
-  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ── Single front door ──────────────────────────────────────────────────────
@@ -494,6 +504,52 @@ for o in keep[-5:]:
     args+=( "${EXTRA[@]}" )
     echo "resuming: $ORCHESTRATOR ${args[*]}"
     exec bash "$ORCHESTRATOR" "${args[@]}"
+    ;;
+
+  learn)
+    # `wiggum learn` is a thin dispatcher onto lib/learn.py (design
+    # roadmap/research/self-improvement-loops/02-wiggum-loop-design.md §5/§6 step 5).
+    # It is read/decision-only here: it never touches a run in progress, and the
+    # ONLY thing that makes a decision it writes take effect at run time is the
+    # WIGGUM_LEARNING=apply environment variable a later `wiggum run`/`resume`
+    # is launched with (lib/learn.py's own `resolve` is the integration point).
+    need_state
+    MODE="${EXTRA[0]:---show}"
+    PASSTHRU=("${EXTRA[@]:1}")
+    EV="$(feature_events)"
+    args=( --feature-dir "$FEATURE_DIR" )
+    # `advise`/`apply` need --default; fall back to orchestrator.sh's own default
+    # resolution (`WIGGUM_PROPOSER_TIMEOUT`, else 1800 — orchestrator.sh:195) so a
+    # bare `wiggum learn --show`/`--apply` needs no extra typing. `revert`/`off`
+    # take no --default, so this is only injected for the two modes that use it.
+    add_default() {
+      local a
+      for a in "${PASSTHRU[@]:-}"; do [[ "$a" == "--default" ]] && return; done
+      PASSTHRU+=( --default "${WIGGUM_PROPOSER_TIMEOUT:-1800}" )
+    }
+    case "$MODE" in
+      --show)
+        add_default
+        [[ -n "$EV" && -f "$EV" ]] && args+=( --events "$EV" )
+        exec python3 "$LIB_DIR/learn.py" advise "${args[@]}" "${PASSTHRU[@]}"
+        ;;
+      --apply)
+        add_default
+        [[ -n "$EV" && -f "$EV" ]] && args+=( --events "$EV" )
+        exec python3 "$LIB_DIR/learn.py" apply "${args[@]}" "${PASSTHRU[@]}"
+        ;;
+      --revert)
+        [[ ${#PASSTHRU[@]} -ge 1 ]] || { echo "usage: wiggum learn --revert <run-id>" >&2; exit 1; }
+        exec python3 "$LIB_DIR/learn.py" revert "${PASSTHRU[0]}" --feature-dir "$FEATURE_DIR" "${PASSTHRU[@]:1}"
+        ;;
+      --off)
+        exec python3 "$LIB_DIR/learn.py" off --feature-dir "$FEATURE_DIR" "${PASSTHRU[@]}"
+        ;;
+      *)
+        echo "wiggum learn: unknown option '$MODE' (expected --show|--apply|--revert <run-id>|--off)" >&2
+        exit 1
+        ;;
+    esac
     ;;
 
   ""|-h|--help|help)
