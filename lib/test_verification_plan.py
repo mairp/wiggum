@@ -3,6 +3,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -623,3 +624,408 @@ def test_a_phase_with_no_command_at_all_is_named_at_preflight(tmp_path):
         "Phase(s) 2 have neither a discovered nor a declared" in a
         for a in plan["ambiguities"]
     )
+
+
+# ── pre-staged long measurements (design §3, step 4) ─────────────────────────
+# The gate's job here is to stop RE-RUNNING a measurement the pre-stage already
+# made, without ever accepting a result it cannot bind to the tree it is judging.
+# Every test below is about one of those two halves.
+
+
+def _git(workdir, *args):
+    subprocess.run(
+        ["git", "-C", workdir, "-c", "user.email=t@t", "-c", "user.name=t"]
+        + list(args),
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def staged_project(tmp_path, entries_for):
+    """A git-backed, declared-only project with its run artifacts git-ignored.
+
+    `.wiggum/` is ignored on purpose: the plan, the pre-stage evidence and the
+    gate evidence all live there, and an un-ignored run directory would leave the
+    tree permanently dirty — which (correctly) refuses every reuse.
+    """
+    workdir = tmp_path / "repo"
+    workdir.mkdir(exist_ok=True)
+    (workdir / "SPECS.md").write_text(SPEC)
+    (workdir / ".gitignore").write_text(".wiggum/\n")
+    document = workdir / "verification-commands.json"
+    document.write_text(json.dumps(
+        {"schema_version": "1.0.0", "commands": entries_for(str(workdir))}
+    ))
+    subprocess.run(["git", "init", "-q", str(workdir)], check=True)
+    _git(str(workdir), "add", "-A")
+    _git(str(workdir), "commit", "-qm", "initial")
+
+    plan = verification_plan.create_plan(
+        str(workdir), str(workdir / "SPECS.md"), commands_path=str(document)
+    )
+    run_dir = workdir / ".wiggum" / "verification"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _markdown, plan_path = verification_plan.persist_plan(
+        plan, str(run_dir / "TEST_PLAN.md"), str(run_dir / "verification-plan.json")
+    )
+    assert subprocess.run(
+        ["git", "-C", str(workdir), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == "", "the fixture must start from a clean tree"
+    return str(workdir), plan, plan_path, str(run_dir)
+
+
+def counting_entry(workdir, witness, **over):
+    """A declared command that records every execution, so re-runs are countable."""
+    entry = {
+        "id": "p1-live",
+        "phase": 1,
+        "executable": sys.executable,
+        "args": ["-c", "open(%r, 'a').write('ran\\n')" % witness],
+        "cwd": workdir,
+        "timeoutSec": 60,
+        "stage": "prestage",
+    }
+    entry.update(over)
+    return entry
+
+
+def phase2_entry(workdir, **over):
+    entry = {
+        "id": "p2-noop",
+        "phase": 2,
+        "executable": sys.executable,
+        "args": ["-c", "pass"],
+        "cwd": workdir,
+        "timeoutSec": 60,
+    }
+    entry.update(over)
+    return entry
+
+
+def run_prestage_cli(plan_path, phase, attempt):
+    return verification_plan.main(
+        ["prestage", "--plan", plan_path, "--phase", str(phase),
+         "--attempt", str(attempt)]
+    )
+
+
+def test_pre_stage_commands_run_once_before_the_proposer(tmp_path):
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness)), phase2_entry(w)],
+    )
+    assert run_prestage_cli(plan_path, 1, 1) == 0
+    assert witness.read_text().count("ran") == 1
+
+    written = os.path.join(prestage_dir, "prestage-phase-1-attempt-1.json")
+    document = json.loads(open(written).read())
+    assert document["kind"] == verification_plan.PRESTAGE_KIND
+    assert document["phase"] == 1 and document["attempt"] == 1
+    assert document["planHash"] == plan["contentHash"]
+    assert [c["declaredId"] for c in document["commands"]] == ["p1-live"]
+    assert document["passed"] is True
+
+    # Pre-staging is deliberately NOT cumulative: phase 2's pre-stage must not
+    # re-run phase 1's long measurement.
+    assert run_prestage_cli(plan_path, 2, 1) == 0
+    assert witness.read_text().count("ran") == 1
+    assert verification_plan.prestage_commands(plan, 2) == []
+
+
+def test_gate_reuses_a_passing_prestage_at_the_same_revision(tmp_path):
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness)), phase2_entry(w)],
+    )
+    run_prestage_cli(plan_path, 1, 1)
+    evidence = verification_plan.run_gate(
+        plan, 1, attempt=1, prestage_dir=prestage_dir
+    )
+    assert evidence["passed"] is True
+    record = next(c for c in evidence["commands"] if c.get("declaredId") == "p1-live")
+    assert record["reused"] is True
+    assert record["exitCode"] == 0
+    # The whole point: the gate did NOT execute it a second time.
+    assert witness.read_text().count("ran") == 1
+
+    # Reuse is scoped to the attempt by default: attempt 2's gate re-runs it.
+    verification_plan.run_gate(plan, 1, attempt=2, prestage_dir=prestage_dir)
+    assert witness.read_text().count("ran") == 2
+
+
+def test_a_dirty_tree_refuses_reuse(tmp_path):
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness)), phase2_entry(w)],
+    )
+    run_prestage_cli(plan_path, 1, 1)
+    assert witness.read_text().count("ran") == 1
+
+    open(os.path.join(workdir, "uncommitted.txt"), "w").write(
+        "the proposer edited the tree"
+    )
+    evidence = verification_plan.run_gate(
+        plan, 1, attempt=1, prestage_dir=prestage_dir
+    )
+    record = next(c for c in evidence["commands"] if c.get("declaredId") == "p1-live")
+    assert "reused" not in record and "reusedFrom" not in record
+    assert evidence["sourceRevision"]["workingTreeDirty"] is True
+    assert witness.read_text().count("ran") == 2, "a dirty tree must re-run it"
+
+
+def test_a_moved_revision_refuses_reuse(tmp_path):
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness)), phase2_entry(w)],
+    )
+    run_prestage_cli(plan_path, 1, 1)
+    assert witness.read_text().count("ran") == 1
+
+    open(os.path.join(workdir, "code.txt"), "w").write("new work")
+    _git(workdir, "add", "-A")
+    _git(workdir, "commit", "-qm", "the proposer committed")
+    evidence = verification_plan.run_gate(
+        plan, 1, attempt=1, prestage_dir=prestage_dir
+    )
+    record = next(c for c in evidence["commands"] if c.get("declaredId") == "p1-live")
+    assert "reusedFrom" not in record
+    assert witness.read_text().count("ran") == 2, "a moved revision must re-run it"
+
+
+def test_reused_evidence_records_where_it_came_from(tmp_path):
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness)), phase2_entry(w)],
+    )
+    run_prestage_cli(plan_path, 1, 1)
+    evidence = verification_plan.run_gate(
+        plan, 1, attempt=1, prestage_dir=prestage_dir
+    )
+    record = next(c for c in evidence["commands"] if c.get("declaredId") == "p1-live")
+    provenance = record["reusedFrom"]
+    # The gate document must never claim an execution it did not observe.
+    assert provenance["evidencePath"] == os.path.join(
+        prestage_dir, "prestage-phase-1-attempt-1.json"
+    )
+    assert os.path.isfile(provenance["evidencePath"])
+    assert provenance["phase"] == 1 and provenance["attempt"] == 1
+    assert provenance["stage"] == "prestage"
+    assert provenance["reusePolicy"] == "per-attempt"
+    assert provenance["planHash"] == plan["contentHash"]
+    assert provenance["revision"] == evidence["sourceRevision"]["revision"]
+    assert provenance["workingTreeDirty"] is False
+
+
+def test_non_cumulative_command_is_absent_from_later_phase_gates(tmp_path):
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [
+            counting_entry(w, str(witness), stage="gate", cumulative=False),
+            phase2_entry(w),
+        ],
+    )
+    gates = {g["id"]: g for g in plan["gates"]}
+    command = next(c for c in plan["commands"] if c.get("declaredId") == "p1-live")
+    assert command["id"] not in (gates["GATE-phase-1"].get("excludedCommandRefs") or [])
+    assert command["id"] in gates["GATE-phase-2"]["excludedCommandRefs"]
+
+    # Its own phase still gates it; the later phase does not re-run it; release does.
+    assert [c.get("declaredId") for c in
+            verification_plan.run_gate(plan, 1)["commands"]] == ["p1-live"]
+    assert witness.read_text().count("ran") == 1
+    assert [c.get("declaredId") for c in
+            verification_plan.run_gate(plan, 2)["commands"]] == ["p2-noop"]
+    assert witness.read_text().count("ran") == 1
+    assert "p1-live" in [
+        c.get("declaredId")
+        for c in verification_plan.run_gate(plan, "release")["commands"]
+    ]
+    assert witness.read_text().count("ran") == 2
+
+    # A weakening of the cumulative-regression property is REPORTED, never inferred.
+    assert any(
+        "non-cumulative" in assumption and "p1-live" in assumption
+        for assumption in plan["assumptions"]
+    ), plan["assumptions"]
+
+
+def test_prestage_report_names_exit_code_duration_and_report_path(tmp_path):
+    witness = tmp_path / "witness.txt"
+    report_rel = "runs/live-report.md"
+
+    def entries(workdir):
+        report_abs = os.path.join(workdir, report_rel)
+        return [
+            counting_entry(
+                workdir,
+                str(witness),
+                args=["-c", "import os; os.makedirs(%r, exist_ok=True); "
+                      "open(%r, 'w').write('live results')"
+                      % (os.path.dirname(report_abs), report_abs)],
+                reportPath=report_rel,
+            ),
+            phase2_entry(workdir),
+        ]
+
+    workdir, plan, plan_path, prestage_dir = staged_project(tmp_path, entries)
+    run_prestage_cli(plan_path, 1, 1)
+    block = verification_plan.prestage_report(plan, 1, prestage_dir)
+    assert "Exit code: 0" in block
+    assert "Duration:" in block
+    assert report_rel in block
+    assert "present" in block
+    assert "Do NOT" in block and "re-run" in block
+    assert "p1-live" in block
+
+    # The same block reaches the proposer through the slice the prompt embeds.
+    sliced = verification_plan.render_phase_context(
+        plan, 1, prestage_dir=prestage_dir
+    )
+    assert report_rel in sliced
+    assert "Pre-staged verification" in sliced
+    # …and nothing is added for a caller with no pre-stage directory.
+    assert "Pre-staged verification" not in verification_plan.render_phase_context(
+        plan, 1
+    )
+
+
+def test_stage_both_keeps_the_gate_check(tmp_path):
+    """`both` says what it means: pre-staged for the pass AND run at the gate."""
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness), stage="both"), phase2_entry(w)],
+    )
+    run_prestage_cli(plan_path, 1, 1)
+    assert witness.read_text().count("ran") == 1
+    verification_plan.run_gate(plan, 1, attempt=1, prestage_dir=prestage_dir)
+    assert witness.read_text().count("ran") == 2
+
+
+def test_a_gate_only_command_is_untouched_by_the_prestage(tmp_path):
+    """No `stage` must behave byte-identically to today."""
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [counting_entry(w, str(witness), stage="gate"), phase2_entry(w)],
+    )
+    assert verification_plan.prestage_commands(plan, 1) == []
+    assert run_prestage_cli(plan_path, 1, 1) == 0
+    assert not witness.exists()
+    assert not os.path.exists(
+        os.path.join(prestage_dir, "prestage-phase-1-attempt-1.json")
+    )
+    record = next(
+        c for c in verification_plan.run_gate(
+            plan, 1, attempt=1, prestage_dir=prestage_dir
+        )["commands"]
+        if c.get("declaredId") == "p1-live"
+    )
+    assert "reused" not in record
+    assert witness.read_text().count("ran") == 1
+
+
+def test_staging_fields_join_the_command_id_seed(tmp_path):
+    workdir, specs = project(tmp_path)
+    plain = verification_plan.create_plan(
+        workdir, specs,
+        commands_path=commands_document(tmp_path, [declared_entry(tmp_path)]),
+    )
+    defaults = verification_plan.create_plan(
+        workdir, specs,
+        commands_path=commands_document(
+            tmp_path,
+            [declared_entry(
+                tmp_path, stage="gate", reusePolicy="per-attempt", cumulative=True
+            )],
+        ),
+    )
+    staged = verification_plan.create_plan(
+        workdir, specs,
+        commands_path=commands_document(
+            tmp_path, [declared_entry(tmp_path, stage="prestage")]
+        ),
+    )
+
+    def declared_id(plan):
+        return next(c for c in plan["commands"] if c.get("source") == "declared")["id"]
+
+    # Spelling the defaults out changes nothing — an existing document keeps the
+    # command ids it has today.
+    assert declared_id(defaults) == declared_id(plain)
+    # Moving a command to the pre-stage makes it a different command, so a reuse
+    # record keyed on the old id cannot satisfy the new one.
+    assert declared_id(staged) != declared_id(plain)
+    # "pre" is accepted as a spelling of "prestage" and normalizes to the same
+    # command, so a document cannot get two identities for one intent.
+    alias = verification_plan.create_plan(
+        workdir, specs,
+        commands_path=commands_document(
+            tmp_path, [declared_entry(tmp_path, stage="pre")]
+        ),
+    )
+    assert declared_id(alias) == declared_id(staged)
+
+
+def test_malformed_staging_fields_are_refused(tmp_path):
+    workdir, specs = project(tmp_path)
+    for over, expected in [
+        ({"stage": "later"}, "stage must be one of"),
+        ({"stage": 3}, "stage must be one of"),
+        ({"reusePolicy": "forever"}, "reusePolicy must be one of"),
+        ({"reportPath": "/absolute/report.md"}, "workdir-relative"),
+        ({"reportPath": ""}, "non-empty string"),
+        ({"detached": "yes"}, "detached must be a boolean"),
+        ({"cumulative": "no"}, "cumulative must be a boolean"),
+        ({"detached": True}, "detached requires stage"),
+    ]:
+        document = commands_document(tmp_path, [declared_entry(tmp_path, **over)])
+        with pytest.raises(verification_plan.VerificationError) as excinfo:
+            verification_plan.create_plan(workdir, specs, commands_path=document)
+        assert expected in str(excinfo.value), (over, str(excinfo.value))
+
+
+def test_a_detached_prestage_is_launched_and_adopted_when_it_finishes(tmp_path):
+    """A detached pre-stage is a job Wiggum owns: it is launched, not waited on,
+    and its result is adopted the next time the document is read."""
+    witness = tmp_path / "witness.txt"
+    workdir, plan, plan_path, prestage_dir = staged_project(
+        tmp_path,
+        lambda w: [
+            counting_entry(
+                w, str(witness),
+                detached=True,
+                args=["-c", "import time; time.sleep(1); "
+                      "open(%r, 'a').write('ran\\n')" % str(witness)],
+            ),
+            phase2_entry(w),
+        ],
+    )
+    assert run_prestage_cli(plan_path, 1, 1) == 11  # nothing has passed YET
+    written = os.path.join(prestage_dir, "prestage-phase-1-attempt-1.json")
+    record = json.loads(open(written).read())["commands"][0]
+    assert record["state"] == "running" and record["pid"]
+    assert record["deadlineSec"] == 60
+    assert "STILL RUNNING" in verification_plan.prestage_report(plan, 1, prestage_dir)
+
+    deadline = time.time() + 30
+    while time.time() < deadline and not witness.exists():
+        time.sleep(0.2)
+    time.sleep(0.5)
+    verification_plan.prestage_report(plan, 1, prestage_dir)  # refreshes in place
+    refreshed = json.loads(open(written).read())["commands"][0]
+    assert refreshed["state"] == "completed"
+    assert refreshed["exitCode"] == 0 and refreshed["passed"] is True
+    # …and the finished job's result is now reusable, exactly like a blocking one.
+    evidence = verification_plan.run_gate(
+        plan, 1, attempt=1, prestage_dir=prestage_dir
+    )
+    reused = next(c for c in evidence["commands"] if c.get("declaredId") == "p1-live")
+    assert reused["reusedFrom"]["attempt"] == 1
+    assert witness.read_text().count("ran") == 1

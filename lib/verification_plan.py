@@ -44,6 +44,33 @@ NO_TEST_COMMAND_AMBIGUITY = (
     "verification cannot start until one is configured"
 )
 
+# ── pre-staged long measurements (design 02-wiggum-loop-design.md §3) ────────
+# A declared command may name the stage it runs at. "prestage" runs it ONCE per
+# attempt, before the proposer, so the pass can read its report instead of
+# re-running a 93-minute measurement the gate will then run again. "both" keeps
+# the gate check as well. "pre" is accepted as a spelling of "prestage".
+DEFAULT_STAGE = "gate"
+STAGE_ALIASES = {
+    "gate": "gate",
+    "pre": "prestage",
+    "prestage": "prestage",
+    "both": "both",
+}
+PRESTAGE_STAGES = ("prestage", "both")
+# How long a PASSING pre-stage result may satisfy a gate. Attempt scope is the
+# default because it is the narrowest thing that still removes the duplication.
+DEFAULT_REUSE_POLICY = "per-attempt"
+REUSE_POLICIES = ("per-attempt", "per-phase", "per-run")
+DEFAULT_STAGING = {
+    "stage": DEFAULT_STAGE,
+    "reportPath": None,
+    "reusePolicy": DEFAULT_REUSE_POLICY,
+    "detached": False,
+    "cumulative": True,
+}
+PRESTAGE_KIND = "wiggum-prestage-evidence"
+PRESTAGE_PREFIX = "prestage-phase-"
+
 
 class VerificationError(Exception):
     pass
@@ -241,6 +268,40 @@ def _declared_entry_command(entry, index, environ):
     ):
         raise bad("env must be an object of string to string")
 
+    # ── pre-staged long measurements (design §3) ────────────────────────────
+    # All five are optional and default to exactly today's behaviour: a phase gate
+    # executes the command itself, cumulatively, blocking, with nothing reused.
+    raw_stage = entry.get("stage", DEFAULT_STAGE)
+    if not isinstance(raw_stage, str) or raw_stage not in STAGE_ALIASES:
+        raise bad(
+            "stage must be one of %s"
+            % ", ".join(json.dumps(value) for value in sorted(STAGE_ALIASES))
+        )
+    stage = STAGE_ALIASES[raw_stage]
+    report_path = entry.get("reportPath")
+    if report_path is not None:
+        if not isinstance(report_path, str) or not report_path.strip():
+            raise bad("reportPath must be a non-empty string")
+        if os.path.isabs(report_path):
+            raise bad("reportPath must be workdir-relative, not absolute")
+    reuse_policy = entry.get("reusePolicy", DEFAULT_REUSE_POLICY)
+    if reuse_policy not in REUSE_POLICIES:
+        raise bad(
+            "reusePolicy must be one of %s"
+            % ", ".join(json.dumps(value) for value in REUSE_POLICIES)
+        )
+    detached = entry.get("detached", False)
+    if not isinstance(detached, bool):
+        raise bad("detached must be a boolean")
+    cumulative = entry.get("cumulative", True)
+    if not isinstance(cumulative, bool):
+        raise bad("cumulative must be a boolean")
+    # `detached` is only meaningful for a command the pre-stage launches. Accepting
+    # it on a gate-only command would silently ignore it, which is the failure mode
+    # this whole document exists to end.
+    if detached and stage == "gate":
+        raise bad("detached requires stage \"prestage\" or \"both\"")
+
     # A bare name is resolved to an absolute path HERE, at plan time, so the plan
     # records what will actually be executed. Unresolvable fails closed: a declared
     # command silently dropped is the failure mode this whole flag exists to end.
@@ -266,14 +327,37 @@ def _declared_entry_command(entry, index, environ):
     command["phase"] = phase
     if env:
         command["env"] = dict(env)
+    staging = {
+        "stage": stage,
+        "reportPath": report_path,
+        "reusePolicy": reuse_policy,
+        "detached": detached,
+        "cumulative": cumulative,
+    }
+    if stage != DEFAULT_STAGE:
+        command["stage"] = stage
+    if report_path:
+        command["reportPath"] = report_path
+    if reuse_policy != DEFAULT_REUSE_POLICY:
+        command["reusePolicy"] = reuse_policy
+    if detached:
+        command["detached"] = True
+    if not cumulative:
+        command["cumulative"] = False
     # _command() seeds its id on kind/executable/args/cwd alone. Two declared entries
     # that differ only in id, phase or env would collapse onto one command id and one
-    # of them would silently never run, so the declared identity joins the seed.
-    command["id"] = stable_id(
-        "CMD",
-        "declared:%s:%s:%s:%s:%s:%s"
-        % (declared_id, phase, resolved, json.dumps(args), cwd, canonical_json(env)),
+    # of them would silently never run, so the declared identity joins the seed. The
+    # staging fields join it the same way — a command that moves to the pre-stage, or
+    # stops being cumulative, is a different command as far as reuse (which is keyed
+    # on the command id) is concerned. The segment is appended ONLY when something is
+    # non-default, so a document that uses none of these fields keeps byte-identically
+    # the ids it has today.
+    seed = "declared:%s:%s:%s:%s:%s:%s" % (
+        declared_id, phase, resolved, json.dumps(args), cwd, canonical_json(env),
     )
+    if staging != DEFAULT_STAGING:
+        seed += ":%s" % canonical_json(staging)
+    command["id"] = stable_id("CMD", seed)
     return command
 
 
@@ -686,6 +770,12 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
     gates = []
     cumulative = []
     suite_ids = []
+    non_cumulative = [
+        command
+        for commands in declared_by_phase.values()
+        for command in commands
+        if command.get("cumulative") is False
+    ]
     for index, phase in enumerate(phases):
         phase_refs = [
             value["id"] for value in obligations if value["phase"] == phase.n
@@ -725,17 +815,29 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
                 "commandRefs": phase_command_refs,
             }
         )
-        gates.append(
-            {
-                "id": "GATE-phase-%s" % phase.n,
-                "scope": "phase",
-                "phase": phase.n,
-                "obligationRefs": list(cumulative),
-                "suiteRefs": list(suite_ids),
-                "cumulative": index > 0,
-                "required": bool(required),
-            }
+        gate = {
+            "id": "GATE-phase-%s" % phase.n,
+            "scope": "phase",
+            "phase": phase.n,
+            "obligationRefs": list(cumulative),
+            "suiteRefs": list(suite_ids),
+            "cumulative": index > 0,
+            "required": bool(required),
+        }
+        # `cumulative: false` relief (design §3.6): suiteRefs stays cumulative — the
+        # earlier phase's suite is still referenced — and the opted-out command is
+        # excluded from LATER phases' gates only. It still gates at its own phase and
+        # at GATE-release (SUITE-release carries every command). The key is omitted
+        # when nothing opted out, so a document that uses none of the new fields
+        # produces byte-identically the plan it produces today.
+        excluded = sorted(
+            command["id"]
+            for command in non_cumulative
+            if command["phase"] != phase.n
         )
+        if excluded:
+            gate["excludedCommandRefs"] = excluded
+        gates.append(gate)
     ambiguities = list(discovery["ambiguities"])
     extra_assumptions = []
     if declared_by_phase:
@@ -763,6 +865,31 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
                 "Phase(s) %s have neither a discovered nor a declared verification "
                 "command; their gates would execute nothing"
                 % ", ".join(str(value) for value in uncovered)
+            )
+        # `cumulative: false` is a real weakening of the cumulative-regression
+        # property: later gates stop re-running the command. It is opt-in per
+        # command and it is REPORTED here, never inferred — a reader of the plan
+        # must be able to see which regressions this run stopped re-checking.
+        if non_cumulative:
+            extra_assumptions.append(
+                "Declared command(s) %s are non-cumulative (cumulative: false): "
+                "they gate at their own phase and at GATE-release only, and later "
+                "phase gates do not re-run them."
+                % ", ".join(sorted(c["declaredId"] for c in non_cumulative))
+            )
+        pre_staged = [
+            command
+            for commands in declared_by_phase.values()
+            for command in commands
+            if command.get("stage") in PRESTAGE_STAGES
+        ]
+        if pre_staged:
+            extra_assumptions.append(
+                "Declared command(s) %s are pre-staged: they run once per attempt "
+                "before the proposer, and a PASSING pre-stage may satisfy the gate "
+                "at the same revision with a clean tree (the gate records where the "
+                "result came from)."
+                % ", ".join(sorted(c["declaredId"] for c in pre_staged))
             )
     all_refs = [value["id"] for value in obligations]
     all_commands = list(discovery["commands"]) + (
@@ -906,7 +1033,7 @@ def load_plan(path, expected_specs=None):
     return validate_plan(_read_json(path), expected_specs)
 
 
-def render_phase_context(plan, phase):
+def render_phase_context(plan, phase, prestage_dir=None):
     gates = [
         value
         for value in plan["gates"]
@@ -995,6 +1122,14 @@ def render_phase_context(plan, phase):
         "The phase evidence must map every obligation above to independently "
         "observable evidence."
     )
+    # The pre-stage report rides on the slice the proposer prompt already embeds
+    # (orchestrator.sh:1310-1318), so the report reaches the pass without a second
+    # orchestrator call site. The documents live beside the plan; `prestage_dir`
+    # is None for every caller that has no pre-stage, and then nothing is added.
+    if prestage_dir:
+        report = prestage_report(plan, phase, prestage_dir)
+        if report:
+            lines.extend(["", report.rstrip()])
     return "\n".join(lines)
 
 
@@ -1310,7 +1445,570 @@ def _output_text(value):
     return str(value)
 
 
-def run_gate(plan, phase):
+def _execute_command(command):
+    """Run one command to completion and return its evidence record.
+
+    Lifted verbatim out of run_gate's loop so the gate and the pre-stage produce
+    byte-comparable records: the same env overlay, the same timeout/OSError
+    handling, the same field names. Nothing here knows which caller it serves.
+    """
+    started = time.monotonic()
+    # A declared command may need environment the orchestrator does not carry
+    # (ADLC_SPECIALIST_SOURCE=fixture and the like). It is an overlay, never a
+    # replacement: PATH and the rest of the run's environment still apply.
+    command_env = os.environ.copy()
+    command_env.update(command.get("env") or {})
+    try:
+        result = subprocess.run(
+            [command["executable"]] + command["args"],
+            cwd=command["cwd"],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=command["timeoutSec"],
+            env=command_env,
+        )
+        code = result.returncode
+        stdout = (result.stdout or "")[:64000]
+        stderr = (result.stderr or "")[:64000]
+        signal = None
+    except subprocess.TimeoutExpired as exc:
+        code = None
+        stdout = _output_text(exc.stdout)[:64000]
+        stderr = (_output_text(exc.stderr) + "\ncommand timed out")[:64000]
+        signal = "TIMEOUT"
+    except OSError as exc:
+        code = None
+        stdout = ""
+        stderr = str(exc)
+        signal = "EXEC_ERROR"
+    return {
+        "commandId": command["id"],
+        "declaredId": command.get("declaredId"),
+        "source": command.get("source", "discovered"),
+        "executable": command["executable"],
+        "args": command["args"],
+        "env": dict(command.get("env") or {}),
+        "cwd": command["cwd"],
+        "exitCode": code,
+        "signal": signal,
+        "durationMs": int((time.monotonic() - started) * 1000),
+        "stdout": stdout,
+        "stderr": stderr,
+        "passed": code == 0,
+    }
+
+
+def _run_commands(selected, workdir, declared_artifacts=(), reuse=None,
+                  launch=None):
+    """Execute a selection of plan commands and return (evidence, buildArtifacts).
+
+    `reuse(command)` may return a ready-made evidence record (a pre-stage result
+    the gate is allowed to adopt) instead of an execution; `launch(command)` may
+    return a record for a command started detached rather than run to completion.
+    Both default to None, which is exactly today's behaviour: run everything.
+    """
+    evidence = []
+    build_artifacts = []
+    for command in selected:
+        record = reuse(command) if reuse else None
+        if record is None and launch and command.get("detached"):
+            record = launch(command)
+        if record is None:
+            wall_start = time.time()
+            record = _execute_command(command)
+            # W12: after a successful build, stat every declared artifact. `fresh` = the
+            # file exists AND was (re)written at/after the build started — proof this
+            # build produced it, not a stale leftover. This is recorded for the gate to
+            # surface; it does not itself fail the gate (a build that exits 0 but emits
+            # nothing is caught upstream).
+            if command["kind"] == "build" and record["exitCode"] == 0 and declared_artifacts:
+                for rel in declared_artifacts:
+                    abs_path = os.path.join(workdir, rel)
+                    try:
+                        st = os.stat(abs_path)
+                        exists, mtime, size = True, st.st_mtime, st.st_size
+                    except OSError:
+                        exists, mtime, size = False, None, None
+                    build_artifacts.append(
+                        {
+                            "commandId": command["id"],
+                            "path": rel,
+                            "absPath": abs_path,
+                            "exists": exists,
+                            "sizeBytes": size,
+                            "mtimeEpoch": mtime,
+                            "fresh": bool(exists and mtime is not None
+                                          and mtime >= wall_start - 1),
+                        }
+                    )
+        evidence.append(record)
+    return evidence, build_artifacts
+
+
+# ── pre-staged long measurements: run once, reuse under fail-closed rules ────
+# The design's fact (f): a phase-15 gate re-executes a 93-minute live suite the
+# proposer already ran, module by module, 2–4 times per attempt. The commands
+# already live in the declared verification document, so the fix lives there too:
+# a command may be staged BEFORE the proposer, once per attempt, and its PASSING
+# result may satisfy the gate — but only at the same revision, with a clean tree,
+# and only with the provenance of where the result came from recorded.
+
+_DETACHED_SHIM = r"""
+import json, os, subprocess, sys, time
+spec = json.loads(sys.argv[1])
+env = os.environ.copy()
+env.update(spec["env"])
+started = time.time()
+signal_name = None
+try:
+    code = subprocess.call(spec["argv"], cwd=spec["cwd"], env=env)
+except OSError as exc:
+    code = None
+    signal_name = "EXEC_ERROR"
+    sys.stderr.write("%s\n" % exc)
+    sys.stderr.flush()
+finished = time.time()
+status = {
+    "exitCode": code,
+    "signal": signal_name,
+    "startedAtEpoch": int(started),
+    "finishedAtEpoch": int(finished),
+    "durationMs": int((finished - started) * 1000),
+}
+temporary = spec["status"] + ".tmp"
+with open(temporary, "w") as handle:
+    json.dump(status, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, spec["status"])
+"""
+
+
+def prestage_commands(plan, phase):
+    """This phase's pre-stage commands, in document order.
+
+    Deliberately NOT cumulative: cumulative pre-staging would re-run every earlier
+    phase's long measurement before every later phase, which is the cost this whole
+    mechanism exists to remove.
+    """
+    return [
+        command
+        for command in plan["commands"]
+        if command.get("phase") == phase
+        and command.get("stage", DEFAULT_STAGE) in PRESTAGE_STAGES
+    ]
+
+
+def _prestage_path(prestage_dir, phase, attempt):
+    return os.path.join(
+        prestage_dir, "%s%s-attempt-%s.json" % (PRESTAGE_PREFIX, phase, attempt)
+    )
+
+
+def _tail_file(path, limit=64000):
+    if not path or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _launch_detached(command, prestage_dir, phase, attempt):
+    """Start a pre-stage command as a job Wiggum owns, and return its record.
+
+    The job is its own session (`start_new_session`) with stdin closed, exactly as
+    `wiggum-lib.sh:309-313` launches a long job, so killing the pass — or this
+    process — cannot reach it. The deadline gets the same treatment the design
+    gives a yield: it is polled, never enforced with a signal; an expired deadline
+    is REPORTED with the job left running and its log named.
+    """
+    base = _safe_name(
+        "%s-attempt-%s-%s" % (phase, attempt, command.get("declaredId") or command["id"])
+    )
+    logs = os.path.join(prestage_dir, "prestage-logs")
+    os.makedirs(logs, exist_ok=True)
+    log_path = os.path.join(logs, base + ".log")
+    status_path = os.path.join(logs, base + ".status.json")
+    for stale in (log_path, status_path):
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+    spec = {
+        "argv": [command["executable"]] + command["args"],
+        "cwd": command["cwd"],
+        "env": dict(command.get("env") or {}),
+        "status": status_path,
+    }
+    started = time.time()
+    pid = None
+    signal_name = None
+    stderr = ""
+    state = "running"
+    try:
+        with open(log_path, "wb") as log_handle, open(os.devnull, "rb") as devnull:
+            process = subprocess.Popen(
+                [sys.executable, "-c", _DETACHED_SHIM, json.dumps(spec)],
+                cwd=command["cwd"],
+                stdin=devnull,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        pid = process.pid
+    except OSError as exc:
+        state = "completed"
+        signal_name = "EXEC_ERROR"
+        stderr = str(exc)
+    return {
+        "commandId": command["id"],
+        "declaredId": command.get("declaredId"),
+        "source": command.get("source", "discovered"),
+        "executable": command["executable"],
+        "args": command["args"],
+        "env": dict(command.get("env") or {}),
+        "cwd": command["cwd"],
+        "exitCode": None,
+        "signal": signal_name,
+        "durationMs": 0,
+        "stdout": "",
+        "stderr": stderr,
+        "passed": False,
+        "detached": True,
+        "state": state,
+        "pid": pid,
+        "logPath": log_path,
+        "statusPath": status_path,
+        "deadlineSec": command["timeoutSec"],
+        "deadlineEpoch": int(started + command["timeoutSec"]),
+        "startedAtEpoch": int(started),
+    }
+
+
+def _refresh_detached_record(record):
+    """Adopt a detached job's outcome, or report its expired deadline. True if moved."""
+    if record.get("state") not in ("running", "deadline_exceeded"):
+        return False
+    status_path = record.get("statusPath")
+    if status_path and os.path.isfile(status_path):
+        try:
+            status = _read_json(status_path)
+        except VerificationError:
+            status = {}
+        record["exitCode"] = status.get("exitCode")
+        record["signal"] = status.get("signal")
+        record["durationMs"] = int(status.get("durationMs") or 0)
+        record["startedAtEpoch"] = status.get(
+            "startedAtEpoch", record.get("startedAtEpoch")
+        )
+        record["finishedAtEpoch"] = status.get("finishedAtEpoch")
+        record["stdout"] = _tail_file(record.get("logPath"))
+        record["stderr"] = ""
+        record["passed"] = record["exitCode"] == 0
+        record["state"] = "completed"
+        return True
+    if record.get("state") == "deadline_exceeded":
+        return False
+    deadline = record.get("deadlineEpoch")
+    if deadline is not None and time.time() > deadline:
+        record["state"] = "deadline_exceeded"
+        record["signal"] = "DEADLINE"
+        record["passed"] = False
+        record["stdout"] = _tail_file(record.get("logPath"))
+        record["stderr"] = (
+            "detached pre-stage exceeded its %ss deadline; the job was LEFT RUNNING "
+            "(pid %s, log %s). Wiggum never kills a job it launched on a deadline."
+            % (record.get("deadlineSec"), record.get("pid"), record.get("logPath"))
+        )
+        return True
+    return False
+
+
+def _prestage_summary(document):
+    states = [record.get("state", "completed") for record in document["commands"]]
+    return (
+        "Pre-stage phase %s attempt %s: %d command(s), %d passed, %d running, "
+        "%d failed"
+        % (
+            document.get("phase"),
+            document.get("attempt"),
+            len(document["commands"]),
+            sum(1 for record in document["commands"] if record.get("passed")),
+            sum(1 for state in states if state == "running"),
+            sum(
+                1
+                for record in document["commands"]
+                if not record.get("passed")
+                and record.get("state", "completed") != "running"
+            ),
+        )
+    )
+
+
+def _refresh_prestage_document(document, path=None):
+    moved = False
+    for record in document.get("commands", []):
+        if _refresh_detached_record(record):
+            moved = True
+    if moved:
+        document["passed"] = all(
+            record.get("passed") for record in document["commands"]
+        )
+        document["summary"] = _prestage_summary(document)
+        if path:
+            try:
+                _write_evidence(path, document, overwrite=True)
+            except (VerificationError, OSError):
+                pass  # reporting must never fail on an unwritable artifact
+    return document
+
+
+def _prestage_documents(prestage_dir, plan_hash=None, phase=None):
+    """Pre-stage documents beside the plan, most recent phase/attempt first."""
+    if not prestage_dir or not os.path.isdir(prestage_dir):
+        return []
+    found = []
+    for name in sorted(os.listdir(prestage_dir)):
+        if not name.startswith(PRESTAGE_PREFIX) or not name.endswith(".json"):
+            continue
+        path = os.path.join(prestage_dir, name)
+        try:
+            document = _read_json(path)
+        except VerificationError:
+            continue
+        if document.get("kind") != PRESTAGE_KIND:
+            continue
+        if plan_hash is not None and document.get("planHash") != plan_hash:
+            continue
+        if phase is not None and document.get("phase") != phase:
+            continue
+        found.append((path, _refresh_prestage_document(document, path)))
+    found.sort(
+        key=lambda item: (
+            item[1].get("phase") or 0,
+            item[1].get("attempt") or 0,
+            item[1].get("startedAtEpoch") or 0,
+        ),
+        reverse=True,
+    )
+    return found
+
+
+def run_prestage(plan, phase, attempt, prestage_dir):
+    """Run this phase's pre-stage commands ONCE, before the proposer pass."""
+    selected = prestage_commands(plan, phase)
+    workdir = plan.get("project", {}).get("workdir", "")
+    source_revision = _git_revision(workdir)
+    started = time.time()
+    evidence, _artifacts = _run_commands(
+        selected,
+        workdir,
+        (),
+        launch=lambda command: _launch_detached(
+            command, prestage_dir, phase, attempt
+        ),
+    )
+    for record, command in zip(evidence, selected):
+        record.setdefault("state", "completed")
+        record.setdefault("startedAtEpoch", int(started))
+        record["stage"] = command.get("stage", DEFAULT_STAGE)
+        record["reusePolicy"] = command.get("reusePolicy", DEFAULT_REUSE_POLICY)
+        record["cumulative"] = command.get("cumulative", True)
+        report = command.get("reportPath")
+        if report:
+            absolute = os.path.join(workdir, report)
+            record["reportPath"] = report
+            record["reportAbsPath"] = absolute
+            record["reportExists"] = os.path.exists(absolute)
+    document = {
+        "kind": PRESTAGE_KIND,
+        "version": 1,
+        "planId": plan["id"],
+        "planHash": plan["contentHash"],
+        "phase": phase,
+        "attempt": attempt,
+        "sourceRevision": source_revision,
+        "startedAtEpoch": int(started),
+        "finishedAtEpoch": int(time.time()),
+        "commands": evidence,
+        "passed": all(record.get("passed") for record in evidence),
+    }
+    document["summary"] = _prestage_summary(document)
+    return document
+
+
+def _prestage_reuse(plan, gate, source_revision, attempt, prestage_dir):
+    """The gate's reuse rule, or None when nothing may be reused.
+
+    Ranked residual risk #1 of the design: this is the only change in the whole
+    step that can make a gate accept a result it did not observe. It therefore
+    FAILS CLOSED on every question it cannot answer — an unavailable revision, a
+    revision that moved, a dirty tree, an unknown attempt under the default
+    per-attempt scope, a pre-stage that did not pass, one still running — and
+    every adopted record carries `reusedFrom` naming the document it came from,
+    so the gate evidence never claims an execution it did not perform.
+    """
+    if not prestage_dir:
+        return None
+    revision = (source_revision or {}).get("revision")
+    if not (source_revision or {}).get("available") or not revision:
+        return None
+    if source_revision.get("workingTreeDirty") is not False:
+        return None
+    documents = _prestage_documents(prestage_dir, plan_hash=plan["contentHash"])
+    if not documents:
+        return None
+    gate_phase = gate.get("phase")
+
+    def reuse(command):
+        # Only `"prestage"` offers its result to the gate. `"both"` means what it
+        # says — the command is pre-staged for the proposer's benefit AND the gate
+        # still executes it, unconditionally.
+        if command.get("stage", DEFAULT_STAGE) != "prestage":
+            return None
+        policy = command.get("reusePolicy", DEFAULT_REUSE_POLICY)
+        for path, document in documents:
+            document_revision = document.get("sourceRevision") or {}
+            if document_revision.get("revision") != revision:
+                continue
+            if document_revision.get("workingTreeDirty") is not False:
+                continue
+            if policy in ("per-attempt", "per-phase"):
+                if document.get("phase") != gate_phase:
+                    continue
+            if policy == "per-attempt":
+                if attempt is None or document.get("attempt") != attempt:
+                    continue
+            for record in document.get("commands", []):
+                if record.get("commandId") != command["id"]:
+                    continue
+                if record.get("passed") is not True:
+                    continue
+                if record.get("state", "completed") != "completed":
+                    continue
+                adopted = dict(record)
+                adopted["reused"] = True
+                adopted["reusedFrom"] = {
+                    "evidencePath": path,
+                    "stage": record.get("stage", "prestage"),
+                    "phase": document.get("phase"),
+                    "attempt": document.get("attempt"),
+                    "planHash": document.get("planHash"),
+                    "revision": revision,
+                    "workingTreeDirty": False,
+                    "reusePolicy": policy,
+                    "ranAtEpoch": record.get("startedAtEpoch"),
+                    "durationMs": record.get("durationMs"),
+                }
+                return adopted
+        return None
+
+    return reuse
+
+
+def _format_duration(milliseconds):
+    seconds = int((milliseconds or 0) / 1000)
+    if seconds < 60:
+        return "%ds" % seconds
+    return "%dm %02ds" % (seconds // 60, seconds % 60)
+
+
+def prestage_report(plan, phase, prestage_dir, attempt=None):
+    """The prompt block: what already ran, what it produced, and not to re-run it.
+
+    Modelled on `long_job_status_line`'s DONE branch (`wiggum-lib.sh:347-365`),
+    which already says the operative thing: do not re-run it, read its output, and
+    write the gate evidence from what is on disk.
+    """
+    documents = _prestage_documents(
+        prestage_dir, plan_hash=plan["contentHash"], phase=phase
+    )
+    if attempt is not None:
+        documents = [
+            item for item in documents if item[1].get("attempt") == attempt
+        ] or documents
+    if not documents:
+        return ""
+    path, document = documents[0]
+    if not document.get("commands"):
+        return ""
+    commands = {value["id"]: value for value in plan["commands"]}
+    lines = [
+        "## Pre-staged verification for this phase (attempt %s)"
+        % document.get("attempt"),
+        "Wiggum ran these declared commands ONCE, before this pass started. Do NOT "
+        "re-run them and do NOT re-do the work they already did: read their output "
+        "and cite the files they produced directly.",
+        "Pre-stage evidence: `%s`" % path,
+        "",
+    ]
+    for record in document["commands"]:
+        command = commands.get(record["commandId"])
+        state = record.get("state", "completed")
+        name = record.get("declaredId") or record["commandId"]
+        if state == "running":
+            lines.append(
+                "### %s — STILL RUNNING (detached, pid %s)"
+                % (name, record.get("pid"))
+            )
+            lines.append("- Log: `%s`" % record.get("logPath"))
+            lines.append(
+                "- Deadline: %ss. It keeps running after this pass ends. Do NOT poll "
+                "or sleep waiting on it and do NOT re-run it."
+                % record.get("deadlineSec")
+            )
+        elif state == "deadline_exceeded":
+            lines.append("### %s — DEADLINE EXCEEDED (still running)" % name)
+            lines.append("- Log: `%s`" % record.get("logPath"))
+            lines.append(
+                "- It passed its %ss deadline and was LEFT RUNNING (pid %s). Report "
+                "that in PROGRESS.md; do not launch a second copy."
+                % (record.get("deadlineSec"), record.get("pid"))
+            )
+        else:
+            lines.append(
+                "### %s — %s (exit code %s in %s)"
+                % (
+                    name,
+                    "PASSED" if record.get("passed") else "FAILED",
+                    record.get("exitCode"),
+                    _format_duration(record.get("durationMs")),
+                )
+            )
+            lines.append("- Exit code: %s" % record.get("exitCode"))
+            lines.append("- Duration: %s" % _format_duration(record.get("durationMs")))
+        if command:
+            lines.append("- Command: `%s`" % _command_line(command))
+        if record.get("reportPath"):
+            lines.append(
+                "- Report path: `%s` (%s)"
+                % (
+                    record["reportPath"],
+                    "present" if record.get("reportExists") else "NOT WRITTEN",
+                )
+            )
+        if record.get("passed"):
+            lines.append(
+                "- This phase's gate will REUSE this result instead of re-running "
+                "the command — but only at the same revision with a clean tree. If "
+                "you change the tree, the gate re-runs it."
+            )
+        elif state == "completed":
+            lines.append(
+                "- It FAILED. The gate will run it again and fail again until the "
+                "CODE it points at is fixed; re-writing the evidence cannot clear it."
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def run_gate(plan, phase, attempt=None, prestage_dir=None):
     gate = _gate(plan, phase)
     if gate is None:
         return {
@@ -1323,10 +2021,14 @@ def run_gate(plan, phase):
             "summary": "No verification gate exists for %s" % phase,
         }
     suites = {value["id"]: value for value in plan["suites"]}
+    # A command the plan excluded from THIS gate (an earlier phase's
+    # `cumulative: false` command) is still in that phase's suite — the suite is
+    # shared — so the exclusion is applied here, at selection.
+    excluded = set(gate.get("excludedCommandRefs") or [])
     command_ids = []
     for suite_id in gate["suiteRefs"]:
         for command_id in suites.get(suite_id, {}).get("commandRefs", []):
-            if command_id not in command_ids:
+            if command_id not in command_ids and command_id not in excluded:
                 command_ids.append(command_id)
     commands = {value["id"]: value for value in plan["commands"]}
     selected = [commands[value] for value in command_ids if value in commands]
@@ -1353,81 +2055,10 @@ def run_gate(plan, phase):
     workdir = plan.get("project", {}).get("workdir", "")
     declared_artifacts = _workspace_export_artifacts(workdir) if workdir else []
     source_revision = _git_revision(workdir)
-    evidence = []
-    build_artifacts = []
-    for command in selected:
-        started = time.monotonic()
-        wall_start = time.time()
-        # A declared command may need environment the orchestrator does not carry
-        # (ADLC_SPECIALIST_SOURCE=fixture and the like). It is an overlay, never a
-        # replacement: PATH and the rest of the run's environment still apply.
-        command_env = os.environ.copy()
-        command_env.update(command.get("env") or {})
-        try:
-            result = subprocess.run(
-                [command["executable"]] + command["args"],
-                cwd=command["cwd"],
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=command["timeoutSec"],
-                env=command_env,
-            )
-            code = result.returncode
-            stdout = (result.stdout or "")[:64000]
-            stderr = (result.stderr or "")[:64000]
-            signal = None
-        except subprocess.TimeoutExpired as exc:
-            code = None
-            stdout = _output_text(exc.stdout)[:64000]
-            stderr = (_output_text(exc.stderr) + "\ncommand timed out")[:64000]
-            signal = "TIMEOUT"
-        except OSError as exc:
-            code = None
-            stdout = ""
-            stderr = str(exc)
-            signal = "EXEC_ERROR"
-        evidence.append(
-            {
-                "commandId": command["id"],
-                "declaredId": command.get("declaredId"),
-                "source": command.get("source", "discovered"),
-                "executable": command["executable"],
-                "args": command["args"],
-                "env": dict(command.get("env") or {}),
-                "cwd": command["cwd"],
-                "exitCode": code,
-                "signal": signal,
-                "durationMs": int((time.monotonic() - started) * 1000),
-                "stdout": stdout,
-                "stderr": stderr,
-                "passed": code == 0,
-            }
-        )
-        # W12: after a successful build, stat every declared artifact. `fresh` = the file
-        # exists AND was (re)written at/after the build started — proof this build produced
-        # it, not a stale leftover. This is recorded for the gate to surface; it does not
-        # itself fail the gate (a build that exits 0 but emits nothing is caught upstream).
-        if command["kind"] == "build" and code == 0 and declared_artifacts:
-            for rel in declared_artifacts:
-                abs_path = os.path.join(workdir, rel)
-                try:
-                    st = os.stat(abs_path)
-                    exists, mtime, size = True, st.st_mtime, st.st_size
-                except OSError:
-                    exists, mtime, size = False, None, None
-                build_artifacts.append(
-                    {
-                        "commandId": command["id"],
-                        "path": rel,
-                        "absPath": abs_path,
-                        "exists": exists,
-                        "sizeBytes": size,
-                        "mtimeEpoch": mtime,
-                        "fresh": bool(exists and mtime is not None
-                                      and mtime >= wall_start - 1),
-                    }
-                )
+    reuse = _prestage_reuse(plan, gate, source_revision, attempt, prestage_dir)
+    evidence, build_artifacts = _run_commands(
+        selected, workdir, declared_artifacts, reuse=reuse
+    )
     passed = all(value["passed"] for value in evidence)
     return {
         "planId": plan["id"],
@@ -1452,13 +2083,47 @@ def run_gate(plan, phase):
     }
 
 
-def _write_evidence(path, evidence):
+def _write_evidence(path, evidence, overwrite=False):
     if not path:
         return
     if not os.path.isabs(path):
         raise VerificationError("evidence output must be absolute: %s" % path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    _atomic_write(path, json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    content = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    # Gate evidence is written once per (phase, attempt) and _atomic_write's
+    # refusal to overwrite is the right protection there. A pre-stage document for
+    # the SAME attempt is legitimately rewritten — a resumed run re-stages, and a
+    # detached job's record is refreshed in place when it finishes — so that path
+    # asks for the overwrite explicitly rather than losing the refreshed state.
+    if overwrite and os.path.exists(path):
+        os.unlink(path)
+    _atomic_write(path, content)
+
+
+def _prestage_dir(args):
+    """Where pre-stage evidence lives: beside the plan unless told otherwise.
+
+    Defaulting it keeps the orchestrator's call sites untouched — the plan already
+    sits in the run's `verification/` directory next to the gate evidence.
+    """
+    explicit = getattr(args, "prestage_dir", None)
+    if explicit:
+        if not os.path.isabs(explicit):
+            raise VerificationError("--prestage-dir must be absolute: %s" % explicit)
+        return explicit
+    return os.path.dirname(os.path.abspath(args.plan))
+
+
+def _attempt_from_path(path):
+    """The attempt number the orchestrator already encodes in the evidence name.
+
+    `…/verification/phase-7-attempt-2.json` → 2. Unparseable returns None, and an
+    unknown attempt refuses per-attempt reuse — fail closed, never guess.
+    """
+    if not path:
+        return None
+    match = re.search(r"-attempt-(\d+)\b", os.path.basename(path))
+    return int(match.group(1)) if match else None
 
 
 def main(argv=None):
@@ -1488,6 +2153,10 @@ def main(argv=None):
     slice_parser.add_argument("--plan", required=True)
     slice_parser.add_argument("--phase", type=int, required=True)
     slice_parser.add_argument("--specs")
+    slice_parser.add_argument(
+        "--prestage-dir",
+        help="where pre-stage evidence lives (default: beside the plan)",
+    )
 
     scaffold = sub.add_parser("scaffold")
     scaffold.add_argument("--plan", required=True)
@@ -1499,6 +2168,31 @@ def main(argv=None):
     run.add_argument("--phase", required=True)
     run.add_argument("--specs")
     run.add_argument("--evidence-output")
+    run.add_argument(
+        "--attempt",
+        type=int,
+        help="attempt number, for per-attempt pre-stage reuse (default: read from "
+             "the --evidence-output name; unknown means no per-attempt reuse)",
+    )
+    run.add_argument(
+        "--prestage-dir",
+        help="where pre-stage evidence lives (default: beside the plan)",
+    )
+
+    prestage = sub.add_parser("prestage")
+    prestage.add_argument("--plan", required=True)
+    prestage.add_argument("--phase", type=int, required=True)
+    prestage.add_argument("--attempt", type=int, required=True)
+    prestage.add_argument("--specs")
+    prestage.add_argument("--evidence-output")
+    prestage.add_argument("--prestage-dir")
+
+    prestage_report_parser = sub.add_parser("prestage-report")
+    prestage_report_parser.add_argument("--plan", required=True)
+    prestage_report_parser.add_argument("--phase", type=int, required=True)
+    prestage_report_parser.add_argument("--attempt", type=int)
+    prestage_report_parser.add_argument("--specs")
+    prestage_report_parser.add_argument("--prestage-dir")
 
     args = parser.parse_args(argv)
     try:
@@ -1547,7 +2241,39 @@ def main(argv=None):
             print("valid")
             return 0
         if args.command == "slice":
-            print(render_phase_context(load_plan(args.plan, args.specs), args.phase))
+            print(
+                render_phase_context(
+                    load_plan(args.plan, args.specs),
+                    args.phase,
+                    prestage_dir=_prestage_dir(args),
+                )
+            )
+            return 0
+        if args.command == "prestage":
+            plan = load_plan(args.plan, args.specs)
+            prestage_dir = _prestage_dir(args)
+            if not prestage_commands(plan, args.phase):
+                print("No pre-stage commands for phase %s" % args.phase)
+                return 0
+            document = run_prestage(plan, args.phase, args.attempt, prestage_dir)
+            output = args.evidence_output or _prestage_path(
+                prestage_dir, args.phase, args.attempt
+            )
+            _write_evidence(output, document, overwrite=True)
+            print(document["summary"])
+            # A failing pre-stage is information for the pass, not a halt: the
+            # phase gate is still the authority. The caller ignores this code.
+            return 0 if document["passed"] else 11
+        if args.command == "prestage-report":
+            print(
+                prestage_report(
+                    load_plan(args.plan, args.specs),
+                    args.phase,
+                    _prestage_dir(args),
+                    attempt=args.attempt,
+                ),
+                end="",
+            )
             return 0
         if args.command == "scaffold":
             print(
@@ -1566,7 +2292,13 @@ def main(argv=None):
                 phase = int(phase)
             except ValueError:
                 raise VerificationError("--phase must be an integer or release")
-        evidence = run_gate(load_plan(args.plan, args.specs), phase)
+        evidence = run_gate(
+            load_plan(args.plan, args.specs),
+            phase,
+            attempt=args.attempt if args.attempt is not None
+            else _attempt_from_path(args.evidence_output),
+            prestage_dir=_prestage_dir(args),
+        )
         _write_evidence(args.evidence_output, evidence)
         print(evidence["summary"])
         return 0 if evidence["passed"] else 10
