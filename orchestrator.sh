@@ -819,6 +819,12 @@ fi
 
 # ── wall-clock budget ────────────────────────────────────────────────────────
 START_EPOCH="$(date +%s)"
+# proposer.sh checks these itself inside a yield wait: the orchestrator only
+# tests the budget at phase boundaries, and a yield can sit between two of them
+# for hours while holding the workdir flock.
+WIGGUM_RUN_START_EPOCH="$START_EPOCH"
+WIGGUM_MAX_WALL_MIN="$MAX_WALL_MIN"
+export WIGGUM_RUN_START_EPOCH WIGGUM_MAX_WALL_MIN
 over_budget() {
   [[ "$MAX_WALL_MIN" =~ ^[0-9]+$ ]] || return 1
   (( MAX_WALL_MIN == 0 )) && return 1
@@ -1184,6 +1190,7 @@ build_accelerator_prompt() {
       fi
     fi
   } > "$out"
+  append_budgeted_block "$out" yield_contract emit_yield_contract "$n" "$attempt"
 }
 
 # ── oscillation detector (W8) ────────────────────────────────────────────────
@@ -1330,6 +1337,70 @@ emit_evidence_contract() {
   echo
 }
 
+# ── prompt budget (risk 3) — budget the ASSEMBLED prompt, never each block ───
+# The proposer prompt for one phase of the 002 run was already 174 KB, and the
+# critic grew fit_to_window for exactly this reason: per-block budgets do not
+# sum, so every block that is individually "small" can still overflow the
+# window together. A new block is therefore appended only when the prompt it is
+# joining still has room for it, and a block that does not fit is SAID OUT LOUD —
+# an agent that silently never learned it could yield is the failure this guards.
+: "${WIGGUM_PROMPT_MAX_BYTES:=180000}"
+append_budgeted_block() {
+  local out="$1" name="$2"; shift 2
+  local block have need
+  block="$("$@")" || return 0
+  [[ -n "$block" ]] || return 0
+  have="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  need="$(printf '%s' "$block" | wc -c)"
+  if (( WIGGUM_PROMPT_MAX_BYTES > 0 && have + need > WIGGUM_PROMPT_MAX_BYTES )); then
+    log ">>> prompt block '$name' dropped: ${have}B already assembled + ${need}B exceeds WIGGUM_PROMPT_MAX_BYTES=${WIGGUM_PROMPT_MAX_BYTES}"
+    wiggum_emit prompt_block_dropped block "$name" assembled_bytes "$have" \
+      block_bytes "$need" budget_bytes "$WIGGUM_PROMPT_MAX_BYTES"
+    return 0
+  fi
+  printf '\n%s\n' "$block" >> "$out"
+}
+
+# ── yield contract (§2) — shared by the proposer and accelerator prompts ─────
+# Without this block no agent will ever use the protocol. The phase-15 incident
+# proved the alternative: the agent invented its own, writing `setsid nohup`
+# wrapper scripts (run4_chain.sh, finalise_p15.sh) so its work would outlive the
+# pass being cut at the hard cap. It knew exactly what it needed; it just had no
+# way to ask the harness for it.
+emit_yield_contract() {
+  local n="$1" attempt="$2"
+  local artifact="$FEATURE_DIR/yield/phase${n}-attempt${attempt}-${WIGGUM_RUN_ID}.json"
+  echo "## If this phase depends on a job that cannot finish inside one pass: YIELD"
+  echo "Do NOT sleep, poll, tail, or \`until ... done\` your way through a long job."
+  echo "Waiting inside a pass costs a full context rebuild per pass and gets the pass"
+  echo "killed at the ceiling — which also kills the job, because a job you start from"
+  echo "your own Bash tool lives in the pass's process tree."
+  echo "Instead, END THE PASS and let wiggum do the waiting with no model session open."
+  echo "Write this file ATOMICALLY (tmp then \`mv\`), then STOP without writing evidence:"
+  echo "  $artifact"
+  echo '```json'
+  echo '{"contract": "wiggum-pass-yield/v1",'
+  echo ' "reason": "one line: what you are waiting on and why the evidence needs it",'
+  echo ' "job": {"mode": "launch", "argv": ["/usr/bin/make", "live"], "cwd": "'"$WORKDIR"'"},'
+  echo ' "resume_when": {"kind": "exit_code_file"},'
+  echo ' "deadline_sec": 7200,'
+  echo ' "on_resume": "exactly what the next pass should do with the result"}'
+  echo '```'
+  echo "- \`job.mode\`: \"launch\" (PREFERRED — wiggum starts it in its own session, where no"
+  echo "  pass kill can reach it) or \"adopt\" with \`"pid": N\` if you already started it"
+  echo "  under \`setsid\`. An adopt naming a pid in this pass's own session is REFUSED."
+  echo "- \`resume_when.kind\`: exit_code_file (defaults to the rc file wiggum writes for a"
+  echo "  job it launched) | pid (defaults to the job it launched) | file_exists |"
+  echo "  file_stable (+ \`stable_sec\`) | grep (+ \`path\`, \`pattern\`)."
+  echo "- \`deadline_sec\` is REQUIRED — the run holds this workdir for the whole wait."
+  echo "- \`on_resume\` is handed back to you verbatim next pass, with the job's exit code"
+  echo "  and a bounded slice of its log. Say what you will do with them."
+  echo "A yield is not a failure: it does not count as an error, it is not a stall, and"
+  echo "by default it does not even burn an iteration. Yielding on a 90-minute job is"
+  echo "the CORRECT move; waiting for it inside the pass is the expensive one."
+  echo
+}
+
 # ── build the proposer prompt for phase N (attempt M) ────────────────────────
 build_proposer_prompt() {
   local n="$1" attempt="$2" out="$3"
@@ -1446,6 +1517,7 @@ build_proposer_prompt() {
       fi
     fi
   } > "$out"
+  append_budgeted_block "$out" yield_contract emit_yield_contract "$n" "$attempt"
 }
 
 # ── long-running phase jobs (survive across proposer passes) ────────────────
@@ -1570,6 +1642,7 @@ run_phase() {
       --backend "$backend"
       --max-iter "$MAX_ITER"
       --timeout "$phase_timeout"
+      --yield-dir "$FEATURE_DIR/yield"
       --feature "$SLUG"
       --role "$role"
       --phase "$n"
@@ -1634,6 +1707,26 @@ run_phase() {
         log "#     - loosen a futility detector:   WIGGUM_PROPOSER_REPEAT_LIMIT=0 / WIGGUM_PROPOSER_PROGRESS_TIMEOUT=0"
         log "#     - or fix the phase's live harness so a pass completes within the timeout."
         wiggum_emit run_stop reason proposer_consecutive_errors phase "$n"
+        exit "$E_BUDGET"
+      fi
+      # A spent yield budget is not a failing agent either: the passes ended
+      # cleanly and declared what they were waiting on. What ran out is the
+      # WAIT, so the guidance is about the job, never about the model.
+      if [[ "$prc" -eq 9 ]]; then
+        log ">>> proposer's yield budget is spent for phase $n — halting (exit $E_BUDGET)."
+        log "#   A pass ended cleanly while a job it depends on was still running, and"
+        log "#   wiggum waited for that job with no model session open — but the wait hit"
+        log "#   the yield's own deadline_sec, or the run's wall-clock budget, or the"
+        log "#   attempt yielded more than WIGGUM_YIELD_MAX_PER_ATTEMPT (default 4) times."
+        log "#   The job was LEFT ALONE, not killed: read its log first (named in the"
+        log "#   yield_timeout event and in $FEATURE_DIR/yield-jobs/)."
+        log "#     - if the job is simply slower than declared: raise that phase's"
+        log "#       deadline_sec, or its pass ceiling (--proposer-timeout-phase $n=SECONDS)"
+        log "#     - if the job is hung: fix the job; no budget here will help"
+        log "#     - if the phase needs several long jobs in sequence, it is really several"
+        log "#       phases — split it rather than raising WIGGUM_YIELD_MAX_PER_ATTEMPT"
+        log "#   Then: wiggum resume -w $WORKDIR"
+        wiggum_emit run_stop reason proposer_yield_budget phase "$n"
         exit "$E_BUDGET"
       fi
       # Cap exhaustion is a DIFFERENT cause from exit 7 and deserves different

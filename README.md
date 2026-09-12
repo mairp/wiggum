@@ -576,12 +576,18 @@ events come from the proposer's stream-json tap (`lib/agent_stream.py`, gated by
 | Event | Emitted by | Meaning |
 |---|---|---|
 | `run_start` / `run_end` | orchestrator | a run begins / all phases approved (`outcome`) |
-| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_cap_exhausted`, `proposer_no_progress`, `proposer_no_evidence`, `critic_config`) + `phase` |
+| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_cap_exhausted`, `proposer_yield_budget`, `proposer_yield_timeout`, `proposer_no_progress`, `proposer_no_evidence`, `critic_config`) + `phase` |
 | `phase_start` / `phase_done` | orchestrator | phase N entered / approved |
 | `proposer_start` | orchestrator | a proposer pass for phase N begins |
 | `proposer_cap` | orchestrator | the pass ceiling this attempt runs under — `seconds` + `source` (`override` \| `declared` \| `global`). An unsourced budget is what makes budget archaeology expensive six hours in |
 | `iter_cap` | proposer | a pass was killed at the ceiling — `reason` (`hard_cap`), `elapsed`, `consec`/`max` against `WIGGUM_PROPOSER_MAX_CAPS`. A budget signal, not an error |
 | `pass_cost_unknown` | proposer | a killed pass reports NO usage or cost (the kill severs the provider stream); this says "unmeasured", never "cheap" |
+| `pass_yield` | proposer | a pass ended cleanly while a job it depends on runs — `reason`, `predicate_kind`, `deadline_sec`, `job_mode`, `job_log`, `yield_index` |
+| `yield_job_start` | proposer | the job wiggum now owns — `pid`, `argv`, `log`, `sid` (a session of its own: no pass kill can reach it) |
+| `yield_wait` | proposer | sampled while waiting with no model session open — `elapsed`, `predicate_kind` |
+| `yield_resume` | proposer | the predicate is satisfied — `waited_sec`, `job_rc`, `job_duration_sec`. `waited_sec` is what finally separates "how long the model worked" from "how long the loop was blocked" |
+| `yield_timeout` / `yield_invalid` | proposer | the wait ran out (`deadline` \| `wall_budget`), or the artifact was refused (schema violation, a disabled predicate, an `adopt` pid in the pass's own session, a watchdog-killed pass) |
+| `prompt_block_dropped` | orchestrator | a prompt block did not fit the ASSEMBLED prompt budget (`WIGGUM_PROMPT_MAX_BYTES`) — said out loud, never silently omitted |
 | `iter_start` / `iter_done` | proposer | one headless proposer iteration |
 | `evidence_written` / `evidence_present` | proposer | `GATE<N>-EVIDENCE.md` was just written / already existed |
 | `attempt_archived` | orchestrator | a rejected evidence file was archived before retry |
@@ -811,6 +817,9 @@ Key knobs (see `.env.example` for all of them): `WIGGUM_MAX_REJECTS` (3),
 `--verification-commands` document — first of those three wins, else the global
 value. `--proposer-timeout` and the overrides now round-trip through
 `last-run.conf`, so `wiggum resume` keeps the budget the run was planned for),
+`WIGGUM_YIELD_POLL` (30s), `WIGGUM_YIELD_MAX_PER_ATTEMPT` (4),
+`WIGGUM_YIELD_ALLOW_COMMAND` (false), `WIGGUM_YIELD_COUNTS_AS_ITER` (false),
+`WIGGUM_PROMPT_MAX_BYTES` (180000),
 `WIGGUM_MAX_WALL_MIN` (0 = unlimited),
 `WIGGUM_CRITIC_GROUNDING` (on), `WIGGUM_GIT_COMMITS` (auto).
 
@@ -854,6 +863,25 @@ guarded, all cheap:
   | idle | no cpu-time growth anywhere in the pass's process tree — a genuinely hung pass, not a slow one (a busy `docker exec` child counts as progress) | `--idle-timeout` / `WIGGUM_PROPOSER_IDLE_TIMEOUT` (900s) |
   | disk stall | nothing created or modified under the workdir, however busy the tree is (`.git`/`.wiggum`/`node_modules`/`.venv` excluded — the harness and a detached long job write there on their own) | `--progress-timeout` / `WIGGUM_PROPOSER_PROGRESS_TIMEOUT` (1800s, 0 = off) |
   | repetition | the same tool call (identical tool + target) issued N times in one pass **and still the agent's most recent action** — a retry loop, invisible to any cpu or wall-clock measure. A pass that retried something and moved on is untouched | `--repeat-limit` / `WIGGUM_PROPOSER_REPEAT_LIMIT` (5, 0 = off) |
+- **Yield/resume — a pass may end cleanly while its job keeps running.** A pass
+  boundary and a measurement boundary are independent. When a phase's evidence
+  needs a job that cannot finish inside one pass, the proposer writes one JSON
+  artifact (`wiggum-pass-yield/v1`) to `.wiggum/features/<f>/yield/` and exits
+  normally; wiggum launches or adopts the job **in its own session** (so no pass
+  kill can reach it), waits for a declared predicate with **no model session
+  open**, and resumes the phase with the job's exit code, duration and a bounded
+  head+tail slice of its log in the next prompt. The orchestrator prints the
+  contract into the proposer prompt — without that no agent will ever use it, and
+  the alternative is what actually happened: an agent hand-rolling `setsid nohup`
+  wrappers so its work would survive the pass. A yield is not an error, not a
+  stall, and by default does not burn an iteration.
+
+  | Piece | Value |
+  |---|---|
+  | predicates | `exit_code_file` \| `pid` \| `file_exists` \| `file_stable` \| `grep` (+ `command`, **disabled** unless `WIGGUM_YIELD_ALLOW_COMMAND=true`: it is execution with no pass running, and takes fixed argv only) |
+  | required | `deadline_sec` — the run holds the workdir lock for the whole wait |
+  | bounds | `WIGGUM_YIELD_MAX_PER_ATTEMPT` (4) then exit 9; `WIGGUM_YIELD_POLL` (30s); `WIGGUM_YIELD_COUNTS_AS_ITER` (false) |
+  | during a wait | `stop.flag` is honoured every tick (exit 6, **job left running**); `WIGGUM_MAX_WALL_MIN` is checked in the loop, not only at phase boundaries |
 - **Crash-safe resume.** The current phase is *derived* from the `GATE*` markers
   on start, not from a stored counter. Kill it anywhere, rerun the same command,
   it continues. `--start-phase N` overrides.
@@ -869,7 +897,7 @@ guarded, all cheap:
 | `1` | unexpected/internal error, **and** the **critic-outage breaker**: `WIGGUM_CRITIC_MALFORMED_LIMIT` consecutive `MALFORMED` verdicts (default 3). `MALFORMED` is how the critic fails safe when it times out, is unreachable, or answers without a verdict line — the feedback it writes is contentless, so every further proposer attempt runs blind and the phase can never be approved. Without the breaker the run spends its whole `MAX_REJECTS` budget on a critic that is simply down (`check_oscillation` cannot catch it: it keys on criterion IDs, which a contentless feedback has none of). It emits `run_stop reason=critic_unavailable`; raise `WIGGUM_CRITIC_TIMEOUT`, point `--critic` at a reachable backend, or raise `WIGGUM_CRITIC_MALFORMED_LIMIT`, then `wiggum resume` |
 | `2` | MAX_REJECTS exceeded — a human needs to arbitrate |
 | `3` | invalid spec/config |
-| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or one of the two proposer breakers. The **failure breaker** (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive passes ending in an agent error: crash, timeout, auth/model error, malformed output, no terminal record, or a **futility/hang watchdog kill** — `repeat_stall`, `progress_stall`, `idle_timeout`; default 2) emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume`. The **cap breaker** (`WIGGUM_PROPOSER_MAX_CAPS` consecutive passes killed at the absolute pass ceiling, `hard_cap`; default 3) emits `run_stop reason=proposer_cap_exhausted` — that is a budget signal, not a failure: the passes may have been productive the whole time and the phase's work simply does not fit one pass. Make the long step outlive the pass (`--long-job-phase` / `--long-job-cmd`) or split the phase; raise `WIGGUM_PROPOSER_TIMEOUT` only when the work genuinely is one indivisible pass |
+| `4` | budget exceeded — wall clock, `MAX_ITER` without evidence, or one of the two proposer breakers. The **failure breaker** (`WIGGUM_PROPOSER_MAX_ERRORS` consecutive passes ending in an agent error: crash, timeout, auth/model error, malformed output, no terminal record, or a **futility/hang watchdog kill** — `repeat_stall`, `progress_stall`, `idle_timeout`; default 2) emits `run_stop reason=proposer_consecutive_errors`; raise `--timeout` / `WIGGUM_PROPOSER_MAX_ERRORS` or fix the phase harness, then `wiggum resume`. The **cap breaker** (`WIGGUM_PROPOSER_MAX_CAPS` consecutive passes killed at the absolute pass ceiling, `hard_cap`; default 3) emits `run_stop reason=proposer_cap_exhausted` — that is a budget signal, not a failure: the passes may have been productive the whole time and the phase's work simply does not fit one pass. Make the long step outlive the pass (`--long-job-phase` / `--long-job-cmd`) or split the phase; raise `WIGGUM_PROPOSER_TIMEOUT` only when the work genuinely is one indivisible pass. The **yield budget** (a declared yield's `deadline_sec`, the run's wall clock, or more than `WIGGUM_YIELD_MAX_PER_ATTEMPT` yields in one attempt) emits `run_stop reason=proposer_yield_budget` — the job is left alone, never killed, so read its log under `.wiggum/features/<f>/yield-jobs/` first |
 | `5` | lock held by another run |
 | `6` | stopped via `stop.flag` (clean; `wiggum resume` or rerun continues). Now also produced when the stop lands **mid-proposer** — `wiggum stop --now` — which earlier versions mislabeled as `4` |
 

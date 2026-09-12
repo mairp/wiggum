@@ -289,29 +289,61 @@ ensure_long_job() {
   fi
 
   log ">>> long-job(phase $n attempt $attempt): launching detached — $LONG_JOB_CMD"
-  # setsid+nohup fully detaches the job into its own session, immune to SIGHUP
-  # and to signals aimed at this script's or any proposer pass's process group.
-  # The subshell backgrounds it and captures $! before exiting; nothing here
-  # blocks the caller.
-  #
-  # A plain fork (this subshell) inherits ALL open file descriptors, including
-  # the orchestrator's flock on the workdir lock (LOCK_FD, when set) — setsid
-  # detaches the SESSION, not the FD table. Left open, the detached job (which
-  # deliberately outlives this process) holds that flock forever, so killing
-  # the orchestrator does not release the lock while the job is still running:
-  # a relaunch then fails with "another run holds the lock" even though no
-  # orchestrator is alive. Confirmed live (2026-08-30, ainetops-demo). Close
-  # ONLY this subshell's copy of the fd (a subshell's fd table is independent
-  # after fork, so this cannot affect the holder's own open lock) before
-  # backgrounding the job. `eval` is required: `exec $LOCK_FD>&-` is a single
-  # unparsed argument to `exec` without it (verified) — bash only accepts a
-  # literal fd number there.
+  wiggum_launch_owned_job "$pidfile" "$logfile" "$WORKDIR" -- bash -c "$LONG_JOB_CMD"
+  wiggum_emit long_job_start phase "$n" attempt "$attempt" cmd "$LONG_JOB_CMD" log "$logfile"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  wiggum_launch_owned_job — start a job that belongs to WIGGUM, not to a pass
+#
+#  The body ensure_long_job used to carry inline, lifted out so the yield
+#  protocol (proposer.sh) can launch a job on exactly the same terms. That
+#  sameness is the point: a job created here is in its OWN session, so the
+#  proposer's watchdog kill path (which TERMs then KILLs the pass's process
+#  tree) cannot reach it even in principle. A job the agent starts from its own
+#  Bash tool lives in that tree and dies with it — which is how one run's first
+#  hard-cap kill also killed the 93-minute measurement it was waiting for.
+#
+#  Usage: wiggum_launch_owned_job <pidfile> <logfile> <cwd> -- <argv...>
+#  Writes the detached pid to <pidfile>; stdout+stderr to <logfile>. The CALLER
+#  owns the marker layout and MUST scope it per run (see ensure_long_job's
+#  base name and the comment above it for why attempt-only scoping is unsafe).
+#
+#  setsid+nohup fully detaches the job into its own session, immune to SIGHUP
+#  and to signals aimed at the caller's or any proposer pass's process group.
+#  The subshell backgrounds it and captures $! before exiting; nothing here
+#  blocks the caller.
+#
+#  A plain fork (this subshell) inherits ALL open file descriptors, including
+#  the orchestrator's flock on the workdir lock (LOCK_FD, when set) — setsid
+#  detaches the SESSION, not the FD table. Left open, the detached job (which
+#  deliberately outlives this process) holds that flock forever, so killing
+#  the orchestrator does not release the lock while the job is still running:
+#  a relaunch then fails with "another run holds the lock" even though no
+#  orchestrator is alive. Confirmed live (2026-08-30, ainetops-demo). Close
+#  ONLY this subshell's copy of the fd (a subshell's fd table is independent
+#  after fork, so this cannot affect the holder's own open lock) before
+#  backgrounding the job. `eval` is required: `exec $LOCK_FD>&-` is a single
+#  unparsed argument to `exec` without it (verified) — bash only accepts a
+#  literal fd number there.
+wiggum_launch_owned_job() {
+  local pidfile="$1" logfile="$2" jobcwd="$3"; shift 3
+  [[ "${1:-}" == "--" ]] && shift
+  mkdir -p "$(dirname "$pidfile")" "$(dirname "$logfile")" 2>/dev/null || true
   (
     [[ -n "${LOCK_FD:-}" ]] && eval "exec ${LOCK_FD}>&-" 2>/dev/null
-    cd "$WORKDIR" && setsid nohup bash -c "$LONG_JOB_CMD" > "$logfile" 2>&1 < /dev/null &
+    # The redirection below applies to `setsid`, not to the async shell bash
+    # forks to run the `cd && setsid` list — and that shell WAITS for the job,
+    # so it keeps the CALLER's stdout/stderr open for the job's whole lifetime.
+    # A caller whose output is a pipe (the orchestrator pipes proposer.sh
+    # through emit_out; a test harness captures it) then sees no EOF until the
+    # job ends, however long ago the caller itself exited. Point this shell's
+    # own descriptors at the job log instead: the job is detached from the
+    # caller's LIFETIME already, and this detaches it from the caller's OUTPUT.
+    exec >> "$logfile" 2>&1
+    cd "$jobcwd" && setsid nohup "$@" > "$logfile" 2>&1 < /dev/null &
     echo $! > "$pidfile"
   )
-  wiggum_emit long_job_start phase "$n" attempt "$attempt" cmd "$LONG_JOB_CMD" log "$logfile"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -242,6 +242,12 @@ else:
         print("  state: STOPPED at phase %s — resume with: wiggum resume" % ph)
     elif r == "max_rejects":
         print("  state: HALTED at phase %s — needs human (max-rejects exceeded)" % ph)
+    elif r in ("proposer_yield_budget", "proposer_yield_timeout"):
+        # A pass ended cleanly and declared what it was waiting on; the WAIT ran
+        # out, not the agent. The job was left alone, so say where to look.
+        print("  state: HALTED at phase %s — a declared yield's wait ran out "
+              "(deadline, wall budget, or too many yields in one attempt). The job was "
+              "left running, not killed: read its log under .wiggum/features/*/yield-jobs/" % ph)
     elif r == "proposer_cap_exhausted":
         # Distinct from proposer_consecutive_errors on purpose: nothing failed,
         # the work did not fit the pass. Naming the wrong remedy here is how a

@@ -109,12 +109,18 @@ stream-json tap ([`lib/agent_stream.py`](../lib/agent_stream.py), gated by `WIGG
 | Event | Emitted by | Meaning |
 |---|---|---|
 | `run_start` / `run_end` | orchestrator | a run begins / all phases approved (`outcome`) |
-| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_cap_exhausted`, `proposer_no_progress`, `proposer_no_evidence`, `critic_config`) + `phase` |
+| `run_stop` | orchestrator | run halted early — `reason` (`stop_flag`, `wall_budget`, `max_rejects`, `proposer_max_iter`, `proposer_consecutive_errors`, `proposer_cap_exhausted`, `proposer_yield_budget`, `proposer_yield_timeout`, `proposer_no_progress`, `proposer_no_evidence`, `critic_config`) + `phase` |
 | `phase_start` / `phase_done` | orchestrator | phase N entered / approved |
 | `proposer_start` | orchestrator | a proposer pass for phase N begins |
 | `proposer_cap` | orchestrator | the pass ceiling this attempt runs under — `seconds` + `source` (`override` \| `declared` \| `global`). An unsourced budget is what makes budget archaeology expensive six hours in |
 | `iter_cap` | proposer | a pass was killed at the ceiling — `reason` (`hard_cap`), `elapsed`, `consec`/`max` against `WIGGUM_PROPOSER_MAX_CAPS`. A budget signal, not an error |
 | `pass_cost_unknown` | proposer | a killed pass reports NO usage or cost (the kill severs the provider stream); this says "unmeasured", never "cheap" |
+| `pass_yield` | proposer | a pass ended cleanly while a job it depends on runs — `reason`, `predicate_kind`, `deadline_sec`, `job_mode`, `job_log`, `yield_index` |
+| `yield_job_start` | proposer | the job wiggum now owns — `pid`, `argv`, `log`, `sid` |
+| `yield_wait` | proposer | sampled while waiting with no model session open — `elapsed`, `predicate_kind` |
+| `yield_resume` | proposer | the predicate is satisfied — `waited_sec`, `job_rc`, `job_duration_sec` |
+| `yield_timeout` / `yield_invalid` | proposer | the wait ran out, or the yield artifact was refused |
+| `prompt_block_dropped` | orchestrator | a prompt block did not fit the assembled-prompt budget (`WIGGUM_PROMPT_MAX_BYTES`) |
 | `iter_start` / `iter_done` | proposer | one headless proposer iteration |
 | `evidence_written` / `evidence_present` | proposer | `GATE<N>-EVIDENCE.md` was just written / already existed |
 | `attempt_archived` | orchestrator | a rejected evidence file was archived before retry |

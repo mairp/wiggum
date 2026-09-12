@@ -67,6 +67,16 @@ OPTIONS
   --progress-path PATH    Restrict the disk-progress check to PATH (repeatable;
                           also WIGGUM_PROPOSER_PROGRESS_PATHS, colon-separated).
                           Default: the whole workdir, minus the dirs above.
+  --yield-dir DIR         Where a pass declares a YIELD: it ends cleanly while a
+                          job it depends on is still running, and wiggum waits
+                          for that job with NO model session open, then resumes
+                          the phase with the job's result in the prompt. Default
+                          <FEATURE_DIR>/yield. See the contract the orchestrator
+                          prints into the proposer prompt. Knobs:
+                          WIGGUM_YIELD_POLL (30s), WIGGUM_YIELD_MAX_PER_ATTEMPT
+                          (4), WIGGUM_YIELD_COUNTS_AS_ITER (false),
+                          WIGGUM_YIELD_ALLOW_COMMAND (false — the `command`
+                          predicate runs outside any pass and ships disabled).
   --repeat-limit N        Kill the pass when the agent has issued the SAME tool
                           call (identical tool + target) N times in this pass and
                           is still issuing it (default: 12; 0 disables). Catches
@@ -107,6 +117,9 @@ EXIT
   8  consecutive passes that changed nothing outside the loop's own bookkeeping
      (WIGGUM_PROPOSER_MAX_NOPROGRESS, default 3) — the phase is blocked on
      something the agent cannot decide for itself
+  9  the yield budget is spent: a yield's own deadline_sec expired, the run's
+     wall-clock budget expired during one, or the attempt yielded more than
+     WIGGUM_YIELD_MAX_PER_ATTEMPT (default 4) times. The job is left alone
  10  consecutive passes killed at the absolute pass ceiling
      (WIGGUM_PROPOSER_MAX_CAPS, default 3). A hard_cap kill is a BUDGET signal,
      not an agent error: the work did not fit a pass. The remedy is to make the
@@ -179,6 +192,7 @@ while [[ $# -gt 0 ]]; do
     --progress-timeout) PROGRESS_TIMEOUT="${2:?}"; shift 2 ;;
     --progress-path)  PROGRESS_PATHS+=( "${2:?}" ); shift 2 ;;
     --repeat-limit)   REPEAT_LIMIT="${2:?}"; shift 2 ;;
+    --yield-dir)      YIELD_DIR="${2:?}"; shift 2 ;;
     -j|--stream-json) STREAM_JSON="true"; shift ;;
     --feature)        WIGGUM_FEATURE="${2:?}"; shift 2 ;;
     --role)           WIGGUM_ROLE="${2:?}"; shift 2 ;;
@@ -272,6 +286,12 @@ fi
 # note the next pass reads instead of vanishing (see write_pass_checkpoint).
 CHECKPOINT_DIR="$FEATURE_DIR/pass-checkpoints"
 KILL_SIDECAR="$STATE_DIR/.last-watchdog-kill"
+# Where a pass declares that it is waiting on something rather than failing at
+# it (the yield protocol, below). Run-scoped for the same reason the long-job
+# markers are: attempt numbers restart at 1 in every fresh orchestrator process.
+[[ -n "${YIELD_DIR:-}" ]] || YIELD_DIR="$FEATURE_DIR/yield"
+YIELD_JOB_DIR="$FEATURE_DIR/yield-jobs"
+YIELD_ARTIFACT="$YIELD_DIR/phase${PHASE}-attempt${ATTEMPT}-${RUN_ID}.json"
 CURRENT_ITER=0
 PRIME_STRUCTURED="false"
 if [[ "$BACKEND" == prime || "$BACKEND" == prime:* ]] \
@@ -876,6 +896,416 @@ EOF2
   return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  The yield protocol — a pass may END CLEANLY while it is still waiting
+#
+#  A pass boundary and a measurement boundary are independent, and until now the
+#  loop had no way to say so. A phase whose evidence needs a 93-minute suite does
+#  not fit a 90-minute pass, and every instrument the loop had read that as a
+#  failure: the pass was killed at the ceiling, counted as an agent error, its
+#  cost went unrecorded, and — worst — the kill took the measurement with it,
+#  because a job the agent started from its own Bash tool lives in the pass's
+#  process tree (semantic-router-sovereign phase 15, 2026-09-11: three passes,
+#  4.5 hours, 79-85% of it literal `sleep`). The agent's own response was to
+#  hand-roll `setsid nohup` wrappers so its work would outlive the pass — a
+#  re-implementation of a primitive Wiggum already had but could not express.
+#
+#  So: a pass may end voluntarily and cleanly while a job it depends on is still
+#  running. It says so by writing ONE JSON artifact atomically (tmp + mv, the
+#  same discipline the evidence gate relies on) and then exiting normally:
+#
+#    {"contract": "wiggum-pass-yield/v1",
+#     "reason":   "live suite in flight; evidence needs its report",
+#     "job":      {"mode": "launch", "argv": ["/usr/bin/make", "live"]},
+#     "resume_when": {"kind": "exit_code_file"},
+#     "deadline_sec": 7200,
+#     "on_resume": "read runs/live-*.md, write T404 from it, then the evidence"}
+#
+#  Wiggum then evaluates the predicate with NO MODEL SESSION OPEN — the whole
+#  point: the wait costs one syscall per tick instead of ~250k tokens of context
+#  per pass. The job, in `launch` mode, is created by wiggum_launch_owned_job in
+#  Wiggum's OWN session, so _watchdog_kill cannot reach it even in principle.
+#
+#  A yield is not an error and not a stall. It does not touch the error breaker,
+#  it is exempt from the no-progress breaker (a yield is DECLARED waiting, which
+#  is exactly the distinction no futility detector could make), and by default it
+#  does not burn an iteration: yield + resume is one logical pass.
+# ─────────────────────────────────────────────────────────────────────────────
+# How often the predicate is polled. Cheap by construction (one syscall), so the
+# default is about being a good citizen, not about cost.
+: "${WIGGUM_YIELD_POLL:=30}"
+# Yields per proposer invocation (= per attempt) before exit 9. A yield is a
+# bounded convenience, not an unbounded licence to keep waiting.
+: "${WIGGUM_YIELD_MAX_PER_ATTEMPT:=4}"
+# The `command` predicate is arbitrary execution OUTSIDE any pass, so it ships
+# disabled; the four file/pid predicates cover every real case. Even enabled it
+# takes fixed argv only — never a shell string.
+: "${WIGGUM_YIELD_ALLOW_COMMAND:=false}"
+# false: yield + resume is ONE logical pass, so the iteration is given back.
+: "${WIGGUM_YIELD_COUNTS_AS_ITER:=false}"
+# Emit a yield_wait sample every Nth tick, so the live presenter narrates the
+# wait instead of going silent for two hours.
+: "${WIGGUM_YIELD_WAIT_EVERY:=10}"
+# Bounds on the log slice handed back to the resuming pass.
+: "${WIGGUM_YIELD_LOG_HEAD:=40}"
+: "${WIGGUM_YIELD_LOG_TAIL:=80}"
+
+YIELD_REASON=""; YIELD_MODE=""; YIELD_JOB_CWD=""; YIELD_JOB_LOG=""
+YIELD_DEADLINE=""; YIELD_PREDICATE=""; YIELD_ON_RESUME=""; YIELD_ADOPT_PID=""
+YIELD_JOB_PID=""; YIELD_JOB_RC=""; YIELD_STARTED_AT=""; YIELD_INDEX=0
+YIELD_RESUME_BLOCK=""
+YIELD_ARGV=()
+
+# The schema owner and the predicate evaluator, in one place. Bash cannot parse
+# JSON and must not try; this is the same shim shape wiggum_spec_* uses.
+#   _yield_py validate <artifact> <workdir> <allow-command>
+#     -> 8 lines (reason, mode, cwd, log, deadline_sec, predicate kind,
+#        on_resume, adopt pid), or exit 2 with one line saying what is wrong.
+#   _yield_py argv <artifact> <workdir> <allow-command>   -> one argv entry/line
+#   _yield_py check <artifact> <workdir> <allow-command> <launched-pid> <rc-file>
+#     -> exit 0 satisfied, 1 not yet, 2 unsatisfiable
+_yield_py() {
+  python3 - "$@" <<'PY'
+import json, os, re, subprocess, sys, time
+
+cmd, path, workdir, allow_command = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "true"
+CONTRACT = "wiggum-pass-yield/v1"
+KINDS = ("pid", "exit_code_file", "file_exists", "file_stable", "grep", "command")
+
+
+def die(message):
+    print(" ".join(str(message).split()))
+    sys.exit(2)
+
+
+def resolve(value):
+    if not value:
+        return ""
+    return value if os.path.isabs(value) else os.path.normpath(os.path.join(workdir, value))
+
+
+def one_line(value):
+    return " ".join(str(value).split())
+
+
+try:
+    with open(path) as handle:
+        document = json.load(handle)
+except Exception as exc:                     # unreadable, truncated, not JSON
+    die("unreadable or malformed JSON: %s" % exc)
+if not isinstance(document, dict):
+    die("the top level must be a JSON object")
+if document.get("contract") != CONTRACT:
+    die("contract must be %r (got %r)" % (CONTRACT, document.get("contract")))
+
+reason = document.get("reason")
+if not isinstance(reason, str) or not reason.strip():
+    die("reason must be a non-empty string saying what is being waited on")
+
+# MANDATORY, and not a formality: the workdir flock is held for the whole yield
+# (one run per workdir), so an unbounded wait would hold it forever.
+deadline = document.get("deadline_sec")
+if not isinstance(deadline, int) or isinstance(deadline, bool) or deadline <= 0:
+    die("deadline_sec is REQUIRED and must be a positive whole number of seconds")
+
+on_resume = document.get("on_resume") or ""
+if not isinstance(on_resume, str):
+    die("on_resume must be a string")
+
+job = document.get("job")
+if not isinstance(job, dict):
+    die("job must be an object")
+mode = job.get("mode")
+if mode not in ("launch", "adopt"):
+    die("job.mode must be 'launch' (wiggum starts it) or 'adopt' (you already did)")
+argv = job.get("argv")
+adopt_pid = ""
+if mode == "launch":
+    if not isinstance(argv, list) or not argv or not all(
+            isinstance(entry, str) and entry for entry in argv):
+        die("job.argv must be a non-empty array of non-empty strings (fixed argv, never a shell string)")
+    if any("\n" in entry or "\0" in entry for entry in argv):
+        die("job.argv entries must not contain newlines or NULs")
+else:
+    pid = job.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        die("job.pid must be the positive pid of the already-started job for mode 'adopt'")
+    adopt_pid = str(pid)
+cwd = resolve(job.get("cwd") or workdir)
+if not os.path.isdir(cwd):
+    die("job.cwd is not a directory: %s" % cwd)
+log = resolve(job.get("log") or "")
+
+resume_when = document.get("resume_when")
+if not isinstance(resume_when, dict):
+    die("resume_when must be an object naming how wiggum knows the job is done")
+kind = resume_when.get("kind")
+if kind not in KINDS:
+    die("resume_when.kind must be one of: %s" % ", ".join(KINDS))
+predicate_path = resume_when.get("path")
+if kind in ("file_exists", "file_stable", "grep") and not (
+        isinstance(predicate_path, str) and predicate_path):
+    die("resume_when.path is required for kind '%s'" % kind)
+if predicate_path is not None and not isinstance(predicate_path, str):
+    die("resume_when.path must be a string")
+if kind == "grep":
+    pattern = resume_when.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        die("resume_when.pattern (an extended regular expression) is required for kind 'grep'")
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        die("resume_when.pattern is not a valid regular expression: %s" % exc)
+if kind == "command":
+    # Arbitrary execution outside any pass. Off unless an operator turned it on,
+    # and fixed argv even then.
+    if not allow_command:
+        die("the 'command' predicate executes a command with no pass running and is DISABLED; "
+            "set WIGGUM_YIELD_ALLOW_COMMAND=true to allow it, or use a file/pid predicate")
+    command_argv = resume_when.get("argv")
+    if not isinstance(command_argv, list) or not command_argv or not all(
+            isinstance(entry, str) and entry for entry in command_argv):
+        die("resume_when.argv must be a non-empty array of non-empty strings (fixed argv, never a shell string)")
+
+if cmd == "validate":
+    for field in (one_line(reason), mode, cwd, log, str(deadline), kind,
+                  one_line(on_resume), adopt_pid):
+        print(field)
+    sys.exit(0)
+
+if cmd == "argv":
+    for entry in (argv or []):
+        print(entry)
+    sys.exit(0)
+
+if cmd != "check":
+    die("unknown subcommand %r" % cmd)
+
+launched_pid, rc_file = sys.argv[5], sys.argv[6]
+
+
+def alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+if kind == "pid":
+    # Default: the job wiggum launched (or adopted) — naming it again is optional.
+    target = resume_when.get("pid") or launched_pid or adopt_pid
+    if not target:
+        die("resume_when.pid names no pid and no job was launched")
+    sys.exit(1 if alive(target) else 0)
+
+if kind == "exit_code_file":
+    # Default: the rc file wiggum writes for a job it launched itself.
+    target = resolve(predicate_path) or rc_file
+    if not target:
+        die("resume_when.path names no file and no job was launched")
+    sys.exit(0 if os.path.exists(target) else 1)
+
+if kind == "file_exists":
+    sys.exit(0 if os.path.exists(resolve(predicate_path)) else 1)
+
+if kind == "file_stable":
+    stable_sec = resume_when.get("stable_sec", 60)
+    if not isinstance(stable_sec, int) or isinstance(stable_sec, bool) or stable_sec <= 0:
+        die("resume_when.stable_sec must be a positive whole number of seconds")
+    target = resolve(predicate_path)
+    try:
+        quiet_for = time.time() - os.path.getmtime(target)
+    except OSError:
+        sys.exit(1)                          # not there yet is not stable yet
+    sys.exit(0 if quiet_for >= stable_sec else 1)
+
+if kind == "grep":
+    target = resolve(predicate_path)
+    pattern = re.compile(resume_when["pattern"])
+    try:
+        size = os.path.getsize(target)
+        with open(target, "rb") as handle:
+            # Bounded: a live suite's log can be hundreds of MB, and the line the
+            # agent is waiting for is at the end of it.
+            handle.seek(max(0, size - 4 * 1024 * 1024))
+            haystack = handle.read().decode("utf-8", "replace")
+    except OSError:
+        sys.exit(1)
+    sys.exit(0 if pattern.search(haystack) else 1)
+
+if kind == "command":
+    try:
+        completed = subprocess.run(resume_when["argv"], cwd=cwd, shell=False,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=120)
+    except Exception as exc:
+        die("resume_when command could not be run: %s" % exc)
+    sys.exit(0 if completed.returncode == 0 else 1)
+PY
+}
+
+# Read and validate the artifact this pass wrote. Prints nothing; on success
+# fills the YIELD_* globals and returns 0. An artifact that violates the schema
+# is REFUSED, not guessed at: it is reported once and consumed, and the pass is
+# accounted exactly as it would have been without it.
+read_yield() {
+  [[ -f "$YIELD_ARTIFACT" ]] || return 1
+  local fields detail
+  if ! detail="$(_yield_py validate "$YIELD_ARTIFACT" "$WORKDIR" "$WIGGUM_YIELD_ALLOW_COMMAND" 2>/dev/null)"; then
+    echo "proposer.sh: refusing the pass yield — ${detail:-invalid}" >&2
+    wiggum_emit yield_invalid iter "$CURRENT_ITER" reason "${detail:-invalid}" artifact "$YIELD_ARTIFACT"
+    rm -f "$YIELD_ARTIFACT"
+    return 1
+  fi
+  mapfile -t fields <<< "$detail"
+  YIELD_REASON="${fields[0]:-}"; YIELD_MODE="${fields[1]:-}"
+  YIELD_JOB_CWD="${fields[2]:-}"; YIELD_JOB_LOG="${fields[3]:-}"
+  YIELD_DEADLINE="${fields[4]:-}"; YIELD_PREDICATE="${fields[5]:-}"
+  YIELD_ON_RESUME="${fields[6]:-}"; YIELD_ADOPT_PID="${fields[7]:-}"
+  return 0
+}
+
+# Take ownership of the job. `launch` is the mode that actually fixes the
+# incident: wiggum creates the process, in wiggum's session, so no pass kill can
+# reach it. `adopt` is accepted only when the pass really did detach the job —
+# a pid in the PASS's own session would die with the next kill, and a yield on it
+# would wait for something already doomed.
+yield_take_job() {
+  local base pidfile pass_sid job_sid
+  mkdir -p "$YIELD_JOB_DIR" 2>/dev/null || true
+  # Run-scoped AND attempt-scoped AND yield-scoped, copying ensure_long_job's
+  # discipline exactly: attempt numbers reset to 1 in every fresh orchestrator
+  # process, so an attempt-only name lets a marker from a wholly unrelated run
+  # satisfy a brand-new one (confirmed live 2026-08-30).
+  base="phase${PHASE}-attempt${ATTEMPT}-${RUN_ID}-yield${YIELD_INDEX}"
+  pidfile="$YIELD_JOB_DIR/${base}.pid"
+  YIELD_JOB_RC="$YIELD_JOB_DIR/${base}.rc"
+  [[ -n "$YIELD_JOB_LOG" ]] || YIELD_JOB_LOG="$YIELD_JOB_DIR/${base}.log"
+  YIELD_JOB_PID=""
+  if [[ "$YIELD_MODE" == "adopt" ]]; then
+    pass_sid="$(ps -o sid= -p "$$" 2>/dev/null | tr -d ' ')"
+    job_sid="$(ps -o sid= -p "$YIELD_ADOPT_PID" 2>/dev/null | tr -d ' ')"
+    if [[ -z "$job_sid" ]]; then
+      echo "proposer.sh: refusing the adopt yield — pid $YIELD_ADOPT_PID is not running" >&2
+      wiggum_emit yield_invalid iter "$CURRENT_ITER" reason "adopt pid $YIELD_ADOPT_PID is not running" \
+        artifact "$YIELD_ARTIFACT"
+      return 1
+    fi
+    if [[ "$job_sid" == "$pass_sid" ]]; then
+      echo "proposer.sh: refusing the adopt yield — pid $YIELD_ADOPT_PID is in this pass's own session ($job_sid); it would be killed with the pass. Start it with setsid, or use mode 'launch'." >&2
+      wiggum_emit yield_invalid iter "$CURRENT_ITER" \
+        reason "adopt pid $YIELD_ADOPT_PID shares the pass session $job_sid" \
+        artifact "$YIELD_ARTIFACT"
+      return 1
+    fi
+    YIELD_JOB_PID="$YIELD_ADOPT_PID"
+    wiggum_emit yield_job_start iter "$CURRENT_ITER" mode adopt pid "$YIELD_JOB_PID" \
+      log "$YIELD_JOB_LOG" sid "$job_sid"
+    return 0
+  fi
+  mapfile -t YIELD_ARGV < <(_yield_py argv "$YIELD_ARTIFACT" "$WORKDIR" "$WIGGUM_YIELD_ALLOW_COMMAND" 2>/dev/null)
+  [[ ${#YIELD_ARGV[@]} -gt 0 ]] || return 1
+  rm -f "$pidfile" "$YIELD_JOB_RC"
+  # Both markers are written by wiggum's own wrapper, atomically (tmp + mv), so
+  # the default `exit_code_file` predicate can never see a half-written rc and the
+  # pidfile never names a process that is not the job. `bash -c` here interpolates
+  # NOTHING into a command line: $0 is the pidfile, $1 the rc file, "$@" (after
+  # the shift) the fixed argv the agent declared.
+  #
+  # The wrapper records its OWN pid rather than letting the launcher record `$!`:
+  # bash puts every backgrounded command in its own process group, which makes
+  # setsid(1) a group leader, which makes it fork instead of setsid()-ing in
+  # place — so `$!` is a short-lived launcher in the OLD session, not the job.
+  # `kill -0` on that pid would report a running job as finished within seconds.
+  wiggum_launch_owned_job "${pidfile}.launcher" "$YIELD_JOB_LOG" "$YIELD_JOB_CWD" -- \
+    bash -c 'printf "%s\n" "$$" > "$0.tmp" && mv "$0.tmp" "$0"
+             rc="$1"; shift; set +e; "$@"; printf "%s\n" "$?" > "$rc.tmp" && mv "$rc.tmp" "$rc"' \
+      "$pidfile" "$YIELD_JOB_RC" "${YIELD_ARGV[@]}"
+  local settle=0
+  while [[ ! -s "$pidfile" ]] && (( settle < 100 )); do sleep 0.1; settle=$(( settle + 1 )); done
+  YIELD_JOB_PID="$(tr -d ' \n' < "$pidfile" 2>/dev/null)"
+  if [[ -z "$YIELD_JOB_PID" ]]; then
+    echo "proposer.sh: the yield job never reported a pid; refusing the yield. See $YIELD_JOB_LOG" >&2
+    wiggum_emit yield_invalid iter "$CURRENT_ITER" reason "the launched job never reported a pid" \
+      artifact "$YIELD_ARTIFACT" log "$YIELD_JOB_LOG"
+    return 1
+  fi
+  job_sid="$(ps -o sid= -p "$YIELD_JOB_PID" 2>/dev/null | tr -d ' ')"
+  wiggum_emit yield_job_start iter "$CURRENT_ITER" mode launch pid "$YIELD_JOB_PID" \
+    argv "${YIELD_ARGV[*]}" log "$YIELD_JOB_LOG" sid "$job_sid"
+  return 0
+}
+
+# Poll the predicate with NO model session open. Prints exactly one word:
+# satisfied | timeout | stop | wall_budget.
+wait_for_yield() {
+  local tick="$WIGGUM_YIELD_POLL" ticks=0 waited=0 now rc
+  local started="$YIELD_STARTED_AT"
+  while :; do
+    # stop.flag is checked every tick, not only at pass boundaries: a yield can
+    # be hours long, and `wiggum stop` must not have to wait for it.
+    if [[ -f "$STATE_DIR/stop.flag" ]]; then echo stop; return 0; fi
+    _yield_py check "$YIELD_ARTIFACT" "$WORKDIR" "$WIGGUM_YIELD_ALLOW_COMMAND" \
+      "$YIELD_JOB_PID" "$YIELD_JOB_RC" >/dev/null 2>&1
+    rc=$?
+    if (( rc == 0 )); then echo satisfied; return 0; fi
+    if (( rc == 2 )); then echo timeout; return 0; fi   # unsatisfiable: fail closed
+    now="$(date +%s)"; waited=$(( now - started ))
+    (( waited >= YIELD_DEADLINE )) && { echo timeout; return 0; }
+    # The run's own wall-clock budget must be honoured DURING a yield too: the
+    # orchestrator only checks it at phase boundaries, and the flock is held the
+    # whole time, so an unchecked yield could sail straight past it.
+    if [[ -n "${WIGGUM_MAX_WALL_MIN:-}" && "${WIGGUM_MAX_WALL_MIN:-0}" =~ ^[0-9]+$ ]] \
+       && (( WIGGUM_MAX_WALL_MIN > 0 )) && [[ -n "${WIGGUM_RUN_START_EPOCH:-}" ]]; then
+      (( (now - WIGGUM_RUN_START_EPOCH) / 60 >= WIGGUM_MAX_WALL_MIN )) && { echo wall_budget; return 0; }
+    fi
+    sleep "$tick"
+    ticks=$(( ticks + 1 ))
+    if (( WIGGUM_YIELD_WAIT_EVERY > 0 && ticks % WIGGUM_YIELD_WAIT_EVERY == 0 )); then
+      wiggum_emit yield_wait iter "$CURRENT_ITER" elapsed "$(( $(date +%s) - started ))" \
+        predicate_kind "$YIELD_PREDICATE" yield_index "$YIELD_INDEX"
+    fi
+  done
+}
+
+# What the resuming pass is told: the job's exit code, how long it took, a
+# BOUNDED slice of its log, and the pass's own on_resume sentence verbatim. The
+# slice is head AND tail with an explicit elision marker — the convention the
+# critic's elide_middle established, so a reader can tell an elision from an
+# absence.
+yield_resume_block() {
+  local rc="$1" duration="$2" lines head tail elided
+  cat <<EOF2
+## The job you yielded on has ENDED — resume from its result
+You ended your previous pass with a yield: "$YIELD_REASON"
+Wiggum waited for it with no model session open (${duration}s) and it is now done.
+Job log: $YIELD_JOB_LOG
+Exit code: ${rc:-unknown}
+Do NOT re-run it, and do NOT start it again — its output is already on disk.
+EOF2
+  if [[ -n "$YIELD_ON_RESUME" ]]; then
+    printf '\n### What you said you would do on resume (your own words)\n%s\n' "$YIELD_ON_RESUME"
+  fi
+  if [[ -f "$YIELD_JOB_LOG" ]]; then
+    lines="$(wc -l < "$YIELD_JOB_LOG" 2>/dev/null || echo 0)"
+    printf '\n### Its log (%s lines' "$lines"
+    if (( lines > WIGGUM_YIELD_LOG_HEAD + WIGGUM_YIELD_LOG_TAIL )); then
+      elided=$(( lines - WIGGUM_YIELD_LOG_HEAD - WIGGUM_YIELD_LOG_TAIL ))
+      printf ', head %s + tail %s shown)\n```\n' "$WIGGUM_YIELD_LOG_HEAD" "$WIGGUM_YIELD_LOG_TAIL"
+      head -n "$WIGGUM_YIELD_LOG_HEAD" "$YIELD_JOB_LOG"
+      printf '\n... [%s lines elided from the middle — the file itself is complete at %s] ...\n\n' \
+        "$elided" "$YIELD_JOB_LOG"
+      tail -n "$WIGGUM_YIELD_LOG_TAIL" "$YIELD_JOB_LOG"
+    else
+      printf ', shown in full)\n```\n'
+      cat "$YIELD_JOB_LOG"
+    fi
+    printf '```\n'
+  fi
+  printf '\nThis pass is the RESUME of that work: read the result above, write what it\nsupports, and end the pass.\n'
+}
+
 # One iteration. For claude/bebop the agent's stream-json is piped through the
 # local tap (agent_stream.py), which appends fine-grained events to events.jsonl
 # for the live presenter, prints a clean human summary for the log, and — only
@@ -1133,6 +1563,9 @@ for (( i=1; i<=MAX_ITER; i++ )); do
     echo "proposer.sh: stop.flag detected — stopping before pass $i" >&2
     exit 6
   fi
+  # Visible to this shell's own event emissions (the watchdog sets it again in
+  # the pass subshell, which cannot write back to here).
+  CURRENT_ITER="$i"
   wiggum_emit iter_start iter "$i" max_iter "$MAX_ITER"
   echo "----- proposer pass $i/$MAX_ITER  $(date -Is) -----" >&2
   # Stamped before the pass so the no-progress breaker can ask, afterwards, whether
@@ -1162,8 +1595,17 @@ for (( i=1; i<=MAX_ITER; i++ )); do
   # so the hour it lost becomes information instead of a repeated mistake.
   checkpoint_block="$(pass_checkpoint_block)"
   [[ -n "$checkpoint_block" ]] && pass_prompt="${pass_prompt}"$'\n\n'"${checkpoint_block}"
+  # A pass that yielded hands its successor the finished job's result, so the
+  # wait becomes work instead of a second discovery.
+  if [[ -n "$YIELD_RESUME_BLOCK" ]]; then
+    pass_prompt="${pass_prompt}"$'\n\n'"${YIELD_RESUME_BLOCK}"
+    YIELD_RESUME_BLOCK=""
+  fi
   # Consumed: the sidecar describes the pass that just ended, never an older one.
   rm -f "$KILL_SIDECAR" "$KILL_SIDECAR.path"
+  # Likewise the yield artifact: only what THIS pass writes may be acted on.
+  mkdir -p "$YIELD_DIR" 2>/dev/null || true
+  rm -f "$YIELD_ARTIFACT"
 
   run_iteration "$i" "$pass_prompt" &
   PASS_PID=$!
@@ -1217,6 +1659,89 @@ for (( i=1; i<=MAX_ITER; i++ )); do
     pass_kill_elapsed="$(cut -d'|' -f2 < "$KILL_SIDECAR" 2>/dev/null)"
     pass_kill_class="$(watchdog_kill_class "$pass_kill_reason")"
     echo "proposer.sh: pass $i was terminated by the watchdog ($pass_kill_reason, class $pass_kill_class); its checkpoint is carried into the next pass." >&2
+  fi
+
+  # ── did this pass YIELD? ───────────────────────────────────────────────────
+  # The artifact is read only AFTER the pass has exited. That is what makes "an
+  # agent that declares a yield but keeps working" unrepresentable rather than a
+  # race to reason about.
+  if [[ -f "$YIELD_ARTIFACT" && -n "$pass_kill_reason" ]]; then
+    # A pass the watchdog had to end did not end *voluntarily*, which is the one
+    # thing the protocol asks of it. Account the kill; refuse the yield.
+    echo "proposer.sh: ignoring pass $i's yield — the watchdog ended that pass ($pass_kill_reason), so it did not end voluntarily." >&2
+    wiggum_emit yield_invalid iter "$i" reason "the pass was killed by the watchdog ($pass_kill_reason)" \
+      artifact "$YIELD_ARTIFACT"
+    rm -f "$YIELD_ARTIFACT"
+  fi
+  # Evidence still wins outright, here as everywhere: a pass that wrote both a
+  # yield and its evidence is simply done.
+  if [[ ! -f "$EVIDENCE" ]] && read_yield; then
+    YIELD_INDEX=$(( YIELD_INDEX + 1 ))
+    if (( WIGGUM_YIELD_MAX_PER_ATTEMPT > 0 && YIELD_INDEX > WIGGUM_YIELD_MAX_PER_ATTEMPT )); then
+      echo "proposer.sh: this attempt has already yielded $WIGGUM_YIELD_MAX_PER_ATTEMPT times — aborting (exit 9). A yield is for waiting on ONE long job, not for making a phase out of waiting; split the phase, or pre-stage the measurement." >&2
+      wiggum_emit run_stop reason proposer_yield_budget iter "$i" \
+        yields "$(( YIELD_INDEX - 1 ))" max "$WIGGUM_YIELD_MAX_PER_ATTEMPT"
+      rm -f "$YIELD_ARTIFACT"
+      exit 9
+    fi
+    if yield_take_job; then
+      YIELD_STARTED_AT="$(date +%s)"
+      wiggum_emit pass_yield iter "$i" reason "$YIELD_REASON" predicate_kind "$YIELD_PREDICATE" \
+        deadline_sec "$YIELD_DEADLINE" job_mode "$YIELD_MODE" job_log "$YIELD_JOB_LOG" \
+        yield_index "$YIELD_INDEX"
+      echo "proposer.sh: pass $i yielded — $YIELD_REASON. Waiting on '$YIELD_PREDICATE' with NO model session open (deadline ${YIELD_DEADLINE}s)." >&2
+      yield_outcome="$(wait_for_yield)"
+      yield_waited=$(( $(date +%s) - YIELD_STARTED_AT ))
+      case "$yield_outcome" in
+        satisfied)
+          yield_rc=""
+          [[ -f "$YIELD_JOB_RC" ]] && yield_rc="$(tr -d ' \n' < "$YIELD_JOB_RC" 2>/dev/null)"
+          # waited_sec is the number that makes budget work possible at all: for
+          # the first time "how long the model worked" and "how long the loop was
+          # blocked" are separate fields instead of one indistinguishable total.
+          wiggum_emit yield_resume iter "$i" waited_sec "$yield_waited" \
+            job_rc "${yield_rc:-unknown}" job_duration_sec "$yield_waited" \
+            yield_index "$YIELD_INDEX" predicate_kind "$YIELD_PREDICATE"
+          YIELD_RESUME_BLOCK="$(yield_resume_block "$yield_rc" "$yield_waited")"
+          rm -f "$YIELD_ARTIFACT"
+          echo "proposer.sh: yield satisfied after ${yield_waited}s (job rc ${yield_rc:-unknown}) — resuming." >&2
+          wiggum_emit iter_done iter "$i" evidence missing yielded true waited_sec "$yield_waited"
+          # A yield is NOT an error and NOT a stall. The error breaker is left
+          # exactly as it was (not incremented, and deliberately not reset
+          # either), the no-progress breaker is skipped entirely — a yield is
+          # DECLARED waiting, which is precisely the distinction none of the
+          # three futility detectors could make — and by default the iteration is
+          # handed back, because yield + resume is ONE logical pass.
+          [[ "$WIGGUM_YIELD_COUNTS_AS_ITER" == "true" ]] || i=$(( i - 1 ))
+          continue
+          ;;
+        stop)
+          echo "proposer.sh: stop.flag detected during a yield — stopping (exit 6). The job is wiggum-owned and is LEFT RUNNING (pid ${YIELD_JOB_PID:-?}); its log is $YIELD_JOB_LOG." >&2
+          wiggum_emit run_stop reason stop_flag iter "$i" yield true \
+            job_pid "$YIELD_JOB_PID" job_log "$YIELD_JOB_LOG"
+          exit 6
+          ;;
+        timeout)
+          echo "proposer.sh: the yield's own deadline (${YIELD_DEADLINE}s) expired after ${yield_waited}s — halting (exit 9). The job is left alone; its log is $YIELD_JOB_LOG." >&2
+          wiggum_emit yield_timeout iter "$i" reason deadline waited_sec "$yield_waited" \
+            deadline_sec "$YIELD_DEADLINE" predicate_kind "$YIELD_PREDICATE" job_log "$YIELD_JOB_LOG"
+          wiggum_emit run_stop reason proposer_yield_timeout iter "$i"
+          exit 9
+          ;;
+        wall_budget)
+          echo "proposer.sh: the run's wall-clock budget expired during a yield after ${yield_waited}s — halting (exit 9). The job is left alone; its log is $YIELD_JOB_LOG." >&2
+          wiggum_emit yield_timeout iter "$i" reason wall_budget waited_sec "$yield_waited" \
+            deadline_sec "$YIELD_DEADLINE" predicate_kind "$YIELD_PREDICATE" job_log "$YIELD_JOB_LOG"
+          wiggum_emit run_stop reason proposer_yield_timeout iter "$i"
+          exit 9
+          ;;
+      esac
+    else
+      # Refused (a bad adopt). Consume it and account the pass exactly as a pass
+      # that simply wrote no evidence — a refused yield is not a free pass.
+      rm -f "$YIELD_ARTIFACT"
+      YIELD_INDEX=$(( YIELD_INDEX - 1 ))
+    fi
   fi
 
   # Evidence wins outright — a pass that produced the gate file is a success
