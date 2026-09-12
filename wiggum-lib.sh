@@ -395,3 +395,36 @@ detached, in the background as this pass starts. Do not launch it yourself.
 It will not be done by the time you read this; treat it as STILL RUNNING.
 EOF2
 }
+
+# ── step 4: gate-owned pre-staged long measurements ──────────────────────────
+# A declared verification command may carry `"stage": "prestage"`. Wiggum then
+# runs it ONCE per attempt — here, before the proposer pass — and the phase gate
+# reuses the passing result instead of re-executing a measurement the pass has
+# already paid for (design 02-wiggum-loop-design.md §3; the 002 telemetry counted
+# 159 launches of one live suite across a feature). A document that declares no
+# `stage` never reaches this path: verification_plan.py prints "No pre-stage
+# commands …" and nothing is logged or emitted.
+#
+# The report the proposer reads rides on the verification slice the prompt
+# already embeds, so this is the only orchestrator call site the step adds.
+wiggum_prestage_phase() {
+  local n="$1" attempt="$2"
+  [[ "${VERIFICATION:-off}" != "off" ]] || return 0
+  [[ -n "${VERIFICATION_JSON:-}" && -f "${VERIFICATION_JSON:-}" ]] || return 0
+  local lib="${LIB_DIR:-$_WIGGUM_LIB_DIR/lib}"
+  [[ -f "$lib/verification_plan.py" ]] || return 0
+
+  local out rc
+  out="$(python3 "$lib/verification_plan.py" prestage \
+      --plan "$VERIFICATION_JSON" \
+      ${SPECS:+--specs "$SPECS"} \
+      --phase "$n" --attempt "$attempt" 2>>"${LOG:-/dev/null}")"
+  rc=$?
+  out="${out##*$'\n'}"
+  [[ -z "$out" || "$out" == No\ pre-stage\ commands* ]] && return 0
+  # A failing pre-stage is information for the pass, never a halt: the phase gate
+  # is still the authority on whether the phase passes.
+  log "----- prestage: phase $n attempt $attempt (rc $rc) — $out -----"
+  wiggum_emit prestage_done phase "$n" attempt "$attempt" rc "$rc" summary "$out"
+  return 0
+}
