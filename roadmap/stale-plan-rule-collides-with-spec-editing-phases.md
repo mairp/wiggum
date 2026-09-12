@@ -37,7 +37,7 @@ from a criterion edit.
 
 ## Decision — option 1, implemented
 
-**Implemented on branch `sil-stale-plan`, commit `COMMIT_HASH`.** The staleness
+**Implemented on branch `sil-stale-plan`, commit `ad65556`.** The staleness
 hash now covers the *projection* `create` consumed, not the raw file:
 `spec_projection()` in `lib/verification_plan.py` canonicalises the adapter's name
 plus, per phase in document order, its number, its title and its criteria — the
