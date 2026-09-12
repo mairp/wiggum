@@ -35,9 +35,36 @@ A closure map, a release-gate statement, a "status row" — text the spec itself
 orders the proposer to write *inside the spec* at the end — is indistinguishable
 from a criterion edit.
 
-## Options (not yet decided)
+## Decision — option 1, implemented
 
-1. **Scope the hash to what the plan actually consumed.** `create` already parses
+**Implemented on branch `sil-stale-plan`, commit `ad65556`.** The staleness
+hash now covers the *projection* `create` consumed, not the raw file:
+`spec_projection()` in `lib/verification_plan.py` canonicalises the adapter's name
+plus, per phase in document order, its number, its title and its criteria — the
+`- [ ] T### …` task lines with the checkbox stripped, exactly the normalisation the
+old rule did. `create` records `source.projection: "tasks-v2"` beside
+`source.contentHash`; the gate recomputes the projection of the live file and
+compares. A closure-map cell, a release-gate section, a run note appended to the
+file no longer stale a plan. A changed criterion, an added or removed task, a
+renamed or reordered phase, a dropped phase, an unparseable document and an
+unknown projection version all still refuse, closed.
+
+Declared commands are not part of this: `--verification-commands` keeps its own
+`contentHash` inside the hashed plan body, as before.
+
+Back-compat: a plan file with no `source.projection` — written before this change —
+is checked with the raw-text rule as before. Options 2 and 3 stay below as the
+record of what was considered; neither is needed now.
+
+Known limit: the projection is exactly what `create` reads, so a *continuation
+line* of a wrapped task (the parser takes only the checkbox line) is prose to the
+hash as it is to the plan. Spec Kit writes one line per task; a spec that wraps its
+criteria gets less protection than one that does not.
+
+## Options (as considered)
+
+1. **Scope the hash to what the plan actually consumed.** *(chosen — see above.)*
+   `create` already parses
    phases, task ids and criteria out of `tasks.md`; hash *that projection* (the
    parsed task list + declared commands), not the raw prose. A closure-map cell
    change then leaves the hash intact; a changed criterion still trips it.
@@ -53,7 +80,12 @@ from a criterion edit.
 
 Any of the three must keep `lib/test_verification_plan.py::test_stale_source_hash_fails_closed`
 meaningful — the test should be extended with "a closure-map edit does not stale
-the plan; a criterion edit does", not weakened.
+the plan; a criterion edit does", not weakened. Done: that test now drives six
+projection edits (criterion rewritten, criterion deleted, task added, phase
+renamed, phase dropped, phases emptied) and asserts the untouched document still
+loads, and six new tests cover the closure map, a prose paragraph, a criterion
+edit, an added task, a reordered phase and an old plan without the field, over a
+Spec Kit `tasks.md` fixture in the real shape.
 
 Related: `roadmap/research/self-improvement-loops/02-wiggum-loop-design.md` §3
 (gate-owned measurements — the same phase, the same run, the other harness cost).

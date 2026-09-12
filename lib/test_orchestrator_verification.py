@@ -363,7 +363,12 @@ def test_required_verification_runs_release_gate_when_phases_are_already_approve
     assert release.is_file()
     plan = json.loads(canonical.read_text())
     evidence = json.loads(release.read_text())
-    assert set(plan["source"]) == {"bundleId", "contentHash", "specPath"}
+    assert set(plan["source"]) == {
+        "bundleId",
+        "contentHash",
+        "projection",
+        "specPath",
+    }
     assert evidence["passed"] is True
 
 
