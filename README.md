@@ -505,8 +505,10 @@ with **zero containers**. Two views over the same event stream:
 
 ## The `wiggum` inspection CLI
 
-Everything is read-only **except `stop` and `resume`** — those are the only two
-subcommands that mutate a run (they write `stop.flag` / relaunch the orchestrator).
+Everything is read-only **except `stop`, `resume`, and `learn --apply|--revert|--off`**
+— those are the only subcommands that mutate anything (`learn`'s writes are
+confined to its own `learning/applied.json` decision log and a `knob_adjusted`
+event; see [Learning](#learning-self-tuning-knobs) below).
 
 All inspection subcommands take `--feature SLUG` and default to the **last run's
 feature** (from `.wiggum/last-run.conf`); `status --all` spans every feature.
@@ -522,6 +524,60 @@ feature** (from `.wiggum/last-run.conf`); `status --all` spans every feature.
 | `wiggum watch  [-w DIR]` | the live status card (with heartbeat + run totals) |
 | `wiggum stop   [-w DIR] [--now]` | **(mutates)** request a clean stop — writes `stop.flag`; the run finishes its current pass and exits 6. `--now` also kill-trees the in-flight proposer pass so it stops within seconds. Stops the single running run regardless of feature |
 | `wiggum resume [-w DIR] [--feature S] [overrides…]` | **(mutates)** relaunch the orchestrator from the saved config of the last run (`.wiggum/last-run.conf`, or a feature's own with `--feature`); refuses if a run is already active. Extra args override the saved flags (last-wins) |
+| `wiggum learn  [-w DIR] [--feature S] [--show\|--apply\|--revert <run-id>\|--off]` | the self-tuning loop over this feature's telemetry — see [Learning](#learning-self-tuning-knobs). `--show` (default) is read-only; `--apply`/`--revert`/`--off` **mutate** `learning/applied.json` |
+
+## Learning (self-tuning knobs)
+
+Wiggum can suggest — and, opt-in, apply — a per-phase `proposer_timeout` derived
+from what that phase has actually measured, instead of one global cap sized for
+the worst phase in the project. This is deliberately narrow: **suggest is the
+default, nothing is ever applied silently, and the set of knobs it may ever touch
+is a locked allowlist that can never include anything the critic reads.** Full
+design: `roadmap/research/self-improvement-loops/02-wiggum-loop-design.md` §5.
+
+- **Suggest by default.** `wiggum learn --show` (or bare `wiggum learn`) prints a
+  suggested value per phase plus the sample count behind it — it writes nothing.
+  A suggestion needs **at least 3 samples** of that phase's measured work time
+  (wall time minus declared wait/sleep) to be shown at all; a phase killed for
+  *futility* (`repeat_stall`, `progress_stall`) never contributes a sample,
+  because that failure's duration means nothing about how long the work takes.
+- **What can never move.** The adjustable-knob allowlist is exactly
+  `proposer_timeout`, `yield_poll_interval`, `inject_yield_hint` — nothing else,
+  ever. Grounding caps, the critic's backend/timeout, `--max-rejects`, anything in
+  `verification-commands.json`, and every breaker setting
+  (`WIGGUM_PROPOSER_MAX_ERRORS`/`MAX_NOPROGRESS`/`MAX_CAPS`, `REPEAT_LIMIT`) are
+  permanently out of scope: a breaker must never be able to relax itself, and
+  nothing that changes what a verdict means may be tuned. `lib/test_learn.py`
+  asserts this set literally, so adding a name to it means deliberately editing a
+  test that explains why that must not happen.
+- **Bounded and reversible.** Every numeric suggestion is clamped to a hard
+  `[900 s, 2×default]` bound and to no more than a ±50% step from whatever value
+  is currently in effect — a self-tuner cannot run away in one step even if the
+  telemetry that produced the suggestion was noisy.
+- **Applying, and undoing it.** `wiggum learn --apply --knob proposer_timeout
+  --phase N --default S` appends one decision to
+  `.wiggum/features/<slug>/learning/applied.json` (a separate, append-only file
+  from the plain observations — decisions and observations are never conflated)
+  with full provenance: the run ids the samples came from, the sample count, the
+  previous value, and a timestamp; it also emits a `knob_adjusted` event.
+  `wiggum learn --revert <run-id>` undoes exactly that one decision, restoring the
+  value from just before it (refused if a later decision has already superseded
+  it — reverting a stale one would silently clobber the newer one).
+  `wiggum learn --off` reverts every currently-applied knob for the feature at
+  once. None of this takes effect at run time unless the run itself is launched
+  with `WIGGUM_LEARNING=apply` in its environment — **unset, `off`, or any other
+  value is a total no-op**: the applied log isn't even opened, and behaviour is
+  byte-identical to a project that has never used `learn` at all.
+- **The integration point.** The one place a learned value can reach a live run is
+  `lib/learn.py resolve`, a small shell-callable entry point — not a change to
+  `orchestrator.sh` itself:
+
+  ```
+  python3 lib/learn.py resolve --knob proposer_timeout --phase <N> --default <S>
+  ```
+
+  prints one integer to stdout: the applied value for that phase if
+  `WIGGUM_LEARNING=apply` and one has been applied, else `<S>` unchanged.
 
 ## The on-disk contract
 

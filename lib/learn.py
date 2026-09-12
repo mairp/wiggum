@@ -39,6 +39,20 @@ Outcome taxonomy (per pass, recommendation 2 / design §4.2)
 ``productive``       agent_result success and evidence written.
 ``open``             the pass has no terminal event yet (stream still growing).
 
+Step 5 — the learning loop
+---------------------------
+``advise``/``apply``/``revert``/``resolve``/``off`` turn the §5.3 metrics into a
+*suggested*, then optionally *applied*, per-phase ``proposer_timeout``. Storage
+follows §5.4 exactly: an attempt/phase summary is an **observation**; a knob value
+this module has decided to use is a separate, append-only **decision** log
+(``<feature-dir>/learning/applied.json``, JSON-lines, one entry per apply/revert,
+each keyed by a ``run_id``) so the two can never be conflated. The adjustable-knob
+allowlist (``ADJUSTABLE_KNOBS``, §5.5) is a locked literal set: nothing the critic
+reads may ever appear in it. ``resolve`` is the one integration point another
+component may call — see ``resolve_knob`` — and it is a total no-op unless
+``WIGGUM_LEARNING=apply`` is set in its environment, matching the "suggest is the
+default; unset/off changes nothing" rule of §5.5 invariant 5.
+
 Output schema (``wiggum.learn.summary/1``)
 ------------------------------------------
 {
@@ -84,7 +98,10 @@ import json
 import os
 import re
 import sys
+import time
+import uuid
 from collections import Counter, OrderedDict
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
 SCHEMA = "wiggum.learn.summary/1"
@@ -601,6 +618,10 @@ def _phases(attempts: List[dict]) -> "OrderedDict[str, dict]":
             "cost_usd": round(sum(a["cost_usd"] for a in atts), 4),
             "work_sec_p50": percentile(work, 0.5),
             "work_sec_p90": percentile(work, 0.9),
+            # design §5.5 invariant 4 (the evidence floor): the sample count *behind*
+            # the percentiles above — futility-killed attempts already excluded from
+            # `work`, so this is exactly the denominator `advise`/`apply` must check.
+            "work_sec_samples": len(work),
             "kills_by_reason": dict(kills),
         }
     return out
@@ -617,6 +638,262 @@ def count_live_invocations(run_log_path: str, pattern: str) -> int:
             if s.startswith("→ ") and rx.search(s):
                 n += 1
     return n
+
+
+# ── the learning loop (design §5 / §6 step 5) ───────────────────────────────
+#
+# ADJUSTABLE_KNOBS is the §5.5 allowlist — the *only* names `apply`/`resolve` may
+# ever act on. It is a locked literal set on purpose (see the test that asserts
+# it): a critic-facing knob (grounding caps, critic backend/timeout, --max-rejects,
+# anything in verification-commands.json) or a breaker setting (MAX_ERRORS,
+# MAX_NOPROGRESS, MAX_CAPS, REPEAT_LIMIT/REPEAT_IGNORE) must never be addable here
+# without deliberately editing that test.
+ADJUSTABLE_KNOBS = frozenset({
+    "proposer_timeout",      # §4.1 per-phase proposer cap — bound [900, 2×default], ±50%/step
+    "yield_poll_interval",   # §2.1 wait_for_yield poll cadence — bound [10, 300] s
+    "inject_yield_hint",     # §2.2 "prepend the yield contract to phase N's prompt" — boolean
+})
+
+# Hard bounds per §5.5. `proposer_timeout`'s upper bound is relative to the
+# caller-supplied default (2×), so it is computed at suggestion time, not fixed here.
+KNOB_HARD_MIN = {"proposer_timeout": 900, "yield_poll_interval": 10}
+KNOB_HARD_MAX_FIXED = {"yield_poll_interval": 300}   # proposer_timeout: 2 × default
+STEP_CAP_FRACTION = 0.5   # "≤ ±50% per step" — every numeric adjustable knob
+
+LEARN_APPLIED_SCHEMA = "wiggum.learn.applied/1"
+
+
+def _now_ts() -> str:
+    return str(time.time())
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _new_run_id() -> str:
+    return "learn-" + uuid.uuid4().hex[:12]
+
+
+def _read_jsonl(path: Optional[str]) -> List[dict]:
+    if not path or not os.path.isfile(path):
+        return []
+    out: List[dict] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+    return out
+
+
+def _append_jsonl(path: Optional[str], obj: dict) -> None:
+    if not path:
+        return
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj, sort_keys=False) + "\n")
+
+
+def _feature_paths(feature_dir: Optional[str], applied_file: Optional[str],
+                    events_file: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """§5.4: applied.json lives under <feature-dir>/learning/, separate from the
+    feature's own events.jsonl that `knob_adjusted` is appended to. Explicit
+    --applied-file/--events-file win over anything derived from --feature-dir."""
+    if not applied_file and feature_dir:
+        applied_file = os.path.join(feature_dir, "learning", "applied.json")
+    if not events_file and feature_dir:
+        events_file = os.path.join(feature_dir, "events.jsonl")
+    return applied_file, events_file
+
+
+def effective_value(applied_file: Optional[str], knob: str, phase: int):
+    """Replay the append-only decision log to the current value of (knob, phase),
+    or None if nothing has ever been applied. Both an `apply` and a `revert` entry
+    record the resulting value under "value" — a `revert` restores the value that
+    was current *before* the apply it targets — so a straight last-one-wins replay
+    is correct for either kind of entry."""
+    current = None
+    for e in _read_jsonl(applied_file):
+        if e.get("knob") == knob and _int(e.get("phase")) == phase:
+            current = e.get("value")
+    return current
+
+
+def _round_step(value: float, step: int = 60) -> int:
+    return int(round(value / step)) * step
+
+
+def suggest_proposer_timeout(phase_stats: dict, default: int, current: Optional[int] = None) -> dict:
+    """§4.1 + §5.3: the per-phase proposer cap, derived from this phase's measured
+    ``work_sec`` (futility-killed passes already excluded upstream in `_phases`).
+    Returns a value of None — never a number — below the 3-sample evidence floor
+    (§5.5 invariant 4); the caller (`apply`) must refuse to act on that."""
+    samples = _int(phase_stats.get("work_sec_samples")) or 0
+    hard_lo, hard_hi = KNOB_HARD_MIN["proposer_timeout"], 2 * default
+    if samples < 3:
+        return {
+            "knob": "proposer_timeout", "samples": samples, "value": None,
+            "reason": f"fewer than 3 non-futility-killed samples (have {samples})",
+            "bounds": [hard_lo, hard_hi], "step_cap": None,
+        }
+    raw = phase_stats.get("work_sec_p90")
+    if raw is None:
+        raw = phase_stats.get("work_sec_p50")
+    target = float(raw or 0.0) * 1.25   # headroom over the observed p90 work time
+    base = current if current is not None else default
+    step_lo, step_hi = base * (1 - STEP_CAP_FRACTION), base * (1 + STEP_CAP_FRACTION)
+    lo = max(hard_lo, step_lo)
+    hi = min(hard_hi, step_hi)
+    if lo > hi:   # a degenerate window (current sits outside the hard bounds already)
+        lo, hi = hard_lo, hard_hi
+    value = min(max(target, lo), hi)
+    value = _round_step(value)
+    value = min(max(value, hard_lo), hard_hi)   # rounding must never escape the hard bound
+    return {
+        "knob": "proposer_timeout", "samples": samples, "value": value, "reason": None,
+        "bounds": [hard_lo, hard_hi], "step_cap": [round(step_lo), round(step_hi)],
+        "work_sec_p50": phase_stats.get("work_sec_p50"), "work_sec_p90": phase_stats.get("work_sec_p90"),
+    }
+
+
+def advise(summary: dict, knob: str, phase: Optional[int], default: int,
+           applied_file: Optional[str] = None) -> List[dict]:
+    """One advice dict per phase (or just `phase` if given). Only `proposer_timeout`
+    has a suggestion engine — the other two allowlisted knobs are deliberately out
+    of scope for this step (§6 step 5: "one function, one knob, deliberately narrow")."""
+    if knob != "proposer_timeout":
+        raise ValueError(f"learn: no suggestion engine yet for knob {knob!r}")
+    phases = summary.get("phases", {})
+    keys = [str(phase)] if phase is not None else sorted(phases, key=lambda k: _int(k) or 0)
+    out = []
+    for k in keys:
+        stats = phases.get(k)
+        if stats is None:
+            continue
+        ph = _int(k)
+        current = effective_value(applied_file, knob, ph) if applied_file else None
+        adv = suggest_proposer_timeout(stats, default, current)
+        adv.update({"phase": ph, "current": current if current is not None else default,
+                    "runs_seen": stats.get("runs_seen", [])})
+        out.append(adv)
+    return out
+
+
+def apply_proposer_timeout(summary: dict, phase: int, default: int, applied_file: str,
+                            events_file: Optional[str] = None, run_id: Optional[str] = None) -> dict:
+    """Compute the suggestion for `phase` and, if it clears the evidence floor,
+    append one decision to `applied_file` and one `knob_adjusted` event to
+    `events_file`. Raises ValueError (never writes) when the floor isn't met or
+    the phase has no data — the caller reports that and exits non-zero."""
+    stats = summary.get("phases", {}).get(str(phase))
+    if stats is None:
+        raise ValueError(f"no telemetry for phase {phase}")
+    current = effective_value(applied_file, "proposer_timeout", phase)
+    adv = suggest_proposer_timeout(stats, default, current)
+    if adv["value"] is None:
+        raise ValueError(adv["reason"])
+    previous = current if current is not None else default
+    run_id = run_id or _new_run_id()
+    entry = {
+        "schema": LEARN_APPLIED_SCHEMA, "action": "apply", "run_id": run_id,
+        "knob": "proposer_timeout", "phase": phase, "value": adv["value"], "previous": previous,
+        "samples": adv["samples"], "source_runs": stats.get("runs_seen", []),
+        "metric": "work_sec_p90", "applied_at": _now_iso(),
+    }
+    _append_jsonl(applied_file, entry)
+    _append_jsonl(events_file, {
+        "event": "knob_adjusted", "ts": _now_ts(), "knob": "proposer_timeout", "phase": phase,
+        "from": previous, "to": adv["value"], "reason": "learned_from_work_sec_p90",
+        "metric": "work_sec_p90", "samples": adv["samples"], "run_id": run_id,
+    })
+    return entry
+
+
+def revert_run(run_id: str, applied_file: str, events_file: Optional[str] = None) -> dict:
+    """§5.5 invariant 3: undo exactly one prior `apply`, restoring the value that
+    was current before it. Raises ValueError if `run_id` names no apply entry, or
+    if it is not the *currently active* decision for its (knob, phase) — reverting
+    a superseded apply (one a later apply or revert has already overtaken) would
+    silently clobber whatever replaced it, since the log is replayed last-one-wins;
+    only the entry currently on top of that stack may be undone."""
+    entries = _read_jsonl(applied_file)
+    orig = None
+    for e in entries:
+        if e.get("action") == "apply" and e.get("run_id") == run_id:
+            orig = e
+    if orig is None:
+        raise ValueError(f"no applied entry with run_id {run_id!r}")
+    latest = None
+    for e in entries:
+        if e.get("knob") == orig["knob"] and _int(e.get("phase")) == orig["phase"]:
+            latest = e
+    if not (latest is not None and latest.get("action") == "apply" and latest.get("run_id") == run_id):
+        raise ValueError(f"run_id {run_id!r} is not the active decision for "
+                          f"{orig['knob']}[{orig['phase']}] — nothing to revert")
+    entry = {
+        "schema": LEARN_APPLIED_SCHEMA, "action": "revert", "run_id": _new_run_id(),
+        "reverts_run_id": run_id, "knob": orig["knob"], "phase": orig["phase"],
+        "value": orig["previous"], "previous": orig["value"], "applied_at": _now_iso(),
+    }
+    _append_jsonl(applied_file, entry)
+    _append_jsonl(events_file, {
+        "event": "knob_adjusted", "ts": _now_ts(), "knob": orig["knob"], "phase": orig["phase"],
+        "from": orig["value"], "to": orig["previous"], "reason": "revert",
+        "samples": None, "metric": None, "run_id": entry["run_id"], "reverts_run_id": run_id,
+    })
+    return entry
+
+
+def revert_all(applied_file: str, events_file: Optional[str] = None) -> List[dict]:
+    """`wiggum learn --off`: revert every (knob, phase) currently at a non-default
+    value, in one pass — the bulk form of `revert_run` for "turn learning off"."""
+    latest: "OrderedDict[Tuple[str, int], dict]" = OrderedDict()
+    for e in _read_jsonl(applied_file):
+        key = (e.get("knob"), _int(e.get("phase")))
+        latest[key] = e
+    out = []
+    for (knob, phase), e in latest.items():
+        if e.get("action") == "revert":
+            continue   # already at baseline
+        out.append(revert_run(e["run_id"], applied_file, events_file))
+    return out
+
+
+def resolve_knob(knob: str, phase: int, default: int, applied_file: Optional[str],
+                  env: Optional[dict] = None) -> int:
+    """The one integration point (§6 step 5): what another component (e.g. a future
+    `resolve_proposer_timeout`) calls to get this run's value for `knob`/`phase`.
+
+    Total no-op — the applied log is not even opened — unless the environment sets
+    WIGGUM_LEARNING=apply. Unset, "off", "suggest", or any other value all return
+    `default` unchanged: this is what makes "WIGGUM_LEARNING unset or off" and the
+    default "suggest" mode both zero-behaviour-change (§5.5 invariant 5; the
+    migration table in the design doc)."""
+    env = os.environ if env is None else env
+    if env.get("WIGGUM_LEARNING") != "apply":
+        return int(default)
+    if knob not in ADJUSTABLE_KNOBS:
+        return int(default)
+    value = effective_value(applied_file, knob, phase)
+    if value is None:
+        return int(default)
+    if knob not in KNOB_HARD_MIN:
+        # a numeric-hard-bound-less knob (e.g. a future boolean knob) has no apply
+        # engine yet either (see `apply_proposer_timeout`), so this is defensive
+        # dead code today, not a real path — never invent a clamp for it.
+        return int(default)
+    hard_lo = KNOB_HARD_MIN[knob]
+    hard_hi = KNOB_HARD_MAX_FIXED.get(knob, 2 * default)   # proposer_timeout: 2×default
+    return int(min(max(int(value), hard_lo), hard_hi))
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -644,6 +921,118 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_summary(args: argparse.Namespace) -> Optional[dict]:
+    """advise/apply accept either --summary (a `summarize --out` document, so a
+    caller can decouple measuring from advising) or --events (computed fresh)."""
+    if getattr(args, "summary", None):
+        with open(args.summary, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    if getattr(args, "events", None):
+        files = find_event_files(args.events)
+        if not files:
+            print("learn: no events.jsonl found under: " + ", ".join(args.events), file=sys.stderr)
+            return None
+        events: List[dict] = []
+        for f in files:
+            events.extend(read_events(f))
+        return summarize(events)
+    print("learn: one of --events or --summary is required", file=sys.stderr)
+    return None
+
+
+def _cmd_advise(args: argparse.Namespace) -> int:
+    summary = _load_summary(args)
+    if summary is None:
+        return 2
+    applied_file, _ = _feature_paths(args.feature_dir, args.applied_file, None)
+    try:
+        rows = advise(summary, args.knob, args.phase, args.default, applied_file)
+    except ValueError as e:
+        print(f"learn: {e}", file=sys.stderr)
+        return 2
+    if not rows:
+        print(f"learn: no telemetry for {'phase ' + str(args.phase) if args.phase is not None else 'any phase'}",
+              file=sys.stderr)
+        return 1
+    for r in rows:
+        if r["value"] is None:
+            print(f"learn: phase {r['phase']} {r['knob']}: {r['samples']} sample(s) — {r['reason']}; "
+                  f"no suggestion (need {'>=3'})")
+        else:
+            print(f"learn: phase {r['phase']} {r['knob']}: {r['samples']} sample(s), "
+                  f"work p50={r.get('work_sec_p50')}s p90={r.get('work_sec_p90')}s, "
+                  f"current={r['current']}s → suggest {r['value']}s "
+                  f"(bounds={r['bounds']}, step_cap={r['step_cap']}) "
+                  f"[not applied — run `wiggum learn --apply` to take effect]")
+    if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(rows, indent=2) + "\n")
+    return 0
+
+
+def _cmd_apply(args: argparse.Namespace) -> int:
+    if args.knob not in ADJUSTABLE_KNOBS:
+        print(f"learn: '{args.knob}' is not in the adjustable-knob allowlist "
+              f"({sorted(ADJUSTABLE_KNOBS)}) — refusing", file=sys.stderr)
+        return 2
+    if args.knob != "proposer_timeout":
+        print(f"learn: no apply engine yet for knob {args.knob!r}", file=sys.stderr)
+        return 2
+    summary = _load_summary(args)
+    if summary is None:
+        return 2
+    applied_file, events_file = _feature_paths(args.feature_dir, args.applied_file, args.events_file)
+    if not applied_file:
+        print("learn: --applied-file or --feature-dir is required to apply", file=sys.stderr)
+        return 2
+    try:
+        entry = apply_proposer_timeout(summary, args.phase, args.default, applied_file,
+                                        events_file=events_file, run_id=args.run_id)
+    except ValueError as e:
+        print(f"learn: refusing to apply — {e}", file=sys.stderr)
+        return 3
+    print(f"learn: applied {entry['knob']}[{entry['phase']}] {entry['previous']}s -> {entry['value']}s "
+          f"(samples={entry['samples']}, run_id={entry['run_id']}) → {applied_file}")
+    return 0
+
+
+def _cmd_revert(args: argparse.Namespace) -> int:
+    applied_file, events_file = _feature_paths(args.feature_dir, args.applied_file, args.events_file)
+    if not applied_file:
+        print("learn: --applied-file or --feature-dir is required to revert", file=sys.stderr)
+        return 2
+    try:
+        entry = revert_run(args.run_id, applied_file, events_file=events_file)
+    except ValueError as e:
+        print(f"learn: {e}", file=sys.stderr)
+        return 2
+    print(f"learn: reverted {args.run_id} — {entry['knob']}[{entry['phase']}] back to {entry['value']}s")
+    return 0
+
+
+def _cmd_off(args: argparse.Namespace) -> int:
+    applied_file, events_file = _feature_paths(args.feature_dir, args.applied_file, args.events_file)
+    if not applied_file:
+        print("learn: --applied-file or --feature-dir is required", file=sys.stderr)
+        return 2
+    reverted = revert_all(applied_file, events_file=events_file)
+    if reverted:
+        for e in reverted:
+            print(f"learn: reverted {e['reverts_run_id']} — {e['knob']}[{e['phase']}] back to {e['value']}s")
+    else:
+        print("learn: nothing was applied — already at defaults")
+    print("learn: note — WIGGUM_LEARNING=off (or unset) in the run's environment is what actually "
+          "makes `resolve` ignore applied.json; this command only clears the recorded decisions.")
+    return 0
+
+
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    applied_file, _ = _feature_paths(args.feature_dir, args.applied_file, None)
+    print(resolve_knob(args.knob, args.phase, args.default, applied_file))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="learn.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -657,6 +1046,55 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--out", help="write JSON here (default: stdout)")
     s.add_argument("--pretty", action="store_true")
     s.set_defaults(func=_cmd_summarize)
+
+    def _events_or_summary(p):
+        p.add_argument("--events", action="append", help="events.jsonl, a run dir, or a dir of run dirs (repeatable)")
+        p.add_argument("--summary", help="a `summarize --out` JSON document, instead of --events")
+
+    a = sub.add_parser("advise", help="print suggested knob value(s) — writes nothing (§5.5 invariant 5)")
+    _events_or_summary(a)
+    a.add_argument("--knob", default="proposer_timeout", choices=sorted(ADJUSTABLE_KNOBS))
+    a.add_argument("--phase", type=int, help="one phase only (default: every phase seen)")
+    a.add_argument("--default", type=int, required=True, help="the global default this knob falls back to")
+    a.add_argument("--feature-dir", help="<feature-dir>/learning/applied.json is read for 'current', if present")
+    a.add_argument("--applied-file", help="override the applied.json path (instead of deriving from --feature-dir)")
+    a.add_argument("--out", help="also write the advice rows as JSON here")
+    a.set_defaults(func=_cmd_advise)
+
+    ap_ = sub.add_parser("apply", help="apply the current suggestion for one phase — writes applied.json + a "
+                                        "knob_adjusted event (§5.4/§5.5 invariant 3)")
+    _events_or_summary(ap_)
+    ap_.add_argument("--knob", default="proposer_timeout", choices=sorted(ADJUSTABLE_KNOBS))
+    ap_.add_argument("--phase", type=int, required=True)
+    ap_.add_argument("--default", type=int, required=True)
+    ap_.add_argument("--feature-dir", help="derives --applied-file/--events-file under it (§5.4 layout)")
+    ap_.add_argument("--applied-file", help="<feature-dir>/learning/applied.json by default")
+    ap_.add_argument("--events-file", help="<feature-dir>/events.jsonl by default; the knob_adjusted event goes here")
+    ap_.add_argument("--run-id", help="override the generated run id (mainly for tests)")
+    ap_.set_defaults(func=_cmd_apply)
+
+    r = sub.add_parser("revert", help="undo one prior apply by its run id — restores the prior value exactly")
+    r.add_argument("run_id")
+    r.add_argument("--feature-dir")
+    r.add_argument("--applied-file")
+    r.add_argument("--events-file")
+    r.set_defaults(func=_cmd_revert)
+
+    o = sub.add_parser("off", help="revert every currently-applied knob at once (`wiggum learn --off`)")
+    o.add_argument("--feature-dir")
+    o.add_argument("--applied-file")
+    o.add_argument("--events-file")
+    o.set_defaults(func=_cmd_off)
+
+    rs = sub.add_parser("resolve", help="the shell-callable integration point: print one integer — the effective "
+                                         "value of --knob/--phase, or --default if WIGGUM_LEARNING != apply")
+    rs.add_argument("--knob", required=True, choices=sorted(ADJUSTABLE_KNOBS))
+    rs.add_argument("--phase", type=int, required=True)
+    rs.add_argument("--default", type=int, required=True)
+    rs.add_argument("--feature-dir")
+    rs.add_argument("--applied-file")
+    rs.set_defaults(func=_cmd_resolve)
+
     args = ap.parse_args(argv)
     return args.func(args)
 
