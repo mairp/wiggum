@@ -649,7 +649,9 @@ _CHECKBOX_TICK = re.compile(r"(?m)^([ \t]*-[ \t]*)\[[xX]\]")
 
 
 def spec_source_text(text):
-    """The specification text as hashed for staleness: a ticked task checkbox
+    """The raw-text staleness rule, kept for plans written before ``tasks-v2``
+    (``source.projection`` absent): the specification text as hashed for
+    staleness, in which a ticked task checkbox
     (`- [x]`) reads as unticked. Spec Kit ticks tasks.md as work lands, which is
     progress on the same spec, not a different one (semantic-router-sovereign
     phase 12, 2026-09-08: seven ticks made every gate report the plan stale)."""
@@ -659,6 +661,56 @@ def spec_source_text(text):
 def _criterion_text(criterion):
     match = re.match(r"^[ \t]*-[ \t]*\[[ xX]?\][ \t]*(.*)$", criterion)
     return (match.group(1) if match else criterion).strip()
+
+
+# The staleness rule hashes the PROJECTION the plan consumed, not the raw file.
+# ``tasks-v2`` is that projection's version, recorded in ``source.projection`` so a
+# plan written by an older Wiggum (no such field) is still checked by the old
+# raw-text rule — see ``spec_projection`` and ``validate_plan``.
+SPEC_PROJECTION = "tasks-v2"
+
+
+def _spec_projection_document(fmt, phases):
+    return {
+        "projection": SPEC_PROJECTION,
+        "format": fmt,
+        "phases": [
+            {
+                "n": phase.n,
+                "title": (phase.title or "").strip(),
+                "criteria": [
+                    _criterion_text(criterion) for criterion in (phase.criteria or [])
+                ],
+            }
+            for phase in phases
+        ],
+    }
+
+
+def spec_projection(text, fmt, phases=None):
+    """The specification as the plan actually consumed it, as canonical JSON.
+
+    ``create_plan`` reads exactly three things out of the document: the adapter
+    that parses it, the ordered phase set (number and title), and each phase's
+    criteria — the `- [ ] T### …` task lines, checkbox state already stripped by
+    ``_criterion_text``. Every obligation, suite and gate is built from those and
+    from nothing else, so those are what staleness must cover.
+
+    The surrounding prose is deliberately NOT in here: a milestone closure map, a
+    release-gate statement, a run note appended to the file. Phase 15 of
+    semantic-router-sovereign 002 (2026-09-11) had tasks whose own deliverable was
+    rewriting the closure map inside tasks.md; the whole-file hash then refused the
+    gate that the same phase's work had just earned, and no proposer attempt could
+    ever clear it. A changed criterion, an added or removed task, a renamed or
+    reordered phase still move this hash and still fail the gate closed.
+    """
+    if phases is None:
+        phases = wiggum_spec.get_phases(text, fmt)
+    return canonical_json(_spec_projection_document(fmt, phases))
+
+
+def spec_projection_hash(text, fmt, phases=None):
+    return sha256_text(spec_projection(text, fmt, phases=phases))
 
 
 def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
@@ -698,7 +750,7 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
                     ", ".join(str(value) for value in sorted(spec_phases)),
                 )
             )
-    spec_hash = sha256_text(spec_source_text(text))
+    spec_hash = spec_projection_hash(text, resolved_format, phases=phases)
     bundle_id = deterministic_ulid(
         "%s:%s:%s" % (specs_path, resolved_format, spec_hash)
     )
@@ -930,6 +982,7 @@ def create_plan(workdir, specs_path, fmt=None, required=False, environ=None,
         "source": {
             "bundleId": bundle_id,
             "contentHash": spec_hash,
+            "projection": SPEC_PROJECTION,
             "specPath": specs_path,
         },
         "project": {
@@ -1018,7 +1071,31 @@ def validate_plan(plan, expected_specs=None):
                 % (expected_specs, plan["source"]["specPath"])
             )
         with open(expected_specs, encoding="utf-8", errors="replace") as handle:
-            actual_hash = sha256_text(spec_source_text(handle.read()))
+            text = handle.read()
+        projection = plan["source"].get("projection")
+        if projection is None:
+            # A plan written before the projection rule: check it the way it was
+            # hashed, over the raw text with ticks normalised away.
+            actual_hash = sha256_text(spec_source_text(text))
+        elif projection != SPEC_PROJECTION:
+            # Fail closed on a projection this build cannot reproduce: the plan
+            # was derived by a reading of the document we no longer know.
+            raise VerificationError(
+                "verification plan was hashed with an unsupported source "
+                "projection: %s (this build writes %s)"
+                % (projection, SPEC_PROJECTION)
+            )
+        else:
+            try:
+                # The adapter is part of the projection, so a document now read by
+                # a different adapter hashes differently and refuses, as it should.
+                fmt = wiggum_spec.detect_format(expected_specs, text, None)
+                actual_hash = spec_projection_hash(text, fmt)
+            except Exception as error:  # unparseable now = not the plan's spec
+                raise VerificationError(
+                    "verification plan source cannot be projected: %s: %s"
+                    % (expected_specs, error)
+                )
         if actual_hash != plan["source"]["contentHash"]:
             raise VerificationError(
                 "verification plan is stale: expected source hash %s got %s"

@@ -22,17 +22,110 @@ SPEC = """# Demo
 """
 
 
+PACKAGE = {
+    "packageManager": "npm@10.0.0",
+    "scripts": {"test": "node --test", "build": "node --check index.js"},
+    "devDependencies": {"vitest": "2.1.9"},
+}
+
+
 def project(tmp_path):
     workdir = str(tmp_path)
     specs = tmp_path / "SPECS.md"
     specs.write_text(SPEC)
-    package = {
-        "packageManager": "npm@10.0.0",
-        "scripts": {"test": "node --test", "build": "node --check index.js"},
-        "devDependencies": {"vitest": "2.1.9"},
-    }
-    (tmp_path / "package.json").write_text(json.dumps(package))
+    (tmp_path / "package.json").write_text(json.dumps(PACKAGE))
     return workdir, str(specs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  A Spec Kit tasks.md in the real shape (modelled on semantic-router-sovereign
+#  specs/002-extproc-data-path/tasks.md): numbered phase headings carrying
+#  `- [ ] T### …` task lines, then a milestone closure map whose state column the
+#  last phase's own tasks are required to rewrite, then prose. The staleness rule
+#  has to tell those apart.
+# ─────────────────────────────────────────────────────────────────────────────
+SPECKIT_PHASE_1 = """## Phase 1: Setup — the pin, the additive compose and the tooling
+
+**Purpose**: everything outside the sidecar's Python that the binding needs, each
+additive, so that the proof's substrate is the shipped one.
+
+- [ ] T301 Record the hermetic test count as the baseline, then pin `grpclib>=0.4.9,<0.5` in `pyproject.toml` and rebuild the policy image with `tools/stack.sh build`
+- [ ] T302 [P] Add `initial_metadata: [{key: x-sov-filter, value: perimeter}]` under `grpc_service` of the perimeter filter in `deploy/envoy/sovereign.yaml`
+"""
+
+SPECKIT_PHASE_2 = """## Phase 2: User Story 1 — A `public` request travels the whole chain (Priority: P1)
+
+**Purpose**: the first story on the built path; every later story reuses its module.
+
+- [ ] T310 Starting a probe creates a durable decision record, read back through `/api/decisions` rather than from the response the mutation returned
+- [ ] T311 [P] The existing filter tests pass unmodified, at the count T301 recorded
+"""
+
+SPECKIT_TAIL = """---
+
+## Milestone closure map
+
+Every task appears in exactly one row's code column, so a task that belongs to no
+milestone is visible as one. A milestone is **CLOSED** only when its evidence task
+has run on the real path; its code tasks being checked closes nothing.
+
+| Milestone | Code tasks | Closed by evidence task(s) | State |
+|---|---|---|---|
+| D0 substrate | T301, T302 | T310 | **OPEN** |
+| D1 the story on the built path | T310, T311 | T311 | **OPEN** |
+
+## Dependencies & Execution Order
+
+- **Setup (Phase 1)**: no dependencies; T302 runs after T301 has recorded the baseline
+- **User Story 1 (Phase 2)**: depends on Phase 1
+
+## Notes
+
+The state column above is read from the evidence and nothing else. The ordering
+breach of the first implementation pass is not written off here; the record of it
+stays in this section, where no gate reads it.
+"""
+
+SPECKIT_TASKS = """# Tasks: The demo data path
+
+**Input**: Design documents from `/specs/004-demo/`
+
+**Tests**: NOT optional. Task ids start at T301 so that none collides with 003's.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: Can run in parallel (different files, no dependencies)
+
+""" + SPECKIT_PHASE_1 + "\n" + SPECKIT_PHASE_2 + "\n" + SPECKIT_TAIL
+
+
+def speckit_project(tmp_path, name="repo", text=SPECKIT_TASKS):
+    """A workdir whose specification is a Spec Kit `tasks.md` (speckit-tasks
+    adapter, chosen by the filename)."""
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    specs = root / "tasks.md"
+    specs.write_text(text)
+    (root / "package.json").write_text(json.dumps(PACKAGE))
+    return str(root), str(specs)
+
+
+def planned(tmp_path, name="repo", text=SPECKIT_TASKS):
+    workdir, specs = speckit_project(tmp_path, name, text)
+    plan = verification_plan.create_plan(workdir, specs)
+    canonical = os.path.join(workdir, ".wiggum", "verification", "plan.json")
+    verification_plan.persist_plan(
+        plan, os.path.join(workdir, "testautomation", "TEST_PLAN.md"), canonical
+    )
+    return plan, specs, canonical
+
+
+def rewrite_spec(specs, old, new, count=1):
+    with open(specs, encoding="utf-8") as handle:
+        text = handle.read()
+    assert old in text, old
+    with open(specs, "w", encoding="utf-8") as handle:
+        handle.write(text.replace(old, new, count))
 
 
 def test_create_is_deterministic_and_effect_witnessed(tmp_path):
@@ -40,7 +133,13 @@ def test_create_is_deterministic_and_effect_witnessed(tmp_path):
     plan1 = verification_plan.create_plan(workdir, specs, required=False)
     plan2 = verification_plan.create_plan(workdir, specs, required=False)
     assert plan1 == plan2
-    assert set(plan1["source"]) == {"bundleId", "contentHash", "specPath"}
+    assert set(plan1["source"]) == {
+        "bundleId",
+        "contentHash",
+        "projection",
+        "specPath",
+    }
+    assert plan1["source"]["projection"] == verification_plan.SPEC_PROJECTION
     assert plan1["source"]["specPath"] == specs
     assert plan1["project"]["workdir"] == workdir
     assert plan1["obligations"][0]["kind"] == "effect-witness"
@@ -102,15 +201,194 @@ def test_persist_requires_absolute_confined_outputs(tmp_path):
 
 
 def test_stale_source_hash_fails_closed(tmp_path):
+    """Every edit to the projection the plan consumed refuses the gate.
+
+    The hash covers the parsed phase set and each phase's task lines, so each of
+    these is a different specification from the one the obligations were derived
+    from and none of them may load: a rewritten criterion, a criterion deleted, a
+    task added, a phase renamed, a phase dropped, and the document replaced by one
+    with no phases at all.
+    """
     workdir, specs = project(tmp_path)
     plan = verification_plan.create_plan(workdir, specs)
     canonical = str(tmp_path / ".wiggum" / "verification" / "plan.json")
     verification_plan.persist_plan(
         plan, str(tmp_path / "testautomation" / "TEST_PLAN.md"), canonical
     )
+    with open(specs, encoding="utf-8") as handle:
+        original = handle.read()
+
+    mutations = [
+        # a criterion rewritten
+        original.replace(
+            "- [ ] Starting a job creates a durable status record",
+            "- [ ] Starting a job creates a durable audit record",
+        ),
+        # a criterion deleted
+        original.replace(
+            "- [ ] Existing behavior remains compatible\n", ""
+        ),
+        # a task added
+        original + "- [ ] The new obligation nobody planned for\n",
+        # a phase renamed
+        original.replace("## Phase 2 — Finish", "## Phase 2 — Conclude"),
+        # a phase dropped
+        original.split("## Phase 2 — Finish")[0],
+        # the document emptied of phases
+        "# Demo\n\nNothing to verify here.\n",
+    ]
+    for mutated in mutations:
+        assert mutated != original
+        with open(specs, "w", encoding="utf-8") as handle:
+            handle.write(mutated)
+        with pytest.raises(verification_plan.VerificationError, match="stale"):
+            verification_plan.load_plan(canonical, specs)
+
+    # And the untouched document still loads, so the refusals above are the edits
+    # and not the rule refusing everything.
+    with open(specs, "w", encoding="utf-8") as handle:
+        handle.write(original)
+    assert verification_plan.load_plan(canonical, specs)["source"][
+        "contentHash"
+    ] == plan["source"]["contentHash"]
+
+
+def test_a_closure_map_edit_does_not_stale_the_plan(tmp_path):
+    """Phase 15 of semantic-router-sovereign 002 (2026-09-11): the last phase's own
+    tasks rewrite the Milestone closure map inside tasks.md, and the whole-file hash
+    then refused the gate that work had just earned, with no attempt able to clear
+    it. The closure map is not in the projection the plan consumed."""
+    plan, specs, canonical = planned(tmp_path)
+    rewrite_spec(
+        specs,
+        "| D0 substrate | T301, T302 | T310 | **OPEN** |",
+        "| D0 substrate | T301, T302 | T310 | **CLOSED** 2026-09-11 "
+        "(`runs/live-2026-09-11.md`) |",
+    )
+    rewrite_spec(
+        specs,
+        "| D1 the story on the built path | T310, T311 | T311 | **OPEN** |",
+        "| D1 the story on the built path | T310, T311 | T311 | **CLOSED** "
+        "2026-09-11 (`runs/live-2026-09-11.md`), one disclosed residual carried "
+        "in it |",
+    )
+    loaded = verification_plan.load_plan(canonical, specs)
+    assert loaded["source"]["contentHash"] == plan["source"]["contentHash"]
+
+
+def test_a_prose_paragraph_edit_does_not_stale_the_plan(tmp_path):
+    """A release-gate statement, a run note appended to the file, a rewritten
+    explanation: prose the plan never read cannot make the plan stale."""
+    plan, specs, canonical = planned(tmp_path)
+    rewrite_spec(
+        specs,
+        "stays in this section, where no gate reads it.",
+        "stays in this section, where no gate reads it. The debt was paid on "
+        "2026-09-11 in the order the constitution requires — evidence, then "
+        "closure — and the record of it stays here.",
+    )
     with open(specs, "a", encoding="utf-8") as handle:
-        handle.write("\nchanged\n")
+        handle.write(
+            "\n## Release gate\n\nD0 and D1 ran on the real path; the "
+            "zero-tolerance tier passed on all nine groups, and the one policy "
+            "diff is listed review-pending.\n"
+        )
+    loaded = verification_plan.load_plan(canonical, specs)
+    assert loaded["source"]["contentHash"] == plan["source"]["contentHash"]
+
+
+def test_a_criterion_edit_still_stales_the_plan(tmp_path):
+    """The obligations were derived from this sentence; changing it changes what
+    the gate is judging, and no gate may run against criteria nobody reviewed."""
+    plan, specs, canonical = planned(tmp_path)
+    rewrite_spec(
+        specs,
+        "read back through `/api/decisions` rather than from the response the "
+        "mutation returned",
+        "read back through the response the mutation returned",
+    )
     with pytest.raises(verification_plan.VerificationError, match="stale"):
+        verification_plan.load_plan(canonical, specs)
+
+
+def test_an_added_task_still_stales_the_plan(tmp_path):
+    """A task added to a phase is an obligation the plan does not carry."""
+    plan, specs, canonical = planned(tmp_path)
+    rewrite_spec(
+        specs,
+        "- [ ] T311 [P] The existing filter tests pass unmodified",
+        "- [ ] T312 Add the placeholder-credential check to `tools/stack.sh doctor`\n"
+        "- [ ] T311 [P] The existing filter tests pass unmodified",
+    )
+    with pytest.raises(verification_plan.VerificationError, match="stale"):
+        verification_plan.load_plan(canonical, specs)
+
+
+def test_a_reordered_phase_still_stales_the_plan(tmp_path):
+    """Phase numbers are gate ids. The same tasks under swapped numbers is a
+    different run order, and the recorded plan's GATE1 would judge GATE2's work."""
+    plan, specs, canonical = planned(tmp_path)
+    reordered = SPECKIT_TASKS.replace(
+        SPECKIT_PHASE_1 + "\n" + SPECKIT_PHASE_2,
+        SPECKIT_PHASE_2.replace("## Phase 2:", "## Phase 1:", 1)
+        + "\n"
+        + SPECKIT_PHASE_1.replace("## Phase 1:", "## Phase 2:", 1),
+    )
+    assert reordered != SPECKIT_TASKS
+    with open(specs, "w", encoding="utf-8") as handle:
+        handle.write(reordered)
+    with pytest.raises(verification_plan.VerificationError, match="stale"):
+        verification_plan.load_plan(canonical, specs)
+
+
+def test_an_old_plan_without_projection_uses_the_raw_rule(tmp_path):
+    """Back-compat: a plan file written before `source.projection` existed was
+    hashed over the raw text, so it is checked over the raw text — a closure-map
+    edit stales it exactly as it did on the day it was written."""
+    plan, specs, canonical = planned(tmp_path)
+    with open(specs, encoding="utf-8") as handle:
+        original = handle.read()
+
+    legacy = json.loads(json.dumps(plan))
+    legacy["source"].pop("projection")
+    legacy["source"]["contentHash"] = verification_plan.sha256_text(
+        verification_plan.spec_source_text(original)
+    )
+    body = dict(legacy)
+    body.pop("contentHash")
+    legacy["contentHash"] = verification_plan.sha256_text(
+        verification_plan.canonical_json(body)
+    )
+    with open(canonical, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(legacy))
+
+    # Unchanged: loads. Ticked checkboxes: still loads (the old rule's own carve-out).
+    assert "projection" not in verification_plan.load_plan(canonical, specs)["source"]
+    rewrite_spec(specs, "- [ ] T301 Record", "- [x] T301 Record")
+    verification_plan.load_plan(canonical, specs)
+
+    # A closure-map cell — invisible to the new rule — stales the old plan.
+    rewrite_spec(specs, "| T310 | **OPEN** |", "| T310 | **CLOSED** |")
+    with pytest.raises(verification_plan.VerificationError, match="stale"):
+        verification_plan.load_plan(canonical, specs)
+
+
+def test_an_unknown_projection_fails_closed(tmp_path):
+    """A plan hashed by a projection this build cannot reproduce is refused rather
+    than checked by a rule that was not the one it was written under."""
+    plan, specs, canonical = planned(tmp_path)
+    document = json.loads(open(canonical, encoding="utf-8").read())
+    document["source"]["projection"] = "tasks-v99"
+    body = dict(document)
+    body.pop("contentHash")
+    document["contentHash"] = verification_plan.sha256_text(
+        verification_plan.canonical_json(body)
+    )
+    with open(canonical, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document))
+    with pytest.raises(
+        verification_plan.VerificationError, match="unsupported source projection"
+    ):
         verification_plan.load_plan(canonical, specs)
 
 
